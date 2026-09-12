@@ -6,4 +6,6 @@ test {
     _ = @import("format/manifest.zig");
     _ = @import("batch/commit.zig");
     _ = @import("recovery/scan.zig");
+    _ = @import("io/file.zig");
+    _ = @import("io/transfer.zig");
 }

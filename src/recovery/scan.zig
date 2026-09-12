@@ -35,7 +35,7 @@ pub const Scanner = struct {
         return .{ .bytes = bytes, .header = header, .mode = mode, .last_batch_id = last_batch_id };
     }
 
-    /// Returns a whole verified batch. Errors leave the scan position unchanged.
+    /// Errors leave the scan position unchanged.
     pub fn next(self: *Scanner) Error!?Batch {
         if (self.finished) return null;
         if (self.offset == self.bytes.len) {

@@ -35,7 +35,6 @@ pub const Header = struct {
         return bytes;
     }
 
-    /// Reads the first header without allocating memory.
     pub fn decode(bytes: []const u8) Error!Header {
         if (bytes.len < encoded_len) return error.TruncatedHeader;
         if (!std.mem.eql(u8, bytes[0..4], "ZGSG")) return error.InvalidMagic;
@@ -60,7 +59,6 @@ pub const Header = struct {
         return header;
     }
 
-    /// Checks that this is the expected segment, generation, and region.
     pub fn checkIdentity(self: Header, expected: Header) Error!void {
         try self.validate();
         try expected.validate();

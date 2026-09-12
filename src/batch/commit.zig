@@ -25,7 +25,6 @@ const Summary = struct {
     digest: [32]u8,
 };
 
-/// Builds a commit marker for complete records from one batch and region.
 pub fn seal(records: []const u8) Error![commit_len]u8 {
     const summary = try summarize(records);
     var bytes: [commit_len]u8 = undefined;
@@ -38,7 +37,7 @@ pub fn seal(records: []const u8) Error![commit_len]u8 {
     return bytes;
 }
 
-/// Checks batch contents, not disk durability. Keep both buffers unchanged during the call.
+/// A valid commit does not prove the batch was synced to disk.
 pub fn verify(records: []const u8, commit: []const u8) Error!void {
     if (commit.len < commit_len) return error.IncompleteCommit;
     if (commit.len != commit_len) return error.InvalidCommit;
@@ -84,7 +83,6 @@ fn summarize(records: []const u8) Error!Summary {
     }
 
     var digest: [32]u8 = undefined;
-    // Hash full records so missing, repeated, or reordered records change the digest.
     Sha256.hash(records, &digest, .{});
     return .{ .batch_id = batch_id, .count = count, .digest = digest };
 }

@@ -11,7 +11,6 @@ pub const Error = record.Error || Key.DecodeError || error{
     UnsupportedRecordKind,
 };
 
-/// The value uses your buffer. Only uncompressed puts and deletes are supported.
 pub const Entry = struct {
     header: record.Header,
     key: Key,
@@ -49,7 +48,7 @@ pub const Decoded = struct {
     consumed: usize,
 };
 
-/// Checks the first record. Keep the input buffer alive while using its value.
+/// The returned value borrows the input buffer.
 pub fn decode(bytes: []const u8) Error!Decoded {
     const header = try record.Header.decode(bytes);
     try validateHeader(header);
