@@ -8,4 +8,5 @@ test {
     _ = @import("recovery/scan.zig");
     _ = @import("io/file.zig");
     _ = @import("io/transfer.zig");
+    _ = @import("storage/writer.zig");
 }
