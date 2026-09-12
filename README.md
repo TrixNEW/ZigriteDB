@@ -1,6 +1,6 @@
 # ZigiteDB
 
-An embedded storage engine for Quark world and chunk data, written in Zig.
+An embedded storage engine for Quark world and chunk data, written in (https://github.com/ziglang/zig)[Zig] v0.16.0.
 
 Early development. The current implementation provides binary chunk-component
 keys and region mapping. Persistent storage is not yet implemented.
