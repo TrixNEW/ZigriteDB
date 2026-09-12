@@ -11,7 +11,7 @@ pub const Error = record.Error || Key.DecodeError || error{
     UnsupportedRecordKind,
 };
 
-/// Value bytes borrow the caller's buffer. Only raw puts and deletes are supported.
+/// The value uses your buffer. Only uncompressed puts and deletes are supported.
 pub const Entry = struct {
     header: record.Header,
     key: Key,
@@ -25,7 +25,7 @@ pub const Entry = struct {
         return totalSize(self.header.stored_len);
     }
 
-    /// The destination must not overlap value. Errors leave it unchanged.
+    /// Keep the output buffer separate from value. Errors leave the buffer unchanged.
     pub fn encode(self: Entry, destination: []u8) Error![]u8 {
         const len = try self.size();
         if (destination.len < len) return error.BufferTooSmall;
@@ -49,7 +49,7 @@ pub const Decoded = struct {
     consumed: usize,
 };
 
-/// Verifies one record prefix. The returned value borrows bytes.
+/// Checks the first record. Keep the input buffer alive while using its value.
 pub fn decode(bytes: []const u8) Error!Decoded {
     const header = try record.Header.decode(bytes);
     try validateHeader(header);

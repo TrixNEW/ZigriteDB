@@ -48,7 +48,7 @@ pub const Header = struct {
         return bytes;
     }
 
-    /// Reads one header prefix without allocating.
+    /// Reads the first header without allocating memory.
     pub fn decode(bytes: []const u8) Error!Header {
         if (bytes.len < encoded_len) return error.TruncatedHeader;
         if (!std.mem.eql(u8, bytes[0..4], "ZGRC")) return error.InvalidMagic;

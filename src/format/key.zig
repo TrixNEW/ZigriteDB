@@ -15,7 +15,7 @@ pub const Region = struct {
     z: i32,
 };
 
-/// Allocation-free encoding. Non-subchunk keys require subchunk_y == 0.
+/// Uses no heap memory. Only subchunks can have a nonzero subchunk_y.
 pub const Key = struct {
     dimension: i32,
     chunk_x: i32,
@@ -55,7 +55,7 @@ pub const Key = struct {
             return error.InvalidSubchunkY;
     }
 
-    /// Floor division maps negative chunk coordinates to the correct 32x32 region
+    /// Rounds down so negative chunk coordinates map to the right region.
     pub fn region(self: Key) Region {
         return .{
             .dimension = self.dimension,
