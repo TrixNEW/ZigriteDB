@@ -24,7 +24,7 @@ fn put(value: []const u8) entry.Entry {
     };
 }
 
-test "raw values and tombstones round trip without allocation" {
+test "puts and deletes round trip" {
     var buffer: [256]u8 = undefined;
     for ([_][]const u8{ "", "chunk data", &.{ 0, 255, 0, 128 } }) |value| {
         const original = put(value);
@@ -32,7 +32,8 @@ test "raw values and tombstones round trip without allocation" {
         const decoded = try entry.decode(bytes);
         try testing.expectEqualDeep(original, decoded.entry);
         try testing.expectEqual(bytes.len, decoded.consumed);
-        try testing.expectEqual(@intFromPtr(bytes.ptr) + db.record.encoded_len + db.Key.encoded_len, @intFromPtr(decoded.entry.value.ptr));
+        const value_start = db.record.encoded_len + db.Key.encoded_len;
+        try testing.expect(bytes[value_start..].ptr == decoded.entry.value.ptr);
     }
 
     const tombstone: entry.Entry = .{
@@ -44,7 +45,7 @@ test "raw values and tombstones round trip without allocation" {
     try testing.expectEqualDeep(tombstone, decoded.entry);
 }
 
-test "decode consumes only the first record" {
+test "read one record at a time" {
     var buffer: [256]u8 = undefined;
     const first = try put("first").encode(&buffer);
     const first_len = first.len;
@@ -52,10 +53,11 @@ test "decode consumes only the first record" {
     const decoded = try entry.decode(buffer[0 .. first_len + second.len]);
     try testing.expectEqual(first_len, decoded.consumed);
     try testing.expectEqualStrings("first", decoded.entry.value);
-    try testing.expectEqualStrings("second", (try entry.decode(buffer[decoded.consumed .. first_len + second.len])).entry.value);
+    const next = try entry.decode(buffer[decoded.consumed .. first_len + second.len]);
+    try testing.expectEqualStrings("second", next.entry.value);
 }
 
-test "every incomplete record is rejected" {
+test "incomplete record" {
     var buffer: [256]u8 = undefined;
     const bytes = try put("value").encode(&buffer);
     for (0..bytes.len) |len| {
@@ -64,7 +66,7 @@ test "every incomplete record is rejected" {
     }
 }
 
-test "every payload and checksum bit is protected" {
+test "damaged record" {
     var buffer: [256]u8 = undefined;
     const bytes = try put("value").encode(&buffer);
     for (db.record.encoded_len * 8..bytes.len * 8) |bit| {
@@ -75,7 +77,7 @@ test "every payload and checksum bit is protected" {
     }
 }
 
-test "encoding errors leave destination unchanged" {
+test "failed encode leaves output unchanged" {
     var buffer = [_]u8{0xaa} ** 128;
     const before = buffer;
     try testing.expectError(error.BufferTooSmall, put("value").encode(buffer[0..entry.overhead]));
@@ -92,7 +94,7 @@ test "encoding errors leave destination unchanged" {
     try testing.expectEqualSlices(u8, &before, &buffer);
 }
 
-test "commit and compressed payloads fail explicitly" {
+test "unsupported record types" {
     var buffer: [128]u8 = undefined;
     var invalid = put("");
     invalid.header.kind = .commit;
@@ -108,7 +110,7 @@ test "commit and compressed payloads fail explicitly" {
     try testing.expectError(error.UnsupportedCompression, entry.decode(&compressed));
 }
 
-test "valid checksum cannot bypass canonical key validation" {
+test "invalid key with a valid checksum" {
     var buffer: [128]u8 = undefined;
     const bytes = try put("").encode(&buffer);
     bytes[db.record.encoded_len + 12] = @intFromEnum(db.Component.metadata);
@@ -117,7 +119,7 @@ test "valid checksum cannot bypass canonical key validation" {
     try testing.expectError(error.InvalidSubchunkY, entry.decode(bytes));
 }
 
-test "oversized lengths fail before payload access" {
+test "oversized record" {
     var bytes = try put("").header.encode();
     std.mem.writeInt(u32, bytes[8..12], std.math.maxInt(u32), .little);
     std.mem.writeInt(u32, bytes[12..16], std.math.maxInt(u32), .little);

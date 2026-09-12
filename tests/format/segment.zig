@@ -12,7 +12,7 @@ fn checksum(bytes: *[segment.encoded_len]u8) void {
     std.mem.writeInt(u32, bytes[44..48], std.hash.crc.Crc32Iscsi.hash(bytes[0..44]), .little);
 }
 
-test "segment header has deterministic little-endian fields" {
+test "segment header bytes" {
     const bytes = try header.encode();
     try testing.expectEqualSlices(u8, &.{
         'Z', 'G', 'S', 'G', 1,   0,   0,   0,
@@ -25,7 +25,7 @@ test "segment header has deterministic little-endian fields" {
     try testing.expectEqualDeep(header, try segment.Header.decode(&bytes));
 }
 
-test "extreme identity values round trip" {
+test "large segment IDs and negative coordinates" {
     const extreme: segment.Header = .{
         .segment_id = std.math.maxInt(u64),
         .generation = std.math.maxInt(u64),
@@ -38,7 +38,7 @@ test "extreme identity values round trip" {
     try testing.expectEqualDeep(extreme, try segment.Header.decode(&(try extreme.encode())));
 }
 
-test "all truncations and single bit corruption are rejected" {
+test "damaged segment header" {
     const bytes = try header.encode();
     for (0..segment.encoded_len) |len| {
         try testing.expectError(error.TruncatedHeader, segment.Header.decode(bytes[0..len]));
@@ -56,7 +56,7 @@ test "all truncations and single bit corruption are rejected" {
     }
 }
 
-test "reserved fields remain invalid with a valid checksum" {
+test "reserved segment fields" {
     for ([_]usize{ 6, 7, 36, 37, 38, 39, 40, 41, 42, 43 }) |offset| {
         var bytes = try header.encode();
         bytes[offset] = 1;
@@ -65,7 +65,7 @@ test "reserved fields remain invalid with a valid checksum" {
     }
 }
 
-test "zero identifiers fail encoding and decoding" {
+test "zero segment IDs" {
     var invalid = header;
     invalid.segment_id = 0;
     try testing.expectError(error.InvalidSegmentId, invalid.encode());
@@ -82,7 +82,7 @@ test "zero identifiers fail encoding and decoding" {
     }
 }
 
-test "every identity field must match" {
+test "wrong segment identity" {
     const decoded = try segment.Header.decode(&(try header.encode()));
     try decoded.checkIdentity(header);
     inline for (.{ "segment_id", "generation" }) |field| {
@@ -97,7 +97,7 @@ test "every identity field must match" {
     }
 }
 
-test "record data following a segment header is not consumed" {
+test "header followed by records" {
     var bytes: [segment.encoded_len + 16]u8 = undefined;
     @memcpy(bytes[0..segment.encoded_len], &(try header.encode()));
     @memset(bytes[segment.encoded_len..], 255);

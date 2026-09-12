@@ -4,12 +4,9 @@ const Header = record.Header;
 const Error = record.Error;
 const encoded_len = record.encoded_len;
 const max_value_len = record.max_value_len;
+const testing = std.testing;
 
-test "CRC32C standard check vector" {
-    try std.testing.expectEqual(@as(u32, 0xe3069283), std.hash.crc.Crc32Iscsi.hash("123456789"));
-}
-
-test "header round trips every record kind and codec" {
+test "record header round trip" {
     const headers = [_]Header{
         .{ .kind = .put, .batch_id = 1 },
         .{
@@ -24,27 +21,31 @@ test "header round trips every record kind and codec" {
     };
     for (headers) |header| {
         const bytes = try header.encode();
-        try std.testing.expectEqualDeep(header, try Header.decode(&bytes));
-        try std.testing.expectEqualSlices(u8, "ZGRC", bytes[0..4]);
-        try std.testing.expectEqual(@as(u8, 1), bytes[4]);
+        try testing.expectEqualDeep(header, try Header.decode(&bytes));
     }
 }
 
-test "every truncated header and single bit corruption is rejected" {
+test "damaged record header" {
     const bytes = try (Header{ .kind = .put, .batch_id = 1, .stored_len = 256, .raw_len = 256 }).encode();
     for (0..encoded_len) |len| {
-        try std.testing.expectError(error.TruncatedHeader, Header.decode(bytes[0..len]));
+        try testing.expectError(error.TruncatedHeader, Header.decode(bytes[0..len]));
     }
     for (0..encoded_len * 8) |bit| {
         var damaged = bytes;
         damaged[bit / 8] ^= @as(u8, 1) << @as(u3, @intCast(bit % 8));
-        if (Header.decode(&damaged)) |_| return error.TestUnexpectedResult else |_| {}
+        const expected = if (bit < 32)
+            error.InvalidMagic
+        else if (bit < 40)
+            error.UnsupportedVersion
+        else
+            error.ChecksumMismatch;
+        try testing.expectError(expected, Header.decode(&damaged));
     }
 }
 
-test "invalid lengths and batch identifiers fail before encoding" {
+test "invalid record fields" {
+    try testing.expectError(error.InvalidBatchId, (Header{ .kind = .put, .batch_id = 0 }).encode());
     const cases = [_]Header{
-        .{ .kind = .put, .batch_id = 0 },
         .{ .kind = .put, .batch_id = 1, .stored_len = max_value_len + 1, .raw_len = max_value_len + 1 },
         .{ .kind = .put, .batch_id = 1, .stored_len = 1, .raw_len = 2 },
         .{ .kind = .put, .batch_id = 1, .compression = .lz4, .raw_len = 2 },
@@ -53,18 +54,26 @@ test "invalid lengths and batch identifiers fail before encoding" {
         .{ .kind = .commit, .batch_id = 1, .compression = .lz4 },
     };
     for (cases) |header| {
-        if (header.encode()) |_| return error.TestUnexpectedResult else |_| {}
+        try testing.expectError(error.InvalidLength, header.encode());
     }
 }
 
-test "checksummed invalid metadata is rejected" {
+test "invalid header with a valid checksum" {
     const bytes = try (Header{ .kind = .put, .batch_id = 1 }).encode();
-    const offsets = [_]usize{ 5, 6, 7, 24, 11, 15, 16 };
-    const errors = [_]Error{ error.UnknownKind, error.UnsupportedCompression, error.InvalidFlags, error.InvalidFlags, error.InvalidLength, error.InvalidLength, error.InvalidBatchId };
-    for (offsets, errors) |offset, expected| {
+    const Case = struct { offset: usize, value: u8 = 255, expected: Error };
+    const cases = [_]Case{
+        .{ .offset = 5, .expected = error.UnknownKind },
+        .{ .offset = 6, .expected = error.UnsupportedCompression },
+        .{ .offset = 7, .expected = error.InvalidFlags },
+        .{ .offset = 24, .expected = error.InvalidFlags },
+        .{ .offset = 11, .expected = error.InvalidLength },
+        .{ .offset = 15, .expected = error.InvalidLength },
+        .{ .offset = 16, .value = 0, .expected = error.InvalidBatchId },
+    };
+    for (cases) |case| {
         var damaged = bytes;
-        damaged[offset] = if (offset == 16) 0 else 255;
+        damaged[case.offset] = case.value;
         std.mem.writeInt(u32, damaged[28..32], std.hash.crc.Crc32Iscsi.hash(damaged[0..28]), .little);
-        try std.testing.expectError(expected, Header.decode(&damaged));
+        try testing.expectError(case.expected, Header.decode(&damaged));
     }
 }

@@ -5,3 +5,6 @@ pub const record = @import("format/record.zig");
 pub const entry = @import("format/entry.zig");
 pub const segment = @import("format/segment.zig");
 pub const manifest = @import("format/manifest.zig");
+pub const batch = @import("batch/commit.zig");
+pub const WriteBatch = @import("batch/write.zig").WriteBatch;
+pub const recovery = @import("recovery/scan.zig");
