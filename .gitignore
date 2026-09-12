@@ -2,3 +2,4 @@
 zig-out/
 *.o
 PLAN.md
+/docs/
