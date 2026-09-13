@@ -16,7 +16,7 @@ pub const Options = struct {
     batch_buffer_size: usize = 1024 * 1024,
     durability: writer_module.Durability = .sync,
 
-    fn validate(self: Options) !void {
+    pub fn validate(self: Options) !void {
         if (self.max_segments == 0 or self.max_segments > manifest.max_segments) return error.InvalidSegmentCount;
 
         if (self.batch_buffer_size < entry.overhead + commit.commit_len or

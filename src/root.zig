@@ -13,6 +13,7 @@ pub const segment = @import("format/segment.zig");
 pub const storage = @import("io/file.zig");
 pub const file_recovery = @import("recovery/file_scan.zig");
 pub const recovery = @import("recovery/scan.zig");
+pub const Store = @import("shard/store.zig").Store;
 pub const shard = @import("shard/shard.zig");
 pub const directory = @import("storage/directory.zig");
 pub const publication = @import("storage/publication.zig");
