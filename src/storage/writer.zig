@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const commit = @import("../batch/commit.zig");
+const record_entry = @import("../format/entry.zig");
 const WriteBatch = @import("../batch/write.zig").WriteBatch;
 const segment = @import("../format/segment.zig");
 const file_scan = @import("../recovery/file_scan.zig");
@@ -66,11 +68,21 @@ pub fn Writer(comptime Device: type) type {
         }
         pub fn append(self: *Self, batch: WriteBatch, scratch: []u8, durability: Durability) !AppendResult {
             if (self.failed) return error.WriterFailed;
-            if (batch.entries.len == 0) return error.EmptyBatch;
 
-            const entry = &batch.entries[0];
-            const id = entry.header.batch_id;
-            const region = entry.key.region();
+            const bytes = try batch.encode(scratch);
+            return self.appendEncoded(bytes, durability);
+        }
+
+        pub fn appendEncoded(self: *Self, bytes: []const u8, durability: Durability) !AppendResult {
+            if (self.failed) return error.WriterFailed;
+            if (bytes.len < commit.commit_len) return error.InvalidCommit;
+
+            const records = bytes[0 .. bytes.len - commit.commit_len];
+            try commit.verify(records, bytes[records.len..]);
+
+            const first = try record_entry.decode(records);
+            const id = first.entry.header.batch_id;
+            const region = first.entry.key.region();
 
             if (id <= self.last_batch_id) return error.BatchOrder;
 
@@ -81,13 +93,8 @@ pub fn Writer(comptime Device: type) type {
 
             if (!same_region) return error.RegionMismatch;
 
-            const size = try batch.size();
-            const end = std.math.add(u64, self.offset, size) catch return error.SegmentFull;
-
+            const end = std.math.add(u64, self.offset, bytes.len) catch return error.SegmentFull;
             if (end > self.max_size) return error.SegmentFull;
-
-            const bytes = try batch.encode(scratch);
-
             self.device.writeAll(bytes, self.offset) catch |err| {
                 self.failed = true;
                 return err;

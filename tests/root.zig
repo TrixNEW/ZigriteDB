@@ -11,4 +11,5 @@ test {
     _ = @import("io_transfer.zig");
     _ = @import("storage_writer.zig");
     _ = @import("index.zig");
+    _ = @import("shard.zig");
 }

@@ -21,6 +21,17 @@ pub const Location = struct {
     raw_len: u32,
 };
 
+pub const Prepared = struct {
+    allocator: std.mem.Allocator,
+    changes: Pending,
+    batch_id: u64,
+
+    pub fn deinit(self: *Prepared) void {
+        self.changes.deinit(self.allocator);
+        self.* = undefined;
+    }
+};
+
 pub const Index = struct {
     allocator: std.mem.Allocator,
     region: Region,
@@ -77,15 +88,41 @@ pub const Index = struct {
     }
 
     fn apply(self: *Index, batch: recovery.Batch, segment_id: u64) !void {
+        var prepared = try self.prepare(batch, segment_id);
+        defer prepared.deinit();
+
+        self.publish(&prepared);
+    }
+
+    pub fn prepare(self: *Index, batch: recovery.Batch, segment_id: u64) !Prepared {
+        if (segment_id == 0) return error.InvalidSegmentId;
+        if (batch.id <= self.last_batch_id) return error.BatchOrder;
+        if (batch.records.len == 0) return error.EmptyBatch;
+        if (batch.records.len > commit.max_bytes) return error.BatchTooLarge;
+        if (batch.end_offset < batch.records.len + commit.commit_len) return error.InvalidLength;
+
         var pending: Pending = .empty;
-        defer pending.deinit(self.allocator);
+        errdefer pending.deinit(self.allocator);
 
         const start = batch.end_offset - commit.commit_len - batch.records.len;
         var offset: usize = 0;
+        var record_count: usize = 0;
 
         while (offset < batch.records.len) {
             const decoded = try entry.decode(batch.records[offset..]);
             const item = decoded.entry;
+            if (record_count == commit.max_records) return error.BatchTooLarge;
+            if (item.header.batch_id != batch.id) return error.BatchIdMismatch;
+
+            const region = item.key.region();
+            const same_region =
+                region.dimension == self.region.dimension and
+                region.x == self.region.x and
+                region.z == self.region.z;
+
+            if (!same_region) return error.RegionMismatch;
+
+            record_count += 1;
             const key = try item.key.encode();
             const location: ?Location = if (item.header.kind == .delete) null else .{
                 .segment_id = segment_id,
@@ -113,9 +150,17 @@ pub const Index = struct {
         const new_count = @as(u64, self.entries.count()) - removals + additions;
         if (new_count > self.max_keys) return error.IndexFull;
 
-        // Reserve before changing any entries.
         try self.entries.ensureUnusedCapacity(self.allocator, additions);
-        changes = pending.iterator();
+
+        return .{
+            .allocator = self.allocator,
+            .changes = pending,
+            .batch_id = batch.id,
+        };
+    }
+
+    pub fn publish(self: *Index, prepared: *Prepared) void {
+        var changes = prepared.changes.iterator();
 
         while (changes.next()) |change| {
             if (change.value_ptr.*) |location| {
@@ -125,7 +170,7 @@ pub const Index = struct {
             }
         }
 
-        self.last_batch_id = batch.id;
+        self.last_batch_id = prepared.batch_id;
     }
 };
 
