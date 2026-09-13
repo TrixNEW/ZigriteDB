@@ -1,8 +1,6 @@
 <p align="center">
-  <img src="assets/zigritedb_smaller.png" alt="ZigriteDB" width="420">
+  <img src="assets/zigritedb_smaller.png" alt="ZigriteDB" width="260">
 </p>
-
-<h1 align="center">ZigriteDB</h1>
 
 <p align="center">
   An embedded storage engine for Minecraft Bedrock world and chunk data, written in <a href="https://github.com/ziglang/zig">Zig</a> v0.16.0.
