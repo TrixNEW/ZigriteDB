@@ -10,10 +10,20 @@ const Directory = @import("../storage/directory.zig").Directory;
 const files = @import("../storage/files.zig");
 const publication = @import("../storage/publication.zig");
 const writer = @import("../storage/writer.zig");
+const Scanner = @import("../recovery/file_scan.zig").Scanner(File);
+const CompactionOutput = @import("../storage/compaction_output.zig").CompactionOutput;
+const compactBatch = @import("../storage/compact_batch.zig").compactBatch;
 const shard_module = @import("shard.zig");
 
 pub const Options = shard_module.Options;
 const Shard = shard_module.Shard(File);
+
+pub const CompactionResult = struct {
+    generation: u64,
+    segment_count: usize,
+    source_bytes: u64,
+    output_bytes: u64,
+};
 
 pub const Store = struct {
     allocator: std.mem.Allocator,
@@ -143,6 +153,91 @@ pub const Store = struct {
         };
     }
 
+    /// Installs a compacted generation and leaves the old files intact.
+    pub fn compact(self: *Store) !CompactionResult {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.Closed;
+        if (self.shard.writer.failed) return error.WriterFailed;
+        const generation = std.math.add(u64, self.shard.index.generation, 1) catch return error.GenerationExhausted;
+        const options = self.shard.options;
+        try self.shard.flush();
+
+        const ids = try self.allocator.alloc(u64, options.max_segments);
+        defer self.allocator.free(ids);
+        const filtered = try self.allocator.alloc(u8, options.batch_buffer_size);
+        defer self.allocator.free(filtered);
+        const manifest_buffer = try self.allocator.alloc(u8, manifest.header_len + options.max_segments * 8 + 4);
+        defer self.allocator.free(manifest_buffer);
+        const devices = try self.allocator.alloc(File, options.max_segments);
+        errdefer self.allocator.free(devices);
+        var opened: usize = 0;
+        errdefer for (devices[0..opened]) |device| device.handle.close(self.io);
+
+        var output: CompactionOutput = .{
+            .io = self.io,
+            .dir = self.directory.dir,
+            .generation = generation,
+            .region = self.shard.index.region,
+            .max_size = options.max_segment_size,
+            .ids = ids,
+        };
+        defer output.deinit();
+        var previous: u64 = 0;
+        var source_bytes: u64 = 0;
+        for (self.devices[0..self.file_count], self.shard.segment_ids[0..self.file_count], 0..) |device, id, position| {
+            var scanner = try Scanner.init(device, .{
+                .generation = self.shard.index.generation,
+                .segment_id = id,
+                .region = self.shard.index.region,
+            }, if (position == self.file_count - 1) .active else .sealed, previous, options.max_segment_size);
+            source_bytes = try std.math.add(u64, source_bytes, scanner.length);
+            while (try scanner.next(self.shard.scratch)) |batch| {
+                try output.append(try compactBatch(&self.shard.index, id, batch, filtered));
+            }
+            if (scanner.has_tail) return error.NeedsRecovery;
+            previous = scanner.last_batch_id;
+        }
+        if (previous != self.shard.index.last_batch_id) return error.FileChanged;
+        try output.finish();
+        const metadata: manifest.Manifest = .{
+            .generation = generation,
+            .region = self.shard.index.region,
+            .segments = ids[0..output.count],
+        };
+        const bytes = try metadata.encode(manifest_buffer);
+        for (metadata.segments, 0..) |id, position| {
+            devices[opened] = .{
+                .handle = try files.openSegment(self.directory.dir, self.io, generation, id, position == output.count - 1),
+                .io = self.io,
+            };
+            opened += 1;
+        }
+        var next = try Shard.openSegments(self.allocator, self.io, devices[0..opened], metadata, options);
+        errdefer next.deinit();
+        var publisher: publication.Publisher(*Directory) = .{ .backend = &self.directory };
+        publisher.publish(bytes) catch |err| {
+            self.shard.writer.failed = true;
+            return err;
+        };
+
+        var old = self.shard;
+        defer old.deinit();
+        const old_devices = self.devices;
+        const old_count = self.file_count;
+        self.shard = next;
+        self.devices = devices;
+        self.file_count = opened;
+        for (old_devices[0..old_count]) |device| device.handle.close(self.io);
+        self.allocator.free(old_devices);
+
+        return .{
+            .generation = generation,
+            .segment_count = opened,
+            .source_bytes = source_bytes,
+            .output_bytes = output.bytes,
+        };
+    }
     pub fn get(self: *Store, key: Key, output: []u8) !?[]const u8 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);

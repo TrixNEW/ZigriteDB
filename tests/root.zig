@@ -18,4 +18,5 @@ test {
     _ = @import("shard_rotation.zig");
     _ = @import("directory.zig");
     _ = @import("store.zig");
+    _ = @import("store_compaction.zig");
 }
