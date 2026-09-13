@@ -12,4 +12,5 @@ test {
     _ = @import("storage_writer.zig");
     _ = @import("index.zig");
     _ = @import("shard.zig");
+    _ = @import("shard_rotation.zig");
 }
