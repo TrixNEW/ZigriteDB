@@ -1,9 +1,9 @@
 const std = @import("std");
 
+const commit = @import("../batch/commit.zig");
 const entry = @import("../format/entry.zig");
 const record = @import("../format/record.zig");
 const segment = @import("../format/segment.zig");
-const commit = @import("../batch/commit.zig");
 
 pub const Error = commit.Error || segment.Error || error{
     IncompleteBatch,

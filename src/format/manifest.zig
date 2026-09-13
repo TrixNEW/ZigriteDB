@@ -1,7 +1,7 @@
 const std = @import("std");
+const Crc32c = std.hash.crc.Crc32Iscsi;
 
 const Region = @import("key.zig").Region;
-const Crc32c = std.hash.crc.Crc32Iscsi;
 
 pub const header_len = 48;
 pub const max_segments = 4096;

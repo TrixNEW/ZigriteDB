@@ -1,11 +1,10 @@
 const std = @import("std");
-
-const entry = @import("../format/entry.zig");
-const record = @import("../format/record.zig");
-const Region = @import("../format/key.zig").Region;
-
 const Crc32c = std.hash.crc.Crc32Iscsi;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+
+const entry = @import("../format/entry.zig");
+const Region = @import("../format/key.zig").Region;
+const record = @import("../format/record.zig");
 
 pub const commit_len = 80;
 pub const max_records = 4096;
@@ -47,7 +46,7 @@ pub fn seal(records: []const u8) Error![commit_len]u8 {
     return bytes;
 }
 
-/// A valid commit does not prove the batch was synced to disk btw
+/// A valid commit does not prove the batch was synced to disk
 pub fn verify(records: []const u8, commit: []const u8) Error!void {
     if (commit.len < commit_len) return error.IncompleteCommit;
     if (commit.len != commit_len) return error.InvalidCommit;

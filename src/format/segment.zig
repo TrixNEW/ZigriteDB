@@ -1,9 +1,8 @@
 const std = @import("std");
+const Crc32c = std.hash.crc.Crc32Iscsi;
 
 const Key = @import("key.zig").Key;
 const record = @import("record.zig");
-
-const Crc32c = std.hash.crc.Crc32Iscsi;
 
 pub const checksum_len = 4;
 pub const overhead = record.encoded_len + Key.encoded_len + checksum_len;

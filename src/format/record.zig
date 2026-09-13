@@ -1,5 +1,4 @@
 const std = @import("std");
-
 const Crc32c = std.hash.crc.Crc32Iscsi;
 
 pub const encoded_len = 32;

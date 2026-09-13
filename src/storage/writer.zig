@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const segment = @import("../format/segment.zig");
 const WriteBatch = @import("../batch/write.zig").WriteBatch;
+const segment = @import("../format/segment.zig");
 
 pub const Durability = enum {
     sync,
