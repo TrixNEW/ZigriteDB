@@ -19,6 +19,7 @@ pub const recovery = @import("recovery/scan.zig");
 pub const Store = @import("shard/store.zig").Store;
 pub const shard = @import("shard/shard.zig");
 pub const directory = @import("storage/directory.zig");
+pub const reclamation = @import("storage/reclamation.zig");
 pub const publication = @import("storage/publication.zig");
 pub const segment_writer = @import("storage/writer.zig");
 

@@ -15,6 +15,11 @@ pub fn openSegment(dir: std.Io.Dir, io: std.Io, generation: u64, id: u64, writab
     return openRegular(dir, io, name, writable);
 }
 
+pub fn removeSegment(dir: std.Io.Dir, io: std.Io, generation: u64, id: u64) !void {
+    var buffer: [48]u8 = undefined;
+    const name = try segmentName(&buffer, generation, id);
+    try dir.deleteFile(io, name);
+}
 pub fn openManifest(dir: std.Io.Dir, io: std.Io) !std.Io.File {
     return openRegular(dir, io, "MANIFEST", false);
 }

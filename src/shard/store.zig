@@ -13,6 +13,7 @@ const writer = @import("../storage/writer.zig");
 const Scanner = @import("../recovery/file_scan.zig").Scanner(File);
 const CompactionOutput = @import("../storage/compaction_output.zig").CompactionOutput;
 const compactBatch = @import("../storage/compact_batch.zig").compactBatch;
+const reclamation = @import("../storage/reclamation.zig");
 const shard_module = @import("shard.zig");
 
 pub const Options = shard_module.Options;
@@ -23,6 +24,7 @@ pub const CompactionResult = struct {
     segment_count: usize,
     source_bytes: u64,
     output_bytes: u64,
+    cleanup: reclamation.Result,
 };
 
 pub const Store = struct {
@@ -153,7 +155,7 @@ pub const Store = struct {
         };
     }
 
-    /// Installs a compacted generation and leaves the old files intact.
+    /// Installs a compacted generation, then reclaims the old segments.
     pub fn compact(self: *Store) !CompactionResult {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -236,8 +238,18 @@ pub const Store = struct {
             .segment_count = opened,
             .source_bytes = source_bytes,
             .output_bytes = output.bytes,
+            .cleanup = reclamation.reclaim(&self.directory, generation, old.index.generation, old.segment_ids[0..old_count]),
         };
     }
+
+    pub fn reclaim(self: *Store, generation: u64, ids: []const u64) !reclamation.Result {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.Closed;
+        if (self.shard.writer.failed) return error.WriterFailed;
+        return reclamation.reclaim(&self.directory, self.shard.index.generation, generation, ids);
+    }
+
     pub fn get(self: *Store, key: Key, output: []u8) !?[]const u8 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);

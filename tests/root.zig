@@ -19,4 +19,5 @@ test {
     _ = @import("directory.zig");
     _ = @import("store.zig");
     _ = @import("store_compaction.zig");
+    _ = @import("reclamation.zig");
 }

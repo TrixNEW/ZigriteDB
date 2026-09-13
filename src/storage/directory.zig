@@ -87,6 +87,15 @@ pub const Directory = struct {
         self.state = .idle;
     }
 
+    pub fn removeSegment(self: *Directory, generation: u64, id: u64) !void {
+        if (self.state != .idle) return error.InvalidPublicationState;
+        try @import("files.zig").removeSegment(self.dir, self.io, generation, id);
+    }
+
+    pub fn syncEntries(self: *Directory) !void {
+        if (self.state != .idle) return error.InvalidPublicationState;
+        try self.directoryFile().sync(self.io);
+    }
     fn directoryFile(self: *const Directory) std.Io.File {
         return .{
             .handle = self.dir.handle,

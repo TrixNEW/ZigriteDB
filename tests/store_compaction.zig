@@ -6,7 +6,7 @@ const support = @import("support/shard.zig");
 const item = support.item;
 const region = support.header.region;
 
-test "store installs compacted generations and keeps old files" {
+test "store installs compacted generations and reclaims old files" {
     if (!db.directory.supported) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -14,11 +14,18 @@ test "store installs compacted generations and keeps old files" {
     defer store.deinit();
     _ = try store.write(.{ .entries = &.{item(1, 0, "old")} });
     _ = try store.write(.{ .entries = &.{item(2, 0, "saved")} });
+    const unrelated = try tmp.dir.createFile(io, "0000000000000001-0000000000000063.segment", .{ .exclusive = true });
+    unrelated.close(io);
     const result = try store.compact();
     try testing.expectEqual(@as(u64, 2), result.generation);
     try testing.expectEqual(@as(usize, 1), result.segment_count);
     try testing.expect(result.output_bytes < result.source_bytes);
-    _ = try tmp.dir.statFile(io, "0000000000000001-0000000000000001.segment", .{});
+    _ = try tmp.dir.statFile(io, "0000000000000001-0000000000000063.segment", .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "0000000000000001-0000000000000001.segment", .{}));
+    try testing.expectEqual(@as(usize, 2), result.cleanup.removed_segments);
+    try testing.expect(result.cleanup.synced and result.cleanup.failure == null);
+    try testing.expectEqual(error.InvalidGeneration, (try store.reclaim(2, &.{1})).failure.?);
+    try testing.expectEqual(@as(usize, 0), (try store.reclaim(1, &.{ 1, 2 })).retained_segments);
     var value: [128]u8 = undefined;
     try testing.expectEqualStrings("saved", (try store.get(item(2, 0, "").key, &value)).?);
     _ = try store.write(.{ .entries = &.{item(3, 0, null)} });
@@ -54,6 +61,7 @@ test "failed compaction publication keeps the old view and stops writes" {
     const report = try db.inspection.inspect(testing.allocator, io, tmp.dir, .{}, &scratch, &orphans);
     try testing.expectEqual(@as(?u64, 1), report.generation);
     try testing.expect(report.temporary_manifest);
+    _ = try tmp.dir.statFile(io, "0000000000000001-0000000000000001.segment", .{});
 }
 
 test "compaction never overwrites an existing generation" {
@@ -86,5 +94,22 @@ fn compactWithAllocator(allocator: std.mem.Allocator) !void {
         try testing.expectEqual(@as(u64, 1), store.shard.index.generation);
         return err;
     };
+    try store.close();
+}
+
+test "cleanup reports retained paths without interrupting the store" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{});
+    defer store.deinit();
+    _ = try store.compact();
+    const name = "0000000000000001-0000000000000009.segment";
+    try tmp.dir.createDir(io, name, .default_dir);
+    const result = try store.reclaim(1, &.{9});
+    try testing.expectEqual(@as(usize, 1), result.retained_segments);
+    try testing.expect(result.failure != null);
+    _ = try tmp.dir.statFile(io, name, .{});
+    _ = try store.write(.{ .entries = &.{item(1, 0, "saved")} });
     try store.close();
 }
