@@ -1,5 +1,5 @@
 const std = @import("std");
-const segment = @import("zigitedb").segment;
+const segment = @import("zigritedb").segment;
 const testing = std.testing;
 
 const header: segment.Header = .{

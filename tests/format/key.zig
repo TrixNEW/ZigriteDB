@@ -1,5 +1,5 @@
 const std = @import("std");
-const db = @import("zigitedb");
+const db = @import("zigritedb");
 const Key = db.Key;
 const Component = db.Component;
 const Region = db.Region;

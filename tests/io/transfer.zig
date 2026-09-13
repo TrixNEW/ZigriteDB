@@ -1,5 +1,5 @@
 const std = @import("std");
-const transfer = @import("zigitedb").storage.transfer;
+const transfer = @import("zigritedb").storage.transfer;
 const testing = std.testing;
 
 const Device = struct {

@@ -1,5 +1,5 @@
 const std = @import("std");
-const db = @import("zigitedb");
+const db = @import("zigritedb");
 const entry = db.entry;
 const testing = std.testing;
 

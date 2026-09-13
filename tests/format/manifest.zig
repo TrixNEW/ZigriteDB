@@ -1,5 +1,5 @@
 const std = @import("std");
-const manifest = @import("zigitedb").manifest;
+const manifest = @import("zigritedb").manifest;
 const testing = std.testing;
 
 const example: manifest.Manifest = .{

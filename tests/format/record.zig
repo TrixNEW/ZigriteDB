@@ -1,5 +1,5 @@
 const std = @import("std");
-const record = @import("zigitedb").record;
+const record = @import("zigritedb").record;
 const Header = record.Header;
 const Error = record.Error;
 const encoded_len = record.encoded_len;
