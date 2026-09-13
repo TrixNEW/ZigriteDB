@@ -12,6 +12,7 @@ pub const record = @import("format/record.zig");
 pub const segment = @import("format/segment.zig");
 pub const storage = @import("io/file.zig");
 pub const file_recovery = @import("recovery/file_scan.zig");
+pub const compactTo = @import("recovery/copy.zig").compactTo;
 pub const recovery_copy = @import("recovery/copy.zig");
 pub const inspection = @import("recovery/inspect.zig");
 pub const recovery = @import("recovery/scan.zig");
