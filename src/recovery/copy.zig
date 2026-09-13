@@ -11,6 +11,7 @@ const index_module = @import("../index/index.zig");
 const entry = @import("../format/entry.zig");
 const commit = @import("../batch/commit.zig");
 const Batch = @import("scan.zig").Batch;
+const CompactionOutput = @import("../storage/compaction_output.zig").CompactionOutput;
 const shard = @import("../shard/shard.zig");
 
 pub const Options = struct {
@@ -18,6 +19,7 @@ pub const Options = struct {
     max_segments: usize = 64,
     max_segment_size: u64 = 256 * 1024 * 1024,
     batch_buffer_size: usize = 1024 * 1024,
+    output_segment_size: ?u64 = null,
 };
 
 pub const Result = struct {
@@ -26,6 +28,8 @@ pub const Result = struct {
     last_batch_id: u64 = 0,
     omitted_tail_bytes: u64 = 0,
     reclaimed_bytes: u64 = 0,
+    source_bytes: u64 = 0,
+    output_bytes: u64 = 0,
 };
 
 /// Copies committed data into an empty directory and preserves the source.
@@ -44,6 +48,9 @@ fn copyTo(comptime compact: bool, allocator: std.mem.Allocator, io: std.Io, sour
         .max_segment_size = options.max_segment_size,
         .batch_buffer_size = options.batch_buffer_size,
     }).validate();
+
+    const output_size = options.output_segment_size orelse options.max_segment_size;
+    if (compact and output_size < segment.encoded_len) return error.SegmentFull;
 
     var input = try Directory.init(source, io);
     defer input.deinit();
@@ -73,6 +80,19 @@ fn copyTo(comptime compact: bool, allocator: std.mem.Allocator, io: std.Io, sour
     }
     const filtered = try allocator.alloc(u8, if (compact) options.batch_buffer_size else 0);
     defer allocator.free(filtered);
+    const output_ids = try allocator.alloc(u64, if (compact) options.max_segments else 0);
+    defer allocator.free(output_ids);
+    const output_manifest = try allocator.alloc(u8, if (compact) manifest.header_len + options.max_segments * 8 + 4 else 0);
+    defer allocator.free(output_manifest);
+    var merged: CompactionOutput = .{
+        .io = io,
+        .dir = output.dir,
+        .generation = metadata.generation,
+        .region = metadata.region,
+        .max_size = output_size,
+        .ids = output_ids,
+    };
+    defer merged.deinit();
     var result: Result = .{ .segment_count = metadata.segments.len };
 
     for (metadata.segments, 0..) |id, position| {
@@ -84,10 +104,11 @@ fn copyTo(comptime compact: bool, allocator: std.mem.Allocator, io: std.Io, sour
             .region = metadata.region,
         }, if (position == metadata.segments.len - 1) .active else .sealed, result.last_batch_id, options.max_segment_size);
 
-        const copied = try files.createSegment(output.dir, io, metadata.generation, id);
-        defer copied.close(io);
-        const target: File = .{ .handle = copied, .io = io };
-        try target.writeAll(&(try scanner.header.encode()), 0);
+        result.source_bytes = try std.math.add(u64, result.source_bytes, scanner.length);
+        const copied: ?std.Io.File = if (compact) null else try files.createSegment(output.dir, io, metadata.generation, id);
+        defer if (copied) |opened| opened.close(io);
+        const target: ?File = if (copied) |opened| .{ .handle = opened, .io = io } else null;
+        if (target) |device| try device.writeAll(&(try scanner.header.encode()), 0);
         var offset: usize = segment.encoded_len;
 
         while (try scanner.next(scratch)) |batch| {
@@ -96,18 +117,34 @@ fn copyTo(comptime compact: bool, allocator: std.mem.Allocator, io: std.Io, sour
                 try compactBatch(&live.?, id, batch, filtered)
             else
                 scratch[segment.encoded_len..][0..size];
-            try target.writeAll(data, offset);
+            if (compact) try merged.append(data) else try target.?.writeAll(data, offset);
             offset += data.len;
-            result.reclaimed_bytes = try std.math.add(u64, result.reclaimed_bytes, size - data.len);
+
             if (data.len != 0) result.committed_batches = try std.math.add(u64, result.committed_batches, 1);
         }
-        try target.sync();
+        if (target) |device| {
+            try device.sync();
+            result.output_bytes = try std.math.add(u64, result.output_bytes, offset);
+        }
         result.last_batch_id = scanner.last_batch_id;
         result.omitted_tail_bytes = scanner.length - scanner.offset;
     }
 
     var publisher: publication.Publisher(*Directory) = .{ .backend = &output };
-    try publisher.publish(bytes);
+    if (compact) {
+        try merged.finish();
+        result.segment_count = merged.count;
+        result.output_bytes = merged.bytes;
+        const rewritten = try (manifest.Manifest{
+            .generation = metadata.generation,
+            .region = metadata.region,
+            .segments = output_ids[0..merged.count],
+        }).encode(output_manifest);
+        try publisher.publish(rewritten);
+    } else {
+        try publisher.publish(bytes);
+    }
+    result.reclaimed_bytes = (result.source_bytes - result.omitted_tail_bytes) -| result.output_bytes;
     return result;
 }
 

@@ -25,10 +25,12 @@ test "compaction removes obsolete records and preserves live values" {
     const before = try source.dir.statFile(io, name, .{});
     const result = try db.compactTo(testing.allocator, io, source.dir, destination.dir, .{});
     try testing.expect(result.reclaimed_bytes > 0);
+    try testing.expectEqual(@as(usize, 1), result.segment_count);
+    try testing.expectEqual(result.source_bytes - result.output_bytes, result.reclaimed_bytes);
     try testing.expectEqual(@as(u64, 2), result.committed_batches);
     try testing.expectEqual(@as(u64, 3), result.last_batch_id);
     try testing.expectEqual(before.size, (try source.dir.statFile(io, name, .{})).size);
-    try testing.expect((try destination.dir.statFile(io, name, .{})).size < before.size);
+    try testing.expectEqual(result.output_bytes, (try destination.dir.statFile(io, name, .{})).size);
 
     var store = try db.Store.open(testing.allocator, io, destination.dir, .{});
     defer store.deinit();
@@ -78,4 +80,59 @@ fn compactWithAllocator(allocator: std.mem.Allocator, source: std.Io.Dir) !void 
     var destination = testing.tmpDir(.{});
     defer destination.cleanup();
     _ = try db.compactTo(allocator, io, source, destination.dir, .{});
+}
+
+test "compaction rolls over whole batches and enforces output limits" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var source = testing.tmpDir(.{});
+    defer source.cleanup();
+    var destination = testing.tmpDir(.{});
+    defer destination.cleanup();
+    var store = try db.Store.create(testing.allocator, io, source.dir, region, .{});
+    defer store.deinit();
+    for (1..4) |id| {
+        _ = try store.write(.{ .entries = &.{item(id, @intCast(id), "saved")} });
+    }
+    try store.close();
+    const result = try db.compactTo(testing.allocator, io, source.dir, destination.dir, .{ .output_segment_size = 190 });
+    try testing.expectEqual(@as(usize, 3), result.segment_count);
+    try testing.expectEqual(@as(u64, 0), result.reclaimed_bytes);
+    var reopened = try db.Store.open(testing.allocator, io, destination.dir, .{ .max_segment_size = 190 });
+    defer reopened.deinit();
+    var value: [128]u8 = undefined;
+    for (1..4) |id| {
+        try testing.expectEqualStrings("saved", (try reopened.get(item(id, @intCast(id), "").key, &value)).?);
+    }
+    _ = try reopened.write(.{ .entries = &.{item(4, 4, "next")} });
+    try reopened.close();
+
+    var limited = testing.tmpDir(.{});
+    defer limited.cleanup();
+    try testing.expectError(error.TooManySegments, db.compactTo(testing.allocator, io, source.dir, limited.dir, .{
+        .max_segments = 2,
+        .output_segment_size = 190,
+    }));
+    try testing.expectError(error.FileNotFound, limited.dir.statFile(io, "MANIFEST", .{}));
+    var small = testing.tmpDir(.{});
+    defer small.cleanup();
+    try testing.expectError(error.BatchTooLarge, db.compactTo(testing.allocator, io, source.dir, small.dir, .{ .output_segment_size = 180 }));
+    try testing.expectError(error.FileNotFound, small.dir.statFile(io, "MANIFEST", .{}));
+}
+
+test "compaction keeps an empty store writable" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var source = testing.tmpDir(.{});
+    defer source.cleanup();
+    var destination = testing.tmpDir(.{});
+    defer destination.cleanup();
+    var store = try db.Store.create(testing.allocator, io, source.dir, region, .{});
+    defer store.deinit();
+    try store.close();
+    const result = try db.compactTo(testing.allocator, io, source.dir, destination.dir, .{});
+    try testing.expectEqual(@as(usize, 1), result.segment_count);
+    try testing.expectEqual(@as(u64, 48), result.output_bytes);
+    var reopened = try db.Store.open(testing.allocator, io, destination.dir, .{});
+    defer reopened.deinit();
+    _ = try reopened.write(.{ .entries = &.{item(1, 0, "first")} });
+    try reopened.close();
 }
