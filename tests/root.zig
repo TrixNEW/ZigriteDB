@@ -6,6 +6,7 @@ test {
     _ = @import("format_manifest.zig");
     _ = @import("batch_commit.zig");
     _ = @import("recovery_scan.zig");
+    _ = @import("recovery_file.zig");
     _ = @import("io_file.zig");
     _ = @import("io_transfer.zig");
     _ = @import("storage_writer.zig");

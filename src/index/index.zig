@@ -7,6 +7,7 @@ const manifest = @import("../format/manifest.zig");
 const segment = @import("../format/segment.zig");
 const commit = @import("../batch/commit.zig");
 const recovery = @import("../recovery/scan.zig");
+const file_scan = @import("../recovery/file_scan.zig");
 
 const EncodedKey = [Key.encoded_len]u8;
 const Map = std.AutoHashMapUnmanaged(EncodedKey, Location);
@@ -134,9 +135,32 @@ pub fn rebuild(
     segments: []const []const u8,
     max_keys: u32,
 ) !Index {
+    return rebuildSource(false, allocator, metadata, segments, max_keys, &.{}, 0);
+}
+
+pub fn rebuildFiles(
+    allocator: std.mem.Allocator,
+    metadata: manifest.Manifest,
+    devices: anytype,
+    max_keys: u32,
+    scratch: []u8,
+    max_segment_size: u64,
+) !Index {
+    return rebuildSource(true, allocator, metadata, devices, max_keys, scratch, max_segment_size);
+}
+
+fn rebuildSource(
+    comptime files: bool,
+    allocator: std.mem.Allocator,
+    metadata: manifest.Manifest,
+    sources: anytype,
+    max_keys: u32,
+    scratch: []u8,
+    max_segment_size: u64,
+) !Index {
     if (metadata.generation == 0) return error.InvalidGeneration;
-    if (segments.len == 0 or segments.len > manifest.max_segments or
-        segments.len != metadata.segments.len)
+    if (sources.len == 0 or sources.len > manifest.max_segments or
+        sources.len != metadata.segments.len)
         return error.InvalidSegmentCount;
 
     var index: Index = .{
@@ -149,18 +173,23 @@ pub fn rebuild(
 
     var previous_segment: u64 = 0;
 
-    for (segments, metadata.segments, 0..) |bytes, id, position| {
+    for (sources, metadata.segments, 0..) |source, id, position| {
         if (id == 0) return error.InvalidSegmentId;
         if (id <= previous_segment) return error.InvalidSegmentOrder;
 
-        const active = position == segments.len - 1;
-        var scanner = try recovery.Scanner.init(bytes, .{
+        const active = position == sources.len - 1;
+        const expected: segment.Header = .{
             .segment_id = id,
             .generation = metadata.generation,
             .region = metadata.region,
-        }, if (active) .active else .sealed, index.last_batch_id);
+        };
+        const mode: recovery.Mode = if (active) .active else .sealed;
+        var scanner = if (files)
+            try file_scan.Scanner(@TypeOf(source)).init(source, expected, mode, index.last_batch_id, max_segment_size)
+        else
+            try recovery.Scanner.init(source, expected, mode, index.last_batch_id);
 
-        while (try scanner.next()) |batch| {
+        while (if (files) try scanner.next(scratch) else try scanner.next()) |batch| {
             try index.apply(batch, id);
         }
 

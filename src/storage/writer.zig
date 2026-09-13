@@ -2,6 +2,7 @@ const std = @import("std");
 
 const WriteBatch = @import("../batch/write.zig").WriteBatch;
 const segment = @import("../format/segment.zig");
+const file_scan = @import("../recovery/file_scan.zig");
 
 pub const Durability = enum {
     sync,
@@ -44,6 +45,25 @@ pub fn Writer(comptime Device: type) type {
             };
         }
 
+        pub fn reopen(device: Device, header: segment.Header, max_size: u64, previous_batch_id: u64, scratch: []u8) !Self {
+            var scanner = try file_scan.Scanner(Device).init(device, header, .active, previous_batch_id, max_size);
+
+            while (try scanner.next(scratch)) |_| {}
+
+            if (scanner.has_tail) return error.NeedsRecovery;
+            if (try device.length() != scanner.length) return error.FileChanged;
+
+            try device.sync();
+
+            return .{
+                .device = device,
+                .header = header,
+                .max_size = max_size,
+                .offset = scanner.offset,
+                .synced_offset = scanner.offset,
+                .last_batch_id = scanner.last_batch_id,
+            };
+        }
         pub fn append(self: *Self, batch: WriteBatch, scratch: []u8, durability: Durability) !AppendResult {
             if (self.failed) return error.WriterFailed;
             if (batch.entries.len == 0) return error.EmptyBatch;
