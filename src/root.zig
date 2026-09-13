@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const batch = @import("batch/commit.zig");
 pub const WriteBatch = @import("batch/write.zig").WriteBatch;
 pub const entry = @import("format/entry.zig");
@@ -10,3 +12,7 @@ pub const segment = @import("format/segment.zig");
 pub const storage = @import("io/file.zig");
 pub const recovery = @import("recovery/scan.zig");
 pub const segment_writer = @import("storage/writer.zig");
+
+test {
+    std.testing.refAllDecls(@This());
+}

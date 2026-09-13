@@ -73,7 +73,7 @@ pub const Manifest = struct {
     }
 };
 
-/// `segment_ids` SHOULDN'T overlap `bytes`
+/// `segment_ids` must not overlap `bytes`
 /// Errors leave it unchanged
 pub fn decode(bytes: []const u8, segment_ids: []u64) Error!Manifest {
     if (bytes.len < header_len) return error.TruncatedManifest;

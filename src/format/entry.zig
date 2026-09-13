@@ -1,7 +1,8 @@
 const std = @import("std");
 const Crc32c = std.hash.crc.Crc32Iscsi;
 
-const Key = @import("key.zig").Key;
+const key_format = @import("key.zig");
+const Key = key_format.Key;
 const record = @import("record.zig");
 
 pub const checksum_len = 4;

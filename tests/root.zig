@@ -1,12 +1,12 @@
 test {
-    _ = @import("format/key.zig");
-    _ = @import("format/record.zig");
-    _ = @import("format/entry.zig");
-    _ = @import("format/segment.zig");
-    _ = @import("format/manifest.zig");
-    _ = @import("batch/commit.zig");
-    _ = @import("recovery/scan.zig");
-    _ = @import("io/file.zig");
-    _ = @import("io/transfer.zig");
-    _ = @import("storage/writer.zig");
+    _ = @import("format_key.zig");
+    _ = @import("format_record.zig");
+    _ = @import("format_entry.zig");
+    _ = @import("format_segment.zig");
+    _ = @import("format_manifest.zig");
+    _ = @import("batch_commit.zig");
+    _ = @import("recovery_scan.zig");
+    _ = @import("io_file.zig");
+    _ = @import("io_transfer.zig");
+    _ = @import("storage_writer.zig");
 }

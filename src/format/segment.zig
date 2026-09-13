@@ -1,96 +1,81 @@
 const std = @import("std");
 const Crc32c = std.hash.crc.Crc32Iscsi;
 
-const Key = @import("key.zig").Key;
-const record = @import("record.zig");
+const Region = @import("key.zig").Region;
 
-pub const checksum_len = 4;
-pub const overhead = record.encoded_len + Key.encoded_len + checksum_len;
+pub const encoded_len = 48;
 
-pub const Error = record.Error || Key.DecodeError || error{
-    BufferTooSmall,
-    TruncatedRecord,
-    UnsupportedRecordKind,
+pub const Error = error{
+    TruncatedHeader,
+    InvalidMagic,
+    UnsupportedVersion,
+    ChecksumMismatch,
+    InvalidFlags,
+    InvalidSegmentId,
+    InvalidGeneration,
+    IdentityMismatch,
 };
 
-pub const Entry = struct {
-    header: record.Header,
-    key: Key,
-    value: []const u8,
+pub const Header = struct {
+    segment_id: u64,
+    generation: u64,
+    region: Region,
 
-    pub fn size(self: Entry) Error!usize {
-        _ = try self.header.encode();
-        _ = try self.key.encode();
+    pub fn encode(self: Header) Error![encoded_len]u8 {
+        try self.validate();
 
-        try validateHeader(self.header);
-        if (self.value.len != self.header.stored_len) return error.InvalidLength;
-
-        return totalSize(self.header.stored_len);
-    }
-
-    /// `destination` SHOULDN'T overlap `value`
-    /// Errors leave it unchanged
-    pub fn encode(self: Entry, destination: []u8) Error![]u8 {
-        const header_bytes = try self.header.encode();
-        const key_bytes = try self.key.encode();
-
-        try validateHeader(self.header);
-        if (self.value.len != self.header.stored_len) return error.InvalidLength;
-
-        const len = try totalSize(self.header.stored_len);
-        if (destination.len < len) return error.BufferTooSmall;
-
-        const key_end = record.encoded_len + Key.encoded_len;
-        const checksum_offset = len - checksum_len;
-        const bytes = destination[0..len];
-
-        @memcpy(bytes[0..record.encoded_len], &header_bytes);
-        @memcpy(bytes[record.encoded_len..key_end], &key_bytes);
-        @memcpy(bytes[key_end..checksum_offset], self.value);
-
-        const checksum = Crc32c.hash(bytes[0..checksum_offset]);
-        std.mem.writeInt(u32, bytes[checksum_offset..][0..checksum_len], checksum, .little);
+        var bytes = [_]u8{0} ** encoded_len;
+        @memcpy(bytes[0..4], "ZGSG");
+        std.mem.writeInt(u16, bytes[4..6], 1, .little);
+        std.mem.writeInt(u64, bytes[8..16], self.segment_id, .little);
+        std.mem.writeInt(u64, bytes[16..24], self.generation, .little);
+        std.mem.writeInt(i32, bytes[24..28], self.region.dimension, .little);
+        std.mem.writeInt(i32, bytes[28..32], self.region.x, .little);
+        std.mem.writeInt(i32, bytes[32..36], self.region.z, .little);
+        std.mem.writeInt(u32, bytes[44..48], Crc32c.hash(bytes[0..44]), .little);
 
         return bytes;
     }
+
+    pub fn decode(bytes: []const u8) Error!Header {
+        if (bytes.len < encoded_len) return error.TruncatedHeader;
+        if (!std.mem.eql(u8, bytes[0..4], "ZGSG")) return error.InvalidMagic;
+        if (std.mem.readInt(u16, bytes[4..6], .little) != 1) return error.UnsupportedVersion;
+
+        const expected = std.mem.readInt(u32, bytes[44..48], .little);
+        if (expected != Crc32c.hash(bytes[0..44])) return error.ChecksumMismatch;
+
+        const flags = std.mem.readInt(u16, bytes[6..8], .little);
+        const reserved = std.mem.readInt(u64, bytes[36..44], .little);
+        if (flags != 0 or reserved != 0) return error.InvalidFlags;
+
+        const header: Header = .{
+            .segment_id = std.mem.readInt(u64, bytes[8..16], .little),
+            .generation = std.mem.readInt(u64, bytes[16..24], .little),
+            .region = .{
+                .dimension = std.mem.readInt(i32, bytes[24..28], .little),
+                .x = std.mem.readInt(i32, bytes[28..32], .little),
+                .z = std.mem.readInt(i32, bytes[32..36], .little),
+            },
+        };
+        try header.validate();
+
+        return header;
+    }
+
+    pub fn checkIdentity(self: Header, expected: Header) Error!void {
+        const mismatch =
+            self.segment_id != expected.segment_id or
+            self.generation != expected.generation or
+            self.region.dimension != expected.region.dimension or
+            self.region.x != expected.region.x or
+            self.region.z != expected.region.z;
+
+        if (mismatch) return error.IdentityMismatch;
+    }
+
+    fn validate(self: Header) Error!void {
+        if (self.segment_id == 0) return error.InvalidSegmentId;
+        if (self.generation == 0) return error.InvalidGeneration;
+    }
 };
-
-pub const Decoded = struct {
-    entry: Entry,
-    consumed: usize,
-};
-
-/// The decoded value borrows from `bytes`
-pub fn decode(bytes: []const u8) Error!Decoded {
-    const header = try record.Header.decode(bytes);
-    try validateHeader(header);
-
-    const len = try totalSize(header.stored_len);
-    if (bytes.len < len) return error.TruncatedRecord;
-
-    const checksum_offset = len - checksum_len;
-    const expected = std.mem.readInt(u32, bytes[checksum_offset..][0..checksum_len], .little);
-    const actual = Crc32c.hash(bytes[0..checksum_offset]);
-
-    if (expected != actual) return error.ChecksumMismatch;
-
-    const key_end = record.encoded_len + Key.encoded_len;
-
-    return .{
-        .entry = .{
-            .header = header,
-            .key = try Key.decode(bytes[record.encoded_len..key_end]),
-            .value = bytes[key_end..checksum_offset],
-        },
-        .consumed = len,
-    };
-}
-
-fn validateHeader(header: record.Header) Error!void {
-    if (header.kind == .commit) return error.UnsupportedRecordKind;
-    if (header.compression != .none) return error.UnsupportedCompression;
-}
-
-fn totalSize(stored_len: u32) Error!usize {
-    return std.math.add(usize, overhead, stored_len) catch error.InvalidLength;
-}

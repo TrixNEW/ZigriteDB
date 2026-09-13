@@ -110,3 +110,6 @@ pub fn Writer(comptime Device: type) type {
         }
     };
 }
+
+const test_entry = @import("../format/entry.zig");
+const storage_file = @import("../io/file.zig");

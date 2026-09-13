@@ -31,7 +31,7 @@ pub const Scanner = struct {
     finished: bool = false,
     has_tail: bool = false,
 
-    /// `last_batch_id` is the previous segments final batch ID, or zero for teh first segment
+    /// `last_batch_id` is the previous segment's final batch ID, or zero for the first segment
     pub fn init(bytes: []const u8, expected: segment.Header, mode: Mode, last_batch_id: u64) Error!Scanner {
         const header = try segment.Header.decode(bytes);
         try header.checkIdentity(expected);

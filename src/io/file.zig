@@ -30,3 +30,7 @@ pub const File = struct {
         return self.handle.sync(self.io);
     }
 };
+
+const segment = @import("../format/segment.zig");
+const entry = @import("../format/entry.zig");
+const WriteBatch = @import("../batch/write.zig").WriteBatch;
