@@ -1,6 +1,12 @@
-# ZigriteDB
+<p align="center">
+  <img src="assets/zigritedb.png" alt="ZigriteDB" width="500">
+</p>
 
-An embedded storage engine for Minecraft Bedrock world and chunk data, written in [Zig](https://github.com/ziglang/zig) v0.16.0.
+<h1 align="center">ZigriteDB</h1>
+
+<p align="center">
+  An embedded storage engine for Minecraft Bedrock world and chunk data, written in <a href="https://github.com/ziglang/zig">Zig</a> v0.16.0.
+</p>
 
 A modern, lightweight, and high-performance alternative to PMMP's [LevelDB](https://github.com/pmmp/leveldb).
 
