@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="zigritedb_smaller.png" alt="ZigriteDB" width="420">
+  <img src="assets/zigritedb_smaller.png" alt="ZigriteDB" width="420">
 </p>
 
 <h1 align="center">ZigriteDB</h1>
