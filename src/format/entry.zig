@@ -1,10 +1,13 @@
 const std = @import("std");
+
 const Key = @import("key.zig").Key;
 const record = @import("record.zig");
+
 const Crc32c = std.hash.crc.Crc32Iscsi;
 
 pub const checksum_len = 4;
 pub const overhead = record.encoded_len + Key.encoded_len + checksum_len;
+
 pub const Error = record.Error || Key.DecodeError || error{
     BufferTooSmall,
     TruncatedRecord,
@@ -19,18 +22,25 @@ pub const Entry = struct {
     pub fn size(self: Entry) Error!usize {
         _ = try self.header.encode();
         _ = try self.key.encode();
+
         try validateHeader(self.header);
         if (self.value.len != self.header.stored_len) return error.InvalidLength;
+
         return totalSize(self.header.stored_len);
     }
 
-    /// Keep the output buffer separate from value. Errors leave the buffer unchanged.
+    /// `destination` must not overlap `value`
+    /// Errors leave it unchanged
     pub fn encode(self: Entry, destination: []u8) Error![]u8 {
-        const len = try self.size();
-        if (destination.len < len) return error.BufferTooSmall;
-
         const header_bytes = try self.header.encode();
         const key_bytes = try self.key.encode();
+
+        try validateHeader(self.header);
+        if (self.value.len != self.header.stored_len) return error.InvalidLength;
+
+        const len = try totalSize(self.header.stored_len);
+        if (destination.len < len) return error.BufferTooSmall;
+
         const key_end = record.encoded_len + Key.encoded_len;
         const checksum_offset = len - checksum_len;
         const bytes = destination[0..len];
@@ -38,7 +48,10 @@ pub const Entry = struct {
         @memcpy(bytes[0..record.encoded_len], &header_bytes);
         @memcpy(bytes[record.encoded_len..key_end], &key_bytes);
         @memcpy(bytes[key_end..checksum_offset], self.value);
-        std.mem.writeInt(u32, bytes[checksum_offset..][0..4], Crc32c.hash(bytes[0..checksum_offset]), .little);
+
+        const checksum = Crc32c.hash(bytes[0..checksum_offset]);
+        std.mem.writeInt(u32, bytes[checksum_offset..][0..checksum_len], checksum, .little);
+
         return bytes;
     }
 };
@@ -48,18 +61,22 @@ pub const Decoded = struct {
     consumed: usize,
 };
 
-/// The returned value borrows the input buffer.
+/// The decoded value borrows from `bytes`
 pub fn decode(bytes: []const u8) Error!Decoded {
     const header = try record.Header.decode(bytes);
     try validateHeader(header);
+
     const len = try totalSize(header.stored_len);
     if (bytes.len < len) return error.TruncatedRecord;
 
     const checksum_offset = len - checksum_len;
-    const expected = std.mem.readInt(u32, bytes[checksum_offset..][0..4], .little);
-    if (expected != Crc32c.hash(bytes[0..checksum_offset])) return error.ChecksumMismatch;
+    const expected_checksum = std.mem.readInt(u32, bytes[checksum_offset..][0..checksum_len], .little);
+    const actual_checksum = Crc32c.hash(bytes[0..checksum_offset]);
+
+    if (expected_checksum != actual_checksum) return error.ChecksumMismatch;
 
     const key_end = record.encoded_len + Key.encoded_len;
+
     return .{
         .entry = .{
             .header = header,
