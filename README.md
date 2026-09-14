@@ -49,6 +49,16 @@ Run tests with safety checks enabled:
 zig build test -Doptimize=ReleaseSafe
 ```
 
+The Linux native library and C header are installed by `zig build`. See
+`include/zigritedb.h` for handle ownership, batch rules, and durability modes.
+
+Run the native API and process-failure tests on Linux x86-64:
+
+```sh
+zig build native-test
+python3 tests/native_faults.py zig-out/lib/libzigritedb_native.so zig-out/bin/native_smoke
+```
+
 ## Related Projects
 
 Other projects in the Bedrock-Phanatics ecosystem:

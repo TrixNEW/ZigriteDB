@@ -59,6 +59,15 @@ pub const World = struct {
         return store.get(key, output);
     }
 
+    pub fn valueSize(self: *World, key: Key) !?u32 {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.Closed;
+        _ = try key.encode();
+        const store = (try self.load(key.region(), false)) orelse return null;
+        const location = (try store.shard.index.get(key)) orelse return null;
+        return location.raw_len;
+    }
     pub fn compact(self: *World, region: Region) !?store_module.CompactionResult {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);

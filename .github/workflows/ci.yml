@@ -27,3 +27,13 @@ jobs:
 
       - name: Run ReleaseSafe tests
         run: zig build test -Doptimize=ReleaseSafe
+
+      - name: Build and test native API (Debug)
+        run: |
+          zig build native-test
+          python3 tests/native_faults.py zig-out/lib/libzigritedb_native.so zig-out/bin/native_smoke
+
+      - name: Build and test native API (ReleaseSafe)
+        run: |
+          zig build native-test -Doptimize=ReleaseSafe
+          python3 tests/native_faults.py zig-out/lib/libzigritedb_native.so zig-out/bin/native_smoke
