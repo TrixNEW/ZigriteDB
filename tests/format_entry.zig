@@ -94,7 +94,7 @@ test "failed encode leaves output unchanged" {
     try testing.expectEqualSlices(u8, &before, &buffer);
 }
 
-test "unsupported record types" {
+test "invalid record kinds and compressed payloads" {
     var buffer: [128]u8 = undefined;
     var invalid = put("");
     invalid.header.kind = .commit;
@@ -105,9 +105,9 @@ test "unsupported record types" {
     invalid = put("lz4");
     invalid.header.compression = .lz4;
     invalid.header.raw_len = 100;
-    try testing.expectError(error.UnsupportedCompression, invalid.encode(&buffer));
+    try testing.expectError(error.InvalidCompressedData, invalid.encode(&buffer));
     const compressed = try invalid.header.encode();
-    try testing.expectError(error.UnsupportedCompression, entry.decode(&compressed));
+    try testing.expectError(error.TruncatedRecord, entry.decode(&compressed));
 }
 
 test "invalid key with a valid checksum" {

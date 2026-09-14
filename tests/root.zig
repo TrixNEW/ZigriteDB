@@ -1,4 +1,5 @@
 test {
+    _ = @import("lz4.zig");
     _ = @import("format_key.zig");
     _ = @import("format_record.zig");
     _ = @import("format_entry.zig");

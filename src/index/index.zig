@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const lz4 = @import("../compression/lz4.zig");
 const Key = @import("../format/key.zig").Key;
 const Region = @import("../format/key.zig").Region;
 const entry = @import("../format/entry.zig");
@@ -57,6 +58,22 @@ pub const Index = struct {
 
     /// The returned value uses scratch.
     pub fn read(self: *const Index, key: Key, device: anytype, scratch: []u8) !?[]const u8 {
+        const item = (try self.readRecord(key, device, scratch)) orelse return null;
+        if (item.header.compression == .none) return item.value;
+        const used = entry.overhead + item.value.len;
+        return try lz4.decompress(item.value, scratch[used..], item.header.raw_len);
+    }
+
+    /// Scratch and output must not overlap.
+    pub fn readInto(self: *const Index, key: Key, device: anytype, scratch: []u8, output: []u8) !?[]const u8 {
+        const item = (try self.readRecord(key, device, scratch)) orelse return null;
+        if (output.len < item.header.raw_len) return error.BufferTooSmall;
+        if (item.header.compression == .lz4) return try lz4.decompress(item.value, output, item.header.raw_len);
+        @memcpy(output[0..item.value.len], item.value);
+        return output[0..item.value.len];
+    }
+
+    fn readRecord(self: *const Index, key: Key, device: anytype, scratch: []u8) !?entry.Entry {
         const location = (try self.get(key)) orelse return null;
         const len = std.math.add(usize, entry.overhead, location.stored_len) catch return error.InvalidLength;
 
@@ -84,7 +101,7 @@ pub const Index = struct {
 
         if (!same_record) return error.IndexMismatch;
 
-        return decoded.entry.value;
+        return decoded.entry;
     }
 
     fn apply(self: *Index, batch: recovery.Batch, segment_id: u64) !void {

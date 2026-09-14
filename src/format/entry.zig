@@ -3,12 +3,13 @@ const Crc32c = std.hash.crc.Crc32Iscsi;
 
 const key_format = @import("key.zig");
 const Key = key_format.Key;
+const lz4 = @import("../compression/lz4.zig");
 const record = @import("record.zig");
 
 pub const checksum_len = 4;
 pub const overhead = record.encoded_len + Key.encoded_len + checksum_len;
 
-pub const Error = record.Error || Key.DecodeError || error{
+pub const Error = lz4.Error || record.Error || Key.DecodeError || error{
     BufferTooSmall,
     TruncatedRecord,
     UnsupportedRecordKind,
@@ -19,6 +20,19 @@ pub const Entry = struct {
     key: Key,
     value: []const u8,
 
+    /// Scratch must not overlap value; compressed results borrow it.
+    pub fn compress(self: Entry, encoder: *lz4.Encoder, scratch: []u8) Error!Entry {
+        _ = try self.size();
+        if (self.header.kind != .put or self.header.compression != .none) return self;
+        const compressed = try encoder.compress(self.value, scratch);
+        if (compressed.len >= self.value.len) return self;
+        var result = self;
+        result.header.compression = .lz4;
+        result.header.stored_len = @intCast(compressed.len);
+        result.value = compressed;
+        return result;
+    }
+
     pub fn size(self: Entry) Error!usize {
         _ = try self.header.encode();
         _ = try self.key.encode();
@@ -26,12 +40,14 @@ pub const Entry = struct {
         try validateHeader(self.header);
         if (self.value.len != self.header.stored_len) return error.InvalidLength;
 
+        if (self.header.compression == .lz4) try lz4.validate(self.value, self.header.raw_len);
         return totalSize(self.header.stored_len);
     }
 
     /// `destination` must not overlap `value`
     /// Errors leave it unchanged
     pub fn encode(self: Entry, destination: []u8) Error![]u8 {
+        _ = try self.size();
         const header_bytes = try self.header.encode();
         const key_bytes = try self.key.encode();
 
@@ -77,6 +93,8 @@ pub fn decode(bytes: []const u8) Error!Decoded {
 
     const key_end = record.encoded_len + Key.encoded_len;
 
+    if (header.compression == .lz4) try lz4.validate(bytes[key_end..checksum_offset], header.raw_len);
+
     return .{
         .entry = .{
             .header = header,
@@ -89,7 +107,6 @@ pub fn decode(bytes: []const u8) Error!Decoded {
 
 fn validateHeader(header: record.Header) Error!void {
     if (header.kind == .commit) return error.UnsupportedRecordKind;
-    if (header.compression != .none) return error.UnsupportedCompression;
 }
 
 fn totalSize(stored_len: u32) Error!usize {

@@ -222,7 +222,7 @@ pub fn Shard(comptime Device: type) type {
             const location = (try self.index.get(key)) orelse return null;
 
             for (self.segment_ids[0..self.segment_count], self.devices[0..self.segment_count]) |id, device| {
-                if (id == location.segment_id) return self.index.read(key, device, output);
+                if (id == location.segment_id) return self.index.readInto(key, device, self.scratch, output);
             }
 
             return error.IndexMismatch;
