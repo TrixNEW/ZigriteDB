@@ -259,6 +259,14 @@ pub const Store = struct {
         return self.shard.get(key, output);
     }
 
+    pub fn valueSize(self: *Store, key: Key) !?u32 {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.Closed;
+        const location = (try self.shard.index.get(key)) orelse return null;
+        return location.raw_len;
+    }
+
     pub fn flush(self: *Store) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);

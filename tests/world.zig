@@ -108,3 +108,73 @@ fn worldWithAllocator(allocator: std.mem.Allocator) !void {
     try testing.expectEqualStrings("a", (try world.get(item(1, 0, "").key, &output)).?);
     try world.close();
 }
+
+test "busy shards stay pinned while other regions write and close waits" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .max_open_shards = 2 });
+    defer world.deinit();
+    _ = try world.write(.{ .entries = &.{item(1, 0, "first")} });
+    const first = world.slots[0].store;
+    _ = try world.write(.{ .entries = &.{item(1, 32, "second")} });
+
+    first.mutex.lockUncancelable(io);
+    var locked = true;
+    defer if (locked) first.mutex.unlock(io);
+    var read_result: anyerror!void = error.Unexpected;
+    const reader = try std.Thread.spawn(.{}, readPinned, .{ &world, &read_result });
+    var joined = false;
+    defer if (!joined) reader.join();
+    // Release the reader even if an assertion fails.
+    defer if (locked) {
+        first.mutex.unlock(io);
+        locked = false;
+    };
+    while (true) {
+        world.mutex.lockUncancelable(io);
+        var pinned = false;
+        for (world.slots[0..world.count]) |slot| {
+            if (slot.store == first) pinned = slot.users != 0;
+        }
+        world.mutex.unlock(io);
+        if (pinned) break;
+        std.Thread.yield() catch {};
+    }
+    _ = try world.write(.{ .entries = &.{item(1, 64, "third")} });
+    try testing.expectEqual(@as(usize, 2), world.count);
+    var output: [32]u8 = undefined;
+    try testing.expectEqualStrings("third", (try world.get(item(1, 64, "").key, &output)).?);
+
+    var close_result: anyerror!void = error.Unexpected;
+    const closer = try std.Thread.spawn(.{}, closePinned, .{ &world, &close_result });
+    while (true) {
+        world.mutex.lockUncancelable(io);
+        const closing = world.closing;
+        world.mutex.unlock(io);
+        if (closing) break;
+        std.Thread.yield() catch {};
+    }
+    const rejected = world.get(item(1, 64, "").key, &output);
+    first.mutex.unlock(io);
+    locked = false;
+    closer.join();
+    try testing.expectError(error.Closed, rejected);
+    try close_result;
+    reader.join();
+    joined = true;
+    try read_result;
+}
+
+fn readPinned(world: *db.World, result: *anyerror!void) void {
+    result.* = readFirst(world);
+}
+
+fn readFirst(world: *db.World) !void {
+    var output: [32]u8 = undefined;
+    try testing.expectEqualStrings("first", (try world.get(item(1, 0, "").key, &output)).?);
+}
+
+fn closePinned(world: *db.World, result: *anyerror!void) void {
+    result.* = world.close();
+}
