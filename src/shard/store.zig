@@ -259,6 +259,17 @@ pub const Store = struct {
         return self.shard.get(key, output);
     }
 
+    pub fn getSized(self: *Store, key: Key, output: []u8, required: *usize) !?[]const u8 {
+        required.* = 0;
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.Closed;
+        const location = (try self.shard.index.get(key)) orelse return null;
+        required.* = location.raw_len;
+        if (output.len < location.raw_len) return error.BufferTooSmall;
+        return self.shard.get(key, output);
+    }
+
     pub fn valueSize(self: *Store, key: Key) !?u32 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);

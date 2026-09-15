@@ -1,4 +1,6 @@
 """Linux x86-64 C ABI and syscall-boundary crash tests; all data lives in temporary directories."""
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import ctypes as c
 import errno
 import os
@@ -204,6 +206,57 @@ def check_permissions(api, root):
     denied.chmod(0o700)
     assert os.WIFEXITED(result) and os.WEXITSTATUS(result) == 0
 
+
+def check_concurrency(library, root):
+    api = API(library)
+    api.options.max_segment_size = 1024 * 1024
+    api.options.compression_threshold = 32
+    path = root / "concurrent"
+    path.mkdir()
+    handle = api.open(path)
+    start = threading.Barrier(4)
+
+    def writer(x):
+        start.wait()
+        for batch in range(1, 101):
+            value = b"x" * (16 if batch % 2 else 512)
+            buffer = c.create_string_buffer(value)
+            operation = Operation(Key(0, x, 0, 0, 5), 0, c.cast(buffer, c.c_void_p), len(value))
+            assert api.lib.zg_write(handle, batch, c.byref(operation), 1) == 0
+
+    def reader():
+        start.wait()
+        for _ in range(300):
+            for x in (0, 32):
+                key, required = Key(0, x, 0, 0, 5), c.c_size_t()
+                output = c.create_string_buffer(128)
+                result = api.lib.zg_get(handle, c.byref(key), output, len(output), c.byref(required))
+                if result == 0:
+                    assert required.value == 16 and output.raw[:16] == b"x" * 16
+                elif result == 3:
+                    assert required.value == 512
+                else:
+                    assert result == 1 and required.value == 0
+
+    def maintenance():
+        start.wait()
+        for _ in range(10):
+            assert api.lib.zg_flush(handle) == 0
+            assert api.lib.zg_compact(handle, 0, 0, 0) in (0, 1)
+
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(writer, 0), pool.submit(writer, 32),
+                       pool.submit(reader), pool.submit(maintenance)]
+            for future in futures:
+                future.result()
+        for x in (0, 32):
+            assert api.read(handle, x) == (0, b"x" * 512)
+    finally:
+        assert api.lib.zg_close(handle) == 0
+    print("Concurrent C API reads, writes, flush and compaction passed")
+
+
 def main():
     assert sys.platform == "linux" and platform.machine() == "x86_64"
     library, smoke = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
@@ -236,6 +289,7 @@ def main():
                 _, acknowledged = trace(api, case, point, mode)
                 verify(api, case, root / f"recovered-{mode}-{point}", acknowledged)
         print(f"{len(events) * 4} syscall-boundary crash and I/O fault cases passed: {sorted(set(events))}")
+        check_concurrency(library, root)
     signal.alarm(0)
 
 

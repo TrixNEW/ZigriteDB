@@ -59,6 +59,14 @@ pub const World = struct {
         return store.get(key, output);
     }
 
+    pub fn getSized(self: *World, key: Key, output: []u8, required: *usize) !?[]const u8 {
+        required.* = 0;
+        _ = try key.encode();
+        const store = (try self.acquire(key.region(), false)) orelse return null;
+        defer self.unpin(store);
+        return store.getSized(key, output, required);
+    }
+
     pub fn valueSize(self: *World, key: Key) !?u32 {
         _ = try key.encode();
         const store = (try self.acquire(key.region(), false)) orelse return null;

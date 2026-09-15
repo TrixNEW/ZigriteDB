@@ -60,7 +60,7 @@ int zg_options_init(zg_options *options);
 int zg_options_validate(const zg_options *options);
 /* The directory must already exist. Pass the path length without a trailing NUL. */
 int zg_open(const uint8_t *path, size_t path_len, const zg_options *options, zg_handle **out);
-/* Calls on one handle run in turn. Close frees it even on error; wait for other calls first. */
+/* Calls may overlap. Wait for them before close, which frees the handle even on error. */
 int zg_close(zg_handle *handle);
 /* Keep each batch in one region. Use a higher batch ID for each write to that region. */
 int zg_write(zg_handle *handle, uint64_t batch_id, const zg_operation *operations, size_t count);

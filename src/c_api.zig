@@ -244,31 +244,19 @@ pub export fn zg_get(optional: ?*Handle, key: ?*const Key, output: ?[*]u8, capac
     const handle = optional orelse return .invalid_argument;
     const native = (key orelse return .invalid_argument).native() catch |err| return status(err);
     if (output == null and capacity != 0) return .invalid_argument;
-    const io = handle.threaded.io();
-    handle.mutex.lock(io) catch |err| return status(err);
-    defer handle.mutex.unlock(io);
-    const size = (handle.world.valueSize(native) catch |err| return status(err)) orelse return .not_found;
-    length.* = size;
-    if (capacity < size) return .buffer_too_small;
     const bytes: []u8 = if (output) |ptr| ptr[0..capacity] else &.{};
-    _ = handle.world.get(native, bytes) catch |err| return status(err);
+    _ = (handle.world.getSized(native, bytes, length) catch |err| return status(err)) orelse return .not_found;
     return .ok;
 }
 
 pub export fn zg_flush(optional: ?*Handle) Status {
     const handle = optional orelse return .invalid_argument;
-    const io = handle.threaded.io();
-    handle.mutex.lock(io) catch |err| return status(err);
-    defer handle.mutex.unlock(io);
     handle.world.flush() catch |err| return status(err);
     return .ok;
 }
 
 pub export fn zg_compact(optional: ?*Handle, dimension: i32, x: i32, z: i32) Status {
     const handle = optional orelse return .invalid_argument;
-    const io = handle.threaded.io();
-    handle.mutex.lock(io) catch |err| return status(err);
-    defer handle.mutex.unlock(io);
     const result = (handle.world.compact(.{ .dimension = dimension, .x = x, .z = z }) catch |err| return status(err)) orelse return .not_found;
     return if (result.cleanup.failure != null or !result.cleanup.synced) .cleanup_pending else .ok;
 }
