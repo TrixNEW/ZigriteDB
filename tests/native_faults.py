@@ -91,7 +91,7 @@ def workload(api, path, ack):
     name = os.fsencode(path)
     handle = c.c_void_p()
     opened = api.lib.zg_open(name, len(name), c.byref(api.options), c.byref(handle))
-    if opened == 7:
+    if opened in (7, 14, 15):
         assert not handle.value
         return
     assert opened == 0, opened
@@ -99,8 +99,8 @@ def workload(api, path, ack):
     if result == 0:
         os.write(ack, b"W")
         result = api.lib.zg_compact(handle, 0, 0, 0)
-    assert result in (0, 7, 12), ("unexpected injected result", result)
-    assert api.lib.zg_close(handle) in (0, 7)
+    assert result in (0, 7, 12, 14, 15), ("unexpected injected result", result)
+    assert api.lib.zg_close(handle) in (0, 7, 14, 15)
 
 
 def trace(api, path, target=0, mode="baseline"):
@@ -148,7 +148,7 @@ def trace(api, path, target=0, mode="baseline"):
                     ptrace(13, pid, c.byref(registers))
                     injecting = True
             elif not entering and injecting:
-                registers[10] = (1 << 64) - (errno.ENOSPC if mode == "enospc" else errno.EIO)
+                registers[10] = (1 << 64) - {"enospc": errno.ENOSPC, "eio": errno.EIO, "readonly": errno.EROFS}[mode]
                 ptrace(13, pid, c.byref(registers))
                 injecting = False
             entering = not entering
@@ -188,6 +188,22 @@ def verify(api, path, recovered, acknowledged):
     assert api.lib.zg_close(handle) == 0
 
 
+def check_permissions(api, root):
+    denied = root / "denied"
+    denied.mkdir(mode=0)
+    pid = os.fork()
+    if pid == 0:
+        if os.geteuid() == 0:
+            os.setgid(65534)
+            os.setuid(65534)
+        name = os.fsencode(denied)
+        handle = c.c_void_p()
+        result = api.lib.zg_open(name, len(name), c.byref(api.options), c.byref(handle))
+        os._exit(0 if result == 13 and not handle.value else 1)
+    _, result = os.waitpid(pid, 0)
+    denied.chmod(0o700)
+    assert os.WIFEXITED(result) and os.WEXITSTATUS(result) == 0
+
 def main():
     assert sys.platform == "linux" and platform.machine() == "x86_64"
     library, smoke = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
@@ -195,6 +211,7 @@ def main():
     signal.alarm(240)
     with tempfile.TemporaryDirectory(prefix="zigritedb-native-") as temporary:
         root = Path(temporary)
+        check_permissions(api, root)
         c_root = root / "c-smoke"
         c_root.mkdir()
         env = dict(os.environ, LD_LIBRARY_PATH=str(library.parent))
@@ -212,13 +229,13 @@ def main():
         assert any("rename" in event for event in events)
         assert any("unlink" in event for event in events)
         verify(api, baseline, root / "baseline-recovered", acknowledged)
-        for mode in ("kill", "enospc", "eio"):
+        for mode in ("kill", "enospc", "eio", "readonly"):
             for point in range(1, len(events) + 1):
                 case = root / f"{mode}-{point}"
                 shutil.copytree(template, case)
                 _, acknowledged = trace(api, case, point, mode)
                 verify(api, case, root / f"recovered-{mode}-{point}", acknowledged)
-        print(f"{len(events) * 3} syscall-boundary crash and I/O fault cases passed: {sorted(set(events))}")
+        print(f"{len(events) * 4} syscall-boundary crash and I/O fault cases passed: {sorted(set(events))}")
     signal.alarm(0)
 
 

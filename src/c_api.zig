@@ -2,6 +2,17 @@ const std = @import("std");
 const db = @import("root.zig");
 const allocator = std.heap.page_allocator;
 
+const abi_version: u32 = 1;
+const max_path_length: usize = 4096;
+
+pub export fn zg_abi_version() u32 {
+    return abi_version;
+}
+
+pub export fn zg_platform_supported() c_int {
+    return @intFromBool(db.directory.supported);
+}
+
 pub const Status = enum(c_int) {
     ok,
     not_found,
@@ -16,10 +27,34 @@ pub const Status = enum(c_int) {
     batch_order,
     limit,
     cleanup_pending,
+    permission_denied,
+    no_space,
+    read_only,
 };
 
+pub export fn zg_status_message(code: c_int) [*:0]const u8 {
+    const value = std.enums.fromInt(Status, code) orelse return "Unknown status";
+    return switch (value) {
+        .ok => "OK",
+        .not_found => "Not found",
+        .invalid_argument => "Invalid argument",
+        .buffer_too_small => "Buffer too small",
+        .out_of_memory => "Out of memory",
+        .unsupported => "Unsupported platform or format",
+        .corruption => "Corrupt data",
+        .io_error => "I/O error",
+        .needs_recovery => "Recovery required",
+        .busy => "Store is busy",
+        .batch_order => "Batch ID is out of order",
+        .limit => "Storage or batch limit exceeded",
+        .cleanup_pending => "Compaction succeeded; cleanup is pending",
+        .permission_denied => "Permission denied",
+        .no_space => "Disk full or quota exceeded",
+        .read_only => "Read-only filesystem",
+    };
+}
 pub const Options = extern struct {
-    version: u32 = 1,
+    version: u32 = abi_version,
     struct_size: u32 = @sizeOf(Options),
     max_open_shards: u32 = 16,
     max_keys: u32 = 65536,
@@ -30,7 +65,7 @@ pub const Options = extern struct {
     compression_threshold: u32 = 256,
 
     fn native(self: Options) !db.WorldOptions {
-        if (self.version != 1 or self.struct_size != @sizeOf(Options) or self.buffered > 1) return error.InvalidArgument;
+        if (self.version != abi_version or self.struct_size != @sizeOf(Options) or self.buffered > 1) return error.InvalidArgument;
         if (self.compression_threshold > db.record.max_value_len) return error.InvalidArgument;
         const result: db.WorldOptions = .{
             .max_open_shards = self.max_open_shards,
@@ -69,6 +104,12 @@ pub const Key = extern struct {
     }
 };
 
+pub const Region = extern struct {
+    dimension: i32,
+    x: i32,
+    z: i32,
+};
+
 pub const Operation = extern struct {
     key: Key,
     remove: u32,
@@ -86,11 +127,42 @@ pub const Handle = struct {
     threshold: u32,
 };
 
+pub export fn zg_key_init(out: ?*Key, dimension: i32, x: i32, z: i32, component: u32, subchunk_y: i32) Status {
+    const target = out orelse return .invalid_argument;
+    const key: Key = .{
+        .dimension = dimension,
+        .chunk_x = x,
+        .chunk_z = z,
+        .component = component,
+        .subchunk_y = subchunk_y,
+    };
+    _ = key.native() catch |err| return status(err);
+    target.* = key;
+    return .ok;
+}
+pub export fn zg_key_validate(key: ?*const Key) Status {
+    const value = key orelse return .invalid_argument;
+    _ = value.native() catch |err| return status(err);
+    return .ok;
+}
+
+pub export fn zg_key_region(key: ?*const Key, out: ?*Region) Status {
+    const target = out orelse return .invalid_argument;
+    const value = (key orelse return .invalid_argument).native() catch |err| return status(err);
+    const region = value.region();
+    target.* = .{ .dimension = region.dimension, .x = region.x, .z = region.z };
+    return .ok;
+}
 pub export fn zg_options_init(out: ?*Options) Status {
     (out orelse return .invalid_argument).* = .{};
     return .ok;
 }
 
+pub export fn zg_options_validate(options: ?*const Options) Status {
+    const value = options orelse return .invalid_argument;
+    _ = value.native() catch |err| return status(err);
+    return .ok;
+}
 pub export fn zg_open(path: ?[*]const u8, length: usize, options: ?*const Options, out: ?*?*Handle) Status {
     const target = out orelse return .invalid_argument;
     target.* = null;
@@ -131,7 +203,8 @@ pub export fn zg_close(optional: ?*Handle) Status {
 
 pub export fn zg_write(optional: ?*Handle, id: u64, operations: ?[*]const Operation, count: usize) Status {
     const handle = optional orelse return .invalid_argument;
-    if (operations == null or count == 0 or count > db.batch.max_records or id == 0) return .invalid_argument;
+    if (operations == null or count == 0 or id == 0) return .invalid_argument;
+    if (count > db.batch.max_records) return .limit;
     const io = handle.threaded.io();
     handle.mutex.lock(io) catch |err| return status(err);
     defer handle.mutex.unlock(io);
@@ -144,7 +217,8 @@ fn prepare(handle: *Handle, id: u64, operations: []const Operation) !void {
     var total: usize = 0;
     var used: usize = 0;
     for (operations, 0..) |operation, i| {
-        if (operation.remove > 1 or operation.value_len > db.record.max_value_len) return error.InvalidArgument;
+        if (operation.remove > 1) return error.InvalidArgument;
+        if (operation.value_len > db.record.max_value_len) return error.BatchTooLarge;
         if (operation.value_len != 0 and (operation.value == null or operation.remove == 1)) return error.InvalidArgument;
         const value = if (operation.value) |ptr| ptr[0..operation.value_len] else &.{};
         total = try std.math.add(usize, total, db.entry.overhead + value.len);
@@ -223,7 +297,7 @@ fn recover(source: ?[*]const u8, source_len: usize, destination: ?[*]const u8, d
 }
 
 fn pathSlice(ptr: ?[*]const u8, length: usize) ![]const u8 {
-    if (ptr == null or length == 0 or length > 4096) return error.InvalidArgument;
+    if (ptr == null or length == 0 or length > max_path_length) return error.InvalidArgument;
     const path = ptr.?[0..length];
     if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidArgument;
     return path;
@@ -231,6 +305,9 @@ fn pathSlice(ptr: ?[*]const u8, length: usize) ![]const u8 {
 
 fn status(err: anyerror) Status {
     return switch (err) {
+        error.AccessDenied, error.PermissionDenied => .permission_denied,
+        error.NoSpaceLeft, error.DiskQuota => .no_space,
+        error.ReadOnlyFileSystem => .read_only,
         error.OutOfMemory => .out_of_memory,
         error.UnsupportedPlatform => .unsupported,
         error.FileNotFound => .not_found,
