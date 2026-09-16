@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  A component-based world storage backend for Quark.
+  A component-based world storage backend for Quark<a href="https://discord.gg/Yv9qPRQNc3">(Discord).
 </p>
 
 > [!WARNING]
