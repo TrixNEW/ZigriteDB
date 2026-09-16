@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  A modern, lightweight, and high-performance alternative to PMMP's <a href="https://github.com/pmmp/leveldb">LevelDB</a>.
+  A component-based world storage backend for Quark.
 </p>
 
 > [!WARNING]
@@ -32,7 +32,7 @@ zig build
 For an optimized release build:
 
 ```sh
-zig build -Doptimize=ReleaseFast
+zig build -Doptimize=ReleaseSafe
 ```
 
 ## Tests
@@ -57,7 +57,55 @@ Run the native API and process-failure tests on Linux x86-64:
 ```sh
 zig build native-test
 python3 tests/native_faults.py zig-out/lib/libzigritedb_native.so zig-out/bin/native_smoke
+python3 tests/native_workloads.py zig-out/lib/libzigritedb_native.so
 ```
+
+## Native integration
+
+Storage currently supports Linux. Link against `libzigritedb_native` and include
+`zigritedb.h`; no database server or separate storage library is needed.
+
+- Open an existing world directory with `zg_open`.
+- Store chunk components separately using `zg_write`. Batch IDs increase per region;
+  `zg_last_batch_id` lets a caller resume after reopening.
+- Use `zg_write_group` for up to 64 same-region save batches with one final sync.
+  Each batch is atomic; the whole group is not atomic on failure.
+- `zg_get` uses a caller-owned buffer and reports the required size.
+- `zg_compact_async` queues background work. `zg_maintenance_wait` drains it and
+  reports errors. Reads continue during rewriting; same-region writes wait.
+- Finish caller operations before `zg_close`. Close drains maintenance and frees
+  the handle even if it reports an error.
+
+Normal writes use sync durability by default. Buffered writes can be lost after
+a crash until a successful flush, eviction, or close. Save groups always sync
+before returning success. A failed write may have reached disk; inspect the
+returned status before retrying.
+
+There are at most four reusable native write buffers and one background worker
+per handle. The maintenance queue holds 16 regions. Shard and segment limits are
+configured through `zg_options`. Cache misses still serialize while files open.
+
+The future ZPHP binding should own the native handle, translate statuses, and
+pass component bytes without changing their encoding. Quark still needs a world
+provider and a defined component schema. Bedrock LevelDB import/export belongs
+in a separate offline tool once that schema exists.
+
+## Benchmarks and fuzzing
+
+On Linux:
+
+```sh
+zig build bench -Doptimize=ReleaseSafe
+python3 bench/run.py --directory /path/to/benchmark/filesystem
+zig build fuzz --fuzz=10000
+```
+
+The benchmark creates temporary databases and prints JSON for save latency,
+hot/random reads, reads during compaction, replay, CPU, peak memory, and database
+size. Group samples represent 16 batches per call; buffered saves are not durable
+until the final flush. These synthetic workloads are not a Bedrock LevelDB
+comparison or a substitute for real server traces. Keep the filesystem, build
+mode, workload, and durability settings consistent when comparing results.
 
 ## Related Projects
 

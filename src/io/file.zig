@@ -26,8 +26,22 @@ pub const File = struct {
         return self.handle.length(self.io);
     }
 
-    pub fn sync(self: File) std.Io.File.SyncError!void {
-        return self.handle.sync(self.io);
+    pub fn sync(self: File) !void {
+        if (@import("builtin").os.tag != .linux) return self.handle.sync(self.io);
+        const linux = std.os.linux;
+        while (true) {
+            try self.io.checkCancel();
+            switch (linux.errno(linux.fsync(self.handle.handle))) {
+                .SUCCESS => return,
+                .INTR => continue,
+                .IO => return error.InputOutput,
+                .NOSPC => return error.NoSpaceLeft,
+                .DQUOT => return error.DiskQuota,
+                .ROFS => return error.ReadOnlyFileSystem,
+                .ACCES, .PERM => return error.AccessDenied,
+                else => return error.SyncFailed,
+            }
+        }
     }
 };
 

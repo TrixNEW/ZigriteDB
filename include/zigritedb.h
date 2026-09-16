@@ -9,6 +9,7 @@ extern "C" {
 #define ZG_ABI_VERSION 1u
 #define ZG_MAX_PATH_LENGTH 4096u
 #define ZG_MAX_BATCH_RECORDS 4096u
+#define ZG_MAX_GROUP_BATCHES 64u
 /* Includes the bytes used by each record header and checksum. */
 #define ZG_MAX_BATCH_BYTES (64u * 1024u * 1024u)
 #define ZG_MAX_VALUE_SIZE (16u * 1024u * 1024u)
@@ -45,6 +46,11 @@ typedef struct {
     const uint8_t *value;
     size_t value_len;
 } zg_operation;
+typedef struct {
+    uint64_t batch_id;
+    const zg_operation *operations;
+    size_t count;
+} zg_batch;
 
 /* The message belongs to the library. Do not free it. */
 const char *zg_status_message(int status);
@@ -64,11 +70,20 @@ int zg_open(const uint8_t *path, size_t path_len, const zg_options *options, zg_
 int zg_close(zg_handle *handle);
 /* Keep each batch in one region. Use a higher batch ID for each write to that region. */
 int zg_write(zg_handle *handle, uint64_t batch_id, const zg_operation *operations, size_t count);
+/* One region, increasing IDs, at most 4096 records total. Success always syncs.
+   Each batch is atomic; an error can leave earlier batches applied. */
+int zg_write_group(zg_handle *handle, const zg_batch *batches, size_t count);
 /* Pass your own buffer. required gives the value size even when the buffer is too small. */
 int zg_get(zg_handle *handle, const zg_key *key, uint8_t *output, size_t capacity, size_t *required);
 /* Buffered writes reach disk after a successful flush, shard eviction, or close. */
 int zg_flush(zg_handle *handle);
 int zg_compact(zg_handle *handle, int32_t dimension, int32_t region_x, int32_t region_z);
+/* Resume batch IDs after reopen. Coordinate values here are region coordinates. */
+int zg_last_batch_id(zg_handle *handle, int32_t dimension, int32_t region_x, int32_t region_z, uint64_t *out);
+/* Queues one region. Returns ZG_BUSY for duplicates or a full 16-slot queue. */
+int zg_compact_async(zg_handle *handle, int32_t dimension, int32_t region_x, int32_t region_z);
+/* Drains queued work and reports its first error. Close also drains the queue. */
+int zg_maintenance_wait(zg_handle *handle);
 /* Copies committed data to an empty directory. Leaves the source untouched. */
 int zg_recover_region(const uint8_t *source, size_t source_len, const uint8_t *destination, size_t destination_len, const zg_options *options);
 #ifdef __cplusplus

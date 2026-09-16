@@ -30,7 +30,7 @@ pub const Directory = struct {
         var self: Directory = .{ .dir = dir, .io = io };
         if (!try self.directoryFile().tryLock(io, .exclusive)) return error.DirectoryBusy;
 
-        try self.directoryFile().sync(io);
+        try (storage.File{ .handle = self.directoryFile(), .io = io }).sync();
 
         return self;
     }
@@ -63,8 +63,8 @@ pub const Directory = struct {
         if (self.state != .written) return error.InvalidPublicationState;
         errdefer self.state = .failed;
 
-        try self.temporary.?.sync(self.io);
-        try self.directoryFile().sync(self.io);
+        try (storage.File{ .handle = self.temporary.?, .io = self.io }).sync();
+        try (storage.File{ .handle = self.directoryFile(), .io = self.io }).sync();
         self.state = .synced;
     }
 
@@ -83,7 +83,7 @@ pub const Directory = struct {
         if (self.state != .replaced) return error.InvalidPublicationState;
         errdefer self.state = .failed;
 
-        try self.directoryFile().sync(self.io);
+        try (storage.File{ .handle = self.directoryFile(), .io = self.io }).sync();
         self.state = .idle;
     }
 
@@ -94,7 +94,7 @@ pub const Directory = struct {
 
     pub fn syncEntries(self: *Directory) !void {
         if (self.state != .idle) return error.InvalidPublicationState;
-        try self.directoryFile().sync(self.io);
+        try (storage.File{ .handle = self.directoryFile(), .io = self.io }).sync();
     }
     fn directoryFile(self: *const Directory) std.Io.File {
         return .{

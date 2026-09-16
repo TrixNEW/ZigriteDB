@@ -52,6 +52,18 @@ pub const World = struct {
         return store.write(batch);
     }
 
+    pub fn writeGroup(self: *World, batches: []const WriteBatch) !void {
+        try @import("../batch/group.zig").validate(batches);
+        for (batches) |batch| {
+            const size = try batch.size();
+            if (size > self.options.shard.batch_buffer_size) return error.BufferTooSmall;
+            if (size > self.options.shard.max_segment_size - segment.encoded_len) return error.BatchTooLarge;
+        }
+        const store = (try self.acquire(batches[0].entries[0].key.region(), true)).?;
+        defer self.unpin(store);
+        try store.writeGroup(batches);
+    }
+
     pub fn get(self: *World, key: Key, output: []u8) !?[]const u8 {
         _ = try key.encode();
         const store = (try self.acquire(key.region(), false)) orelse return null;
@@ -65,6 +77,12 @@ pub const World = struct {
         const store = (try self.acquire(key.region(), false)) orelse return null;
         defer self.unpin(store);
         return store.getSized(key, output, required);
+    }
+
+    pub fn lastBatchId(self: *World, region: Region) !?u64 {
+        const store = (try self.acquire(region, false)) orelse return null;
+        defer self.unpin(store);
+        return try store.lastBatchId();
     }
 
     pub fn valueSize(self: *World, key: Key) !?u32 {

@@ -3,3 +3,5 @@ zig-out/
 *.o
 PLAN.md
 /docs/
+
+__pycache__/

@@ -178,3 +178,30 @@ fn readFirst(world: *db.World) !void {
 fn closePinned(world: *db.World, result: *anyerror!void) void {
     result.* = world.close();
 }
+
+test "save groups sync buffered batches and reject mixed regions before writing" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .shard = .{ .durability = .buffered } });
+    defer world.deinit();
+    const batches = [_]db.WriteBatch{
+        .{ .entries = &.{item(1, 0, "first")} },
+        .{ .entries = &.{ item(2, 0, "last"), item(2, 1, "other") } },
+    };
+    try testing.expectError(error.RegionMismatch, world.writeGroup(&.{
+        batches[0], .{ .entries = &.{item(2, 32, "wrong")} },
+    }));
+    try testing.expectEqual(@as(usize, 0), world.count);
+    try world.writeGroup(&batches);
+    const writer = &world.slots[0].store.shard.writer;
+    try testing.expectEqual(writer.offset, writer.synced_offset);
+    try testing.expectEqual(.buffered, world.slots[0].store.shard.options.durability);
+    try testing.expectError(error.BatchOrder, world.writeGroup(&batches));
+    try world.close();
+    var reopened = try db.World.open(testing.allocator, io, tmp.dir, .{});
+    defer reopened.deinit();
+    var output: [32]u8 = undefined;
+    try testing.expectEqualStrings("last", (try reopened.get(item(1, 0, "").key, &output)).?);
+    try testing.expectEqualStrings("other", (try reopened.get(item(1, 1, "").key, &output)).?);
+}

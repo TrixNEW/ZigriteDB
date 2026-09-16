@@ -17,6 +17,7 @@ pub const compactTo = @import("recovery/copy.zig").compactTo;
 pub const recovery_copy = @import("recovery/copy.zig");
 pub const inspection = @import("recovery/inspect.zig");
 pub const recovery = @import("recovery/scan.zig");
+pub const maintenance = @import("world/maintenance.zig");
 pub const World = @import("world/world.zig").World;
 pub const WorldOptions = @import("world/world.zig").Options;
 pub const Store = @import("shard/store.zig").Store;

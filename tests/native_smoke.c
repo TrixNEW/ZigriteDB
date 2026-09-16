@@ -84,6 +84,15 @@ int main(int argc, char **argv) {
     assert(zg_write(handle, 3, operations, 1) == ZG_OK);
     assert(zg_get(handle, &operations[0].key, NULL, 0, &required) == ZG_OK);
     assert(required == 0);
+    zg_batch batches[2] = {{4, operations, 1}, {5, operations + 1, 1}};
+    assert(zg_write_group(handle, NULL, 1) == ZG_INVALID_ARGUMENT);
+    assert(zg_write_group(handle, batches, ZG_MAX_GROUP_BATCHES + 1) == ZG_LIMIT);
+    assert(zg_write_group(handle, batches, 2) == ZG_OK);
+    uint64_t last = 0;
+    assert(zg_last_batch_id(handle, 0, 0, 0, &last) == ZG_OK && last == 5);
+    assert(zg_compact_async(handle, 0, 0, 0) == ZG_OK);
+    assert(zg_maintenance_wait(handle) == ZG_OK);
+    assert(zg_compact_async(handle, 0, 0, 0) == ZG_OK);
     assert(zg_flush(handle) == ZG_OK);
     assert(zg_close(handle) == ZG_OK);
     assert(zg_close(NULL) == ZG_INVALID_ARGUMENT);

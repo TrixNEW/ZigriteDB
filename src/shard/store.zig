@@ -35,6 +35,7 @@ pub const Store = struct {
     devices: []File,
     file_count: usize,
     mutex: std.Io.Mutex = .init,
+    writer_mutex: std.Io.Mutex = .init,
     closed: bool = false,
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, region: Region, options: Options) !Store {
@@ -135,9 +136,35 @@ pub const Store = struct {
     }
 
     pub fn write(self: *Store, batch: WriteBatch) !writer.AppendResult {
+        try self.writer_mutex.lock(self.io);
+        defer self.writer_mutex.unlock(self.io);
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
+        return self.writeLocked(batch);
+    }
+
+    /// Each batch is atomic; an error can leave earlier batches applied.
+    pub fn writeGroup(self: *Store, batches: []const WriteBatch) !void {
+        try @import("../batch/group.zig").validate(batches);
+        try self.writer_mutex.lock(self.io);
+        defer self.writer_mutex.unlock(self.io);
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.Closed;
+        for (batches) |batch| {
+            const size = try batch.size();
+            if (size > self.shard.options.batch_buffer_size) return error.BufferTooSmall;
+            if (size > self.shard.options.max_segment_size - segment.encoded_len) return error.BatchTooLarge;
+        }
+        const durability = self.shard.options.durability;
+        self.shard.options.durability = .buffered;
+        defer self.shard.options.durability = durability;
+        for (batches) |batch| _ = try self.writeLocked(batch);
+        try self.shard.flush();
+    }
+
+    fn writeLocked(self: *Store, batch: WriteBatch) !writer.AppendResult {
         if (self.closed) return error.Closed;
         if (self.shard.writer.failed) return error.WriterFailed;
 
@@ -157,14 +184,19 @@ pub const Store = struct {
 
     /// Installs a compacted generation, then reclaims the old segments.
     pub fn compact(self: *Store) !CompactionResult {
+        try self.writer_mutex.lock(self.io);
+        defer self.writer_mutex.unlock(self.io);
         try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
+        var locked = true;
+        defer if (locked) self.mutex.unlock(self.io);
         if (self.closed) return error.Closed;
         if (self.shard.writer.failed) return error.WriterFailed;
         const generation = std.math.add(u64, self.shard.index.generation, 1) catch return error.GenerationExhausted;
         const options = self.shard.options;
         try self.shard.flush();
 
+        const scratch = try self.allocator.alloc(u8, options.batch_buffer_size + segment.encoded_len);
+        defer self.allocator.free(scratch);
         const ids = try self.allocator.alloc(u64, options.max_segments);
         defer self.allocator.free(ids);
         const filtered = try self.allocator.alloc(u8, options.batch_buffer_size);
@@ -185,6 +217,8 @@ pub const Store = struct {
             .ids = ids,
         };
         defer output.deinit();
+        self.mutex.unlock(self.io);
+        locked = false;
         var previous: u64 = 0;
         var source_bytes: u64 = 0;
         for (self.devices[0..self.file_count], self.shard.segment_ids[0..self.file_count], 0..) |device, id, position| {
@@ -194,7 +228,7 @@ pub const Store = struct {
                 .region = self.shard.index.region,
             }, if (position == self.file_count - 1) .active else .sealed, previous, options.max_segment_size);
             source_bytes = try std.math.add(u64, source_bytes, scanner.length);
-            while (try scanner.next(self.shard.scratch)) |batch| {
+            while (try scanner.next(scratch)) |batch| {
                 try output.append(try compactBatch(&self.shard.index, id, batch, filtered));
             }
             if (scanner.has_tail) return error.NeedsRecovery;
@@ -217,6 +251,8 @@ pub const Store = struct {
         }
         var next = try Shard.openSegments(self.allocator, self.io, devices[0..opened], metadata, options);
         errdefer next.deinit();
+        try self.mutex.lock(self.io);
+        locked = true;
         var publisher: publication.Publisher(*Directory) = .{ .backend = &self.directory };
         publisher.publish(bytes) catch |err| {
             self.shard.writer.failed = true;
@@ -243,6 +279,8 @@ pub const Store = struct {
     }
 
     pub fn reclaim(self: *Store, generation: u64, ids: []const u64) !reclamation.Result {
+        try self.writer_mutex.lock(self.io);
+        defer self.writer_mutex.unlock(self.io);
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.Closed;
@@ -270,6 +308,13 @@ pub const Store = struct {
         return self.shard.get(key, output);
     }
 
+    pub fn lastBatchId(self: *Store) !u64 {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.Closed;
+        return self.shard.index.last_batch_id;
+    }
+
     pub fn valueSize(self: *Store, key: Key) !?u32 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -288,6 +333,8 @@ pub const Store = struct {
     }
 
     pub fn close(self: *Store) !void {
+        self.writer_mutex.lockUncancelable(self.io);
+        defer self.writer_mutex.unlock(self.io);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
@@ -299,6 +346,8 @@ pub const Store = struct {
     }
 
     pub fn deinit(self: *Store) void {
+        self.writer_mutex.lockUncancelable(self.io);
+        defer self.writer_mutex.unlock(self.io);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 

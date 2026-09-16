@@ -27,6 +27,10 @@ class Operation(c.Structure):
     _fields_ = [("key", Key), ("remove", c.c_uint32), ("value", c.c_void_p), ("length", c.c_size_t)]
 
 
+class Batch(c.Structure):
+    _fields_ = [("id", c.c_uint64), ("operations", c.POINTER(Operation)), ("count", c.c_size_t)]
+
+
 class API:
     def __init__(self, library):
         self.lib = c.CDLL(str(library))
@@ -37,12 +41,17 @@ class API:
             "zg_write": [c.c_void_p, c.c_uint64, c.POINTER(Operation), c.c_size_t],
             "zg_get": [c.c_void_p, c.POINTER(Key), c.c_void_p, c.c_size_t, c.POINTER(c.c_size_t)],
             "zg_flush": [c.c_void_p],
+            "zg_write_group": [c.c_void_p, c.POINTER(Batch), c.c_size_t],
+            "zg_compact_async": [c.c_void_p, c.c_int32, c.c_int32, c.c_int32],
+            "zg_maintenance_wait": [c.c_void_p],
+            "zg_last_batch_id": [c.c_void_p, c.c_int32, c.c_int32, c.c_int32, c.POINTER(c.c_uint64)],
             "zg_compact": [c.c_void_p, c.c_int32, c.c_int32, c.c_int32],
             "zg_recover_region": [c.c_char_p, c.c_size_t, c.c_char_p, c.c_size_t, c.POINTER(Options)],
         }
         for name, arguments in signatures.items():
             fn = getattr(self.lib, name)
             fn.argtypes, fn.restype = arguments, c.c_int
+        self.grouped = False
         self.options = Options()
         assert self.lib.zg_options_init(c.byref(self.options)) == 0
         self.options.max_segment_size = 256
@@ -63,6 +72,18 @@ class API:
             for i, (buf, value) in enumerate(zip(buffers, values))
         ])
         return self.lib.zg_write(handle, batch, operations, len(operations))
+
+    def write_group(self, handle):
+        buffers = [c.create_string_buffer(value) for value in (b"new0", b"new1", b"next0", b"next1")]
+        operations = (Operation * 4)(*[
+            Operation(Key(0, i % 2, 0, 0, 5), 0, c.cast(buffer, c.c_void_p), len(buffer) - 1)
+            for i, buffer in enumerate(buffers)
+        ])
+        batches = (Batch * 2)(
+            Batch(2, c.cast(operations, c.POINTER(Operation)), 2),
+            Batch(3, c.cast(c.byref(operations, 2 * c.sizeof(Operation)), c.POINTER(Operation)), 2),
+        )
+        return self.lib.zg_write_group(handle, batches, 2)
 
     def read(self, handle, index):
         key, length = Key(0, index, 0, 0, 5), c.c_size_t()
@@ -97,7 +118,7 @@ def workload(api, path, ack):
         assert not handle.value
         return
     assert opened == 0, opened
-    result = api.write(handle, 2, [b"new0", b"new1"])
+    result = api.write_group(handle) if api.grouped else api.write(handle, 2, [b"new0", b"new1"])
     if result == 0:
         os.write(ack, b"W")
         result = api.lib.zg_compact(handle, 0, 0, 0)
@@ -184,9 +205,12 @@ def verify(api, path, recovered, acknowledged):
         first = api.read(handle, 0)
     second = api.read(handle, 1)
     assert first[0] == second[0] == 0, (first, second)
-    assert (first[1], second[1]) in ((b"base0", b"base1"), (b"new0", b"new1")), (first, second)
+    allowed = [(b"base0", b"base1"), (b"new0", b"new1")]
+    if api.grouped:
+        allowed.append((b"next0", b"next1"))
+    assert (first[1], second[1]) in allowed, (first, second)
     if acknowledged:
-        assert (first[1], second[1]) == (b"new0", b"new1")
+        assert (first[1], second[1]) == allowed[-1]
     assert api.lib.zg_close(handle) == 0
 
 
@@ -242,7 +266,8 @@ def check_concurrency(library, root):
         start.wait()
         for _ in range(10):
             assert api.lib.zg_flush(handle) == 0
-            assert api.lib.zg_compact(handle, 0, 0, 0) in (0, 1)
+            assert api.lib.zg_compact_async(handle, 0, 0, 0) in (0, 9)
+        assert api.lib.zg_maintenance_wait(handle) in (0, 1)
 
     try:
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -252,6 +277,10 @@ def check_concurrency(library, root):
                 future.result()
         for x in (0, 32):
             assert api.read(handle, x) == (0, b"x" * 512)
+            batch_id = c.c_uint64()
+            assert api.lib.zg_last_batch_id(handle, 0, x // 32, 0, c.byref(batch_id)) == 0
+            assert batch_id.value == 100
+        assert api.lib.zg_compact_async(handle, 0, 1, 0) == 0
     finally:
         assert api.lib.zg_close(handle) == 0
     print("Concurrent C API reads, writes, flush and compaction passed")
@@ -274,21 +303,23 @@ def main():
         handle = api.open(template)
         assert api.write(handle, 1, [b"base0", b"base1"]) == 0
         assert api.lib.zg_close(handle) == 0
-        baseline = root / "baseline"
-        shutil.copytree(template, baseline)
-        events, acknowledged = trace(api, baseline)
-        assert any("write" in event for event in events)
-        assert any("sync" in event for event in events)
-        assert any("rename" in event for event in events)
-        assert any("unlink" in event for event in events)
-        verify(api, baseline, root / "baseline-recovered", acknowledged)
-        for mode in ("kill", "enospc", "eio", "readonly"):
-            for point in range(1, len(events) + 1):
-                case = root / f"{mode}-{point}"
-                shutil.copytree(template, case)
-                _, acknowledged = trace(api, case, point, mode)
-                verify(api, case, root / f"recovered-{mode}-{point}", acknowledged)
-        print(f"{len(events) * 4} syscall-boundary crash and I/O fault cases passed: {sorted(set(events))}")
+        for grouped in (False, True):
+            api.grouped = grouped
+            baseline = root / f"baseline-{grouped}"
+            shutil.copytree(template, baseline)
+            events, acknowledged = trace(api, baseline)
+            assert any("write" in event for event in events)
+            assert any("sync" in event for event in events)
+            assert any("rename" in event for event in events)
+            assert any("unlink" in event for event in events)
+            verify(api, baseline, root / f"baseline-recovered-{grouped}", acknowledged)
+            for mode in ("kill", "enospc", "eio", "readonly"):
+                for point in range(1, len(events) + 1):
+                    case = root / f"{grouped}-{mode}-{point}"
+                    shutil.copytree(template, case)
+                    _, acknowledged = trace(api, case, point, mode)
+                    verify(api, case, root / f"recovered-{grouped}-{mode}-{point}", acknowledged)
+            print(f"{len(events) * 4} syscall-boundary crash and I/O fault cases passed: {sorted(set(events))}")
         check_concurrency(library, root)
     signal.alarm(0)
 

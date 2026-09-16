@@ -32,8 +32,18 @@ jobs:
         run: |
           zig build native-test
           python3 tests/native_faults.py zig-out/lib/libzigritedb_native.so zig-out/bin/native_smoke
+          python3 tests/native_workloads.py zig-out/lib/libzigritedb_native.so
 
       - name: Build and test native API (ReleaseSafe)
         run: |
           zig build native-test -Doptimize=ReleaseSafe
           python3 tests/native_faults.py zig-out/lib/libzigritedb_native.so zig-out/bin/native_smoke
+          python3 tests/native_workloads.py zig-out/lib/libzigritedb_native.so
+
+      - name: Fuzz parsers
+        run: zig build fuzz --fuzz=10000
+
+      - name: Check benchmark workloads
+        run: |
+          zig build bench -Doptimize=ReleaseSafe
+          python3 bench/run.py --batches 256 --repeats 1

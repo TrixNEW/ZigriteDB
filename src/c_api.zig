@@ -120,11 +120,59 @@ pub const Operation = extern struct {
 pub const Handle = struct {
     threaded: std.Io.Threaded,
     world: db.World,
+    maintenance: @import("world/maintenance.zig").Queue(db.World, compactRegion),
     mutex: std.Io.Mutex = .init,
+    available: std.Io.Condition = .init,
+    writers: [4]?WriteContext = .{null} ** 4,
+    writer_limit: usize,
+    threshold: u32,
+
+    fn acquireWriter(self: *Handle) !*WriteContext {
+        const io = self.threaded.io();
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+        while (true) {
+            for (self.writers[0..self.writer_limit]) |*slot| {
+                if (slot.* == null) slot.* = try WriteContext.init(self.threshold, self.world.options.shard.batch_buffer_size);
+                const context = &slot.*.?;
+                if (context.busy) continue;
+                context.busy = true;
+                return context;
+            }
+            try self.available.wait(io, &self.mutex);
+        }
+    }
+
+    fn releaseWriter(self: *Handle, context: *WriteContext) void {
+        const io = self.threaded.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        context.busy = false;
+        self.available.signal(io);
+    }
+};
+
+const WriteContext = struct {
     entries: []db.entry.Entry,
     compression: []u8,
     encoder: db.lz4.Encoder = .{},
     threshold: u32,
+    busy: bool = false,
+
+    fn init(threshold: u32, size: usize) !WriteContext {
+        const entries = try allocator.alloc(db.entry.Entry, db.batch.max_records);
+        errdefer allocator.free(entries);
+        return .{
+            .entries = entries,
+            .compression = try allocator.alloc(u8, if (threshold == 0) 0 else size),
+            .threshold = threshold,
+        };
+    }
+
+    fn deinit(self: *WriteContext) void {
+        allocator.free(self.compression);
+        allocator.free(self.entries);
+    }
 };
 
 pub export fn zg_key_init(out: ?*Key, dimension: i32, x: i32, z: i32, component: u32, subchunk_y: i32) Status {
@@ -182,22 +230,24 @@ fn open(path: ?[*]const u8, length: usize, options: Options) !*Handle {
     defer dir.close(io);
     handle.world = try db.World.open(allocator, io, dir, config);
     errdefer handle.world.deinit();
-    handle.entries = try allocator.alloc(db.entry.Entry, db.batch.max_records);
-    errdefer allocator.free(handle.entries);
-    handle.compression = try allocator.alloc(u8, if (options.compression_threshold == 0) 0 else config.shard.batch_buffer_size);
+    handle.maintenance = .{ .io = io, .context = &handle.world };
     handle.mutex = .init;
+    handle.available = .init;
+    handle.writers = .{null} ** 4;
+    handle.writer_limit = @min(4, config.max_open_shards);
     handle.threshold = options.compression_threshold;
     return handle;
 }
 
 pub export fn zg_close(optional: ?*Handle) Status {
     const handle = optional orelse return .invalid_argument;
+    const maintenance_result = handle.maintenance.close();
     const result = handle.world.close();
-    allocator.free(handle.compression);
-    allocator.free(handle.entries);
+    for (&handle.writers) |*slot| if (slot.*) |*context| context.deinit();
     handle.threaded.deinit();
     allocator.destroy(handle);
     result catch |err| return status(err);
+    maintenance_result catch |err| return status(err);
     return .ok;
 }
 
@@ -205,17 +255,52 @@ pub export fn zg_write(optional: ?*Handle, id: u64, operations: ?[*]const Operat
     const handle = optional orelse return .invalid_argument;
     if (operations == null or count == 0 or id == 0) return .invalid_argument;
     if (count > db.batch.max_records) return .limit;
-    const io = handle.threaded.io();
-    handle.mutex.lock(io) catch |err| return status(err);
-    defer handle.mutex.unlock(io);
-    prepare(handle, id, operations.?[0..count]) catch |err| return status(err);
-    _ = handle.world.write(.{ .entries = handle.entries[0..count] }) catch |err| return status(err);
+    const context = handle.acquireWriter() catch |err| return status(err);
+    defer handle.releaseWriter(context);
+    _ = prepare(context, id, operations.?[0..count], 0, 0) catch |err| return status(err);
+    _ = handle.world.write(.{ .entries = context.entries[0..count] }) catch |err| return status(err);
     return .ok;
 }
 
-fn prepare(handle: *Handle, id: u64, operations: []const Operation) !void {
+pub const Batch = extern struct {
+    id: u64,
+    operations: ?[*]const Operation,
+    count: usize,
+};
+
+pub export fn zg_write_group(optional: ?*Handle, input: ?[*]const Batch, count: usize) Status {
+    const handle = optional orelse return .invalid_argument;
+    if (input == null or count == 0) return .invalid_argument;
+    if (count > @import("batch/group.zig").max_batches) return .limit;
     var total: usize = 0;
+    var raw_bytes: usize = 0;
+    for (input.?[0..count]) |batch| {
+        if (batch.operations == null or batch.count == 0 or batch.id == 0) return .invalid_argument;
+        total = std.math.add(usize, total, batch.count) catch return .limit;
+        if (total > db.batch.max_records) return .limit;
+        for (batch.operations.?[0..batch.count]) |operation| {
+            raw_bytes = std.math.add(usize, raw_bytes, operation.value_len) catch return .limit;
+            raw_bytes = std.math.add(usize, raw_bytes, db.entry.overhead) catch return .limit;
+            if (raw_bytes > db.batch.max_bytes) return .limit;
+        }
+    }
+    const context = handle.acquireWriter() catch |err| return status(err);
+    defer handle.releaseWriter(context);
+    var batches: [@import("batch/group.zig").max_batches]db.WriteBatch = undefined;
+    var offset: usize = 0;
     var used: usize = 0;
+    for (input.?[0..count], 0..) |batch, i| {
+        used = prepare(context, batch.id, batch.operations.?[0..batch.count], offset, used) catch |err| return status(err);
+        batches[i] = .{ .entries = context.entries[offset .. offset + batch.count] };
+        offset += batch.count;
+    }
+    handle.world.writeGroup(batches[0..count]) catch |err| return status(err);
+    return .ok;
+}
+
+fn prepare(context: *WriteContext, id: u64, operations: []const Operation, offset: usize, compression_offset: usize) !usize {
+    var total: usize = 0;
+    var used = compression_offset;
     for (operations, 0..) |operation, i| {
         if (operation.remove > 1) return error.InvalidArgument;
         if (operation.value_len > db.record.max_value_len) return error.BatchTooLarge;
@@ -228,14 +313,15 @@ fn prepare(handle: *Handle, id: u64, operations: []const Operation) !void {
             .header = .{ .kind = if (operation.remove == 1) .delete else .put, .batch_id = id, .stored_len = @intCast(value.len), .raw_len = @intCast(value.len) },
             .value = value,
         };
-        if (handle.threshold != 0 and value.len >= handle.threshold and
-            try db.lz4.bound(value.len) <= handle.compression.len - used)
+        if (context.threshold != 0 and value.len >= context.threshold and
+            try db.lz4.bound(value.len) <= context.compression.len - used)
         {
-            item = try item.compress(&handle.encoder, handle.compression[used..]);
+            item = try item.compress(&context.encoder, context.compression[used..]);
             if (item.header.compression == .lz4) used += item.value.len;
         }
-        handle.entries[i] = item;
+        context.entries[offset + i] = item;
     }
+    return used;
 }
 
 pub export fn zg_get(optional: ?*Handle, key: ?*const Key, output: ?[*]u8, capacity: usize, required: ?*usize) Status {
@@ -259,6 +345,31 @@ pub export fn zg_compact(optional: ?*Handle, dimension: i32, x: i32, z: i32) Sta
     const handle = optional orelse return .invalid_argument;
     const result = (handle.world.compact(.{ .dimension = dimension, .x = x, .z = z }) catch |err| return status(err)) orelse return .not_found;
     return if (result.cleanup.failure != null or !result.cleanup.synced) .cleanup_pending else .ok;
+}
+
+pub export fn zg_last_batch_id(optional: ?*Handle, dimension: i32, x: i32, z: i32, out: ?*u64) Status {
+    const target = out orelse return .invalid_argument;
+    target.* = 0;
+    const handle = optional orelse return .invalid_argument;
+    target.* = (handle.world.lastBatchId(.{ .dimension = dimension, .x = x, .z = z }) catch |err| return status(err)) orelse return .not_found;
+    return .ok;
+}
+
+pub export fn zg_compact_async(optional: ?*Handle, dimension: i32, x: i32, z: i32) Status {
+    const handle = optional orelse return .invalid_argument;
+    handle.maintenance.submit(.{ .dimension = dimension, .x = x, .z = z }) catch |err| return status(err);
+    return .ok;
+}
+
+pub export fn zg_maintenance_wait(optional: ?*Handle) Status {
+    const handle = optional orelse return .invalid_argument;
+    handle.maintenance.wait() catch |err| return status(err);
+    return .ok;
+}
+
+fn compactRegion(world: *db.World, region: db.Region) !void {
+    const result = (try world.compact(region)) orelse return error.FileNotFound;
+    if (result.cleanup.failure != null or !result.cleanup.synced) return error.CleanupPending;
 }
 
 pub export fn zg_recover_region(source: ?[*]const u8, source_len: usize, destination: ?[*]const u8, destination_len: usize, options: ?*const Options) Status {
@@ -300,10 +411,11 @@ fn status(err: anyerror) Status {
         error.UnsupportedPlatform => .unsupported,
         error.FileNotFound => .not_found,
         error.BufferTooSmall => .buffer_too_small,
-        error.DirectoryBusy => .busy,
+        error.DirectoryBusy, error.QueueFull, error.AlreadyQueued => .busy,
+        error.CleanupPending => .cleanup_pending,
         error.NeedsRecovery => .needs_recovery,
         error.BatchOrder => .batch_order,
-        error.BatchTooLarge, error.IndexFull, error.TooManySegments, error.SegmentFull => .limit,
+        error.BatchTooLarge, error.IndexFull, error.TooManySegments, error.SegmentFull, error.GenerationExhausted, error.SegmentIdExhausted => .limit,
         error.InvalidArgument, error.InvalidSubchunkY, error.RegionMismatch, error.InvalidBufferSize, error.InvalidShardLimit => .invalid_argument,
         error.InvalidMagic, error.ChecksumMismatch, error.InvalidCompressedData, error.TruncatedHeader, error.TruncatedRecord, error.TruncatedManifest, error.InvalidLength, error.InvalidCommit, error.BatchMismatch, error.IdentityMismatch, error.IncompleteBatch, error.InvalidGeneration, error.InvalidSegmentCount, error.InvalidSegmentId, error.InvalidSegmentOrder, error.InvalidActiveSegment, error.InvalidBatchId, error.InvalidCommitCount, error.IndexMismatch => .corruption,
         error.UnsupportedVersion, error.UnsupportedCompression, error.InvalidFlags, error.UnknownKind => .unsupported,

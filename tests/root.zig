@@ -1,6 +1,8 @@
 test {
     _ = @import("lz4.zig");
+    _ = @import("fuzz.zig");
     _ = @import("world.zig");
+    _ = @import("maintenance.zig");
     _ = @import("format_key.zig");
     _ = @import("format_record.zig");
     _ = @import("format_entry.zig");
