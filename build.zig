@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
     b.installFile("include/zigritedb.h", "include/zigritedb.h");
 
     const smoke_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
-    smoke_module.addCSourceFile(.{ .file = b.path("tests/native_smoke.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    smoke_module.addCSourceFile(.{ .file = b.path("tests/native/native_smoke.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
     smoke_module.addIncludePath(b.path("include"));
     smoke_module.linkLibrary(native);
     const smoke = b.addExecutable(.{ .name = "native_smoke", .root_module = smoke_module });
@@ -38,7 +38,7 @@ pub fn build(b: *std.Build) void {
 
     if (target.result.os.tag == .linux) {
         const bench_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
-        bench_module.addCSourceFile(.{ .file = b.path("bench/native.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        bench_module.addCSourceFile(.{ .file = b.path("tests/bench/native.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         bench_module.addIncludePath(b.path("include"));
         bench_module.linkLibrary(native);
         const bench = b.addExecutable(.{ .name = "native_bench", .root_module = bench_module });

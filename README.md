@@ -56,8 +56,8 @@ Run the native API and process-failure tests on Linux x86-64:
 
 ```sh
 zig build native-test
-python3 tests/native_faults.py zig-out/lib/libzigritedb_native.so zig-out/bin/native_smoke
-python3 tests/native_workloads.py zig-out/lib/libzigritedb_native.so
+python3 tests/native/native_faults.py zig-out/lib/libzigritedb_native.so zig-out/bin/native_smoke
+python3 tests/native/native_workloads.py zig-out/lib/libzigritedb_native.so
 ```
 
 ## Native integration
@@ -96,7 +96,7 @@ On Linux:
 
 ```sh
 zig build bench -Doptimize=ReleaseSafe
-python3 bench/run.py --directory /path/to/benchmark/filesystem
+python3 tests/bench/run.py --directory /path/to/benchmark/filesystem
 zig build fuzz --fuzz=10000
 ```
 
