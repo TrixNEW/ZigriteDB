@@ -41,11 +41,9 @@ pub const File = struct {
     }
 };
 
-
 const std = @import("std");
 
 const WriteBatch = @import("../batch/write.zig").WriteBatch;
 const entry = @import("../format/entry.zig");
 const segment = @import("../format/segment.zig");
 pub const transfer = @import("transfer.zig");
-

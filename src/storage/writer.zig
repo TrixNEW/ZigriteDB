@@ -130,7 +130,6 @@ pub fn Writer(comptime Device: type) type {
     };
 }
 
-
 const std = @import("std");
 
 const commit = @import("../batch/commit.zig");
@@ -140,4 +139,3 @@ const test_entry = @import("../format/entry.zig");
 const segment = @import("../format/segment.zig");
 const storage_file = @import("../io/file.zig");
 const file_scan = @import("../recovery/file_scan.zig");
-
