@@ -113,3 +113,41 @@ test "cleanup reports retained paths without interrupting the store" {
     _ = try store.write(.{ .entries = &.{item(1, 0, "saved")} });
     try store.close();
 }
+
+test "compaction stops writes after source corruption" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{});
+    defer store.deinit();
+    _ = try store.write(.{ .entries = &.{item(1, 0, "old")} });
+    _ = try store.write(.{ .entries = &.{item(2, 0, "saved")} });
+    var byte: [1]u8 = undefined;
+    const offset = db.segment.encoded_len + db.record.encoded_len + db.Key.encoded_len;
+    try store.devices[0].readExact(&byte, offset);
+    byte[0] ^= 1;
+    try store.devices[0].writeAll(&byte, offset);
+    try testing.expectError(error.ChecksumMismatch, store.compact());
+    try testing.expectEqual(@as(u64, 1), store.shard.index.generation);
+    var value: [128]u8 = undefined;
+    try testing.expectEqualStrings("saved", (try store.get(item(2, 0, "").key, &value)).?);
+    try testing.expectError(error.WriterFailed, store.write(.{ .entries = &.{item(3, 1, "later")} }));
+    try testing.expectError(error.WriterFailed, store.reclaim(1, &.{1}));
+    _ = try tmp.dir.statFile(io, "0000000000000001-0000000000000001.segment", .{});
+}
+
+test "compaction stops writes after source truncation" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |partial| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{});
+        defer store.deinit();
+        const first = try store.write(.{ .entries = &.{item(1, 0, "saved")} });
+        _ = try store.write(.{ .entries = &.{item(2, 1, "lost")} });
+        try store.devices[0].handle.setLength(io, first.end + @as(u64, if (partial) 1 else 0));
+        try testing.expectError(if (partial) error.NeedsRecovery else error.FileChanged, store.compact());
+        try testing.expectEqual(@as(u64, 1), store.shard.index.generation);
+        try testing.expectError(error.WriterFailed, store.write(.{ .entries = &.{item(3, 2, "later")} }));
+    }
+}

@@ -228,19 +228,19 @@ pub const Store = struct {
         var previous: u64 = 0;
         var source_bytes: u64 = 0;
         for (self.devices[0..self.file_count], self.shard.segment_ids[0..self.file_count], 0..) |device, id, position| {
-            var scanner = try Scanner.init(device, .{
+            var scanner = Scanner.init(device, .{
                 .generation = self.shard.index.generation,
                 .segment_id = id,
                 .region = self.shard.index.region,
-            }, if (position == self.file_count - 1) .active else .sealed, previous, options.max_segment_size);
+            }, if (position == self.file_count - 1) .active else .sealed, previous, options.max_segment_size) catch |err| return self.sourceFailure(err);
             source_bytes = try std.math.add(u64, source_bytes, scanner.length);
-            while (try scanner.next(scratch)) |batch| {
+            while (scanner.next(scratch) catch |err| return self.sourceFailure(err)) |batch| {
                 try output.append(try compactBatch(&self.shard.index, id, batch, filtered));
             }
-            if (scanner.has_tail) return error.NeedsRecovery;
+            if (scanner.has_tail) return self.sourceFailure(error.NeedsRecovery);
             previous = scanner.last_batch_id;
         }
-        if (previous != self.shard.index.last_batch_id) return error.FileChanged;
+        if (previous != self.shard.index.last_batch_id) return self.sourceFailure(error.FileChanged);
         try output.finish();
         const metadata: manifest.Manifest = .{
             .generation = generation,
@@ -358,6 +358,15 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
 
         if (!self.closed) self.release();
+    }
+
+    fn sourceFailure(self: *Store, err: anyerror) anyerror {
+        if (err != error.Canceled) {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            self.shard.writer.failed = true;
+        }
+        return err;
     }
 
     fn rotate(self: *Store) !void {

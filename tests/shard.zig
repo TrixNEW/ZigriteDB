@@ -175,3 +175,26 @@ test "open refuses partial data and sync errors" {
     device.used -= 1;
     try testing.expectError(error.NeedsRecovery, Shard.open(testing.allocator, testing.io, &device, header, options));
 }
+
+test "losing unsynced writes preserves the last flushed batch" {
+    for ([_]bool{ false, true }) |flush| {
+        var device: Device = .{};
+        var buffered = options;
+        buffered.durability = .buffered;
+        var shard = try Shard.create(testing.allocator, testing.io, &device, header, buffered);
+        defer shard.deinit();
+        _ = try shard.write(.{ .entries = &.{item(1, 0, "saved")} });
+        try shard.flush();
+        _ = try shard.write(.{ .entries = &.{ item(2, 0, "new"), item(2, 1, "extra") } });
+        if (flush) try shard.flush();
+        shard.deinit();
+        device.used = device.synced_len;
+        var reopened = try Shard.open(testing.allocator, testing.io, &device, header, buffered);
+        defer reopened.deinit();
+        var value: [128]u8 = undefined;
+        try testing.expectEqualStrings(if (flush) "new" else "saved", (try reopened.get(item(1, 0, "").key, &value)).?);
+        const extra = try reopened.get(item(2, 1, "").key, &value);
+        if (flush) try testing.expectEqualStrings("extra", extra.?) else try testing.expectEqual(null, extra);
+        try testing.expectEqual(@as(u64, if (flush) 2 else 1), reopened.index.last_batch_id);
+    }
+}
