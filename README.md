@@ -3,119 +3,133 @@
 </p>
 
 <p align="center">
-  An embedded storage engine for Minecraft Bedrock world and chunk data, written in <a href="https://github.com/ziglang/zig">Zig</a> v0.16.0.
+  Embedded world storage built for fast chunk saves and reads.
 </p>
 
-<p align="center">
-  A component-based world storage backend for Quark <a href="https://discord.gg/Yv9qPRQNc3">(Discord)
-</p>
+ZigriteDB is a storage engine for Minecraft Bedrock world data, written in Zig.
+It stores chunk components independently and combines append-only writes,
+batched saves, and LZ4 compression to reduce work on the save path. Originally
+built for [Quark](https://github.com/Bedrock-Phanatics/Quark), it exposes a C API
+for integration with other runtimes.
 
-> [!WARNING]
-> **ZigriteDB is currently a work in progress and is not ready for production use.**
+**Status:** Active development. Storage currently supports Linux; the API and
+on-disk format may change. Not yet recommended for production worlds.
 
-* This project was created primarily to experiment with an idea I had for improving Minecraft world and chunk storage.
-* The API and on-disk format may change while the project is still in development.
-* I can't guarantee that this project will be maintained long-term, so ⭐ stars are appreciated if you'd like to see continued development.
-* ZigriteDB can be integrated into other languages through its [C ABI](https://gist.github.com/MangaD/506a0f3273724ef3af26b8c085accdcb).
-* If you use or build upon this project, credit is appreciated. :)
+## Performance
 
-## Requirements
-
-* [Zig](https://ziglang.org/) 0.16.0
+- **Append-only saves.** Write changed components without rewriting an entire chunk.
+- **Batched saves.** Group up to 64 batches in one region behind a final sync.
+- **Indexed reads.** Locate values through an in-memory index and read into caller-owned buffers.
+- **LZ4 compression.** Compress values when it reduces their stored size.
+- **Regional concurrency.** Writes to different regions can proceed concurrently. Reads continue during compaction; writes to that region wait.
+- **Configurable memory.** Bound open shards, index entries, and batch buffers. Native writers reuse buffers between calls.
 
 ## Build
 
-```sh
-zig build
-```
-
-For an optimized release build:
+Requires **Zig 0.16.0** and **Linux** for storage operations.
 
 ```sh
 zig build -Doptimize=ReleaseSafe
 ```
 
-## Tests
+The build installs libraries in `zig-out/lib` and the C header in `zig-out/include`.
+Link against `libzigritedb_native` to embed the engine in your application.
 
-Run the test suite:
+## API
+
+Open a world, save a component, and read it back. This example uses a new, empty
+`world` directory and batch ID `1`.
+
+```c
+#include <stdio.h>
+#include "zigritedb.h"
+
+int main(void) {
+    zg_options options;
+    int status = zg_options_init(&options);
+    if (status != ZG_OK) return 1;
+
+    zg_handle *world = NULL;
+    status = zg_open((const uint8_t *)"world", 5, &options, &world);
+    if (status != ZG_OK) {
+        fprintf(stderr, "%s\n", zg_status_message(status));
+        return 1;
+    }
+
+    const uint8_t data[] = {1, 2, 3, 4};
+    zg_operation save = {
+        .key = {.chunk_x = 4, .chunk_z = 8, .component = ZG_METADATA},
+        .remove = ZG_PUT,
+        .value = data,
+        .value_len = sizeof(data),
+    };
+
+    status = zg_write(world, 1, &save, 1);
+    if (status == ZG_OK) {
+        uint8_t output[64];
+        size_t required = 0;
+        status = zg_get(world, &save.key, output, sizeof(output), &required);
+    }
+
+    int close_status = zg_close(world);
+    if (status == ZG_OK) status = close_status;
+    if (status != ZG_OK) fprintf(stderr, "%s\n", zg_status_message(status));
+    return status == ZG_OK ? 0 : 1;
+}
+```
+
+Each batch is atomic and belongs to one 32×32 chunk region. Batch IDs increase
+per region; use `zg_last_batch_id` to resume after reopening and coordinate IDs
+between writers. Values are application-owned component bytes.
+
+| Operation | API |
+| --- | --- |
+| Save or delete components | `zg_write` |
+| Save multiple batches with a shared final sync | `zg_write_group` |
+| Read a component | `zg_get` |
+| Flush buffered saves | `zg_flush` |
+| Queue background compaction | `zg_compact_async` |
+| Wait for queued maintenance | `zg_maintenance_wait` |
+
+Writes sync by default. Buffered writes can be lost until a successful flush,
+eviction, or close. Save groups sync before returning success, but a failed
+group can leave earlier batches committed. A write error does not guarantee
+that nothing reached disk.
+
+`zg_get` reports the required buffer size. Finish all calls before `zg_close`,
+which drains maintenance and frees the handle even on error. See the
+[public header](include/zigritedb.h) for options, limits, and the full API.
+
+## Benchmarks
+
+Measure save latency, reads, compaction, replay, CPU usage, memory, and database
+size on your target filesystem:
+
+```sh
+zig build bench -Doptimize=ReleaseSafe
+python3 tests/bench/run.py --directory /path/to/benchmark/filesystem
+```
+
+The runner uses temporary databases and outputs JSON for synchronous, grouped,
+and buffered saves. Group samples contain 16 batches per call; buffered saves
+sync at the end. Results are synthetic. Use equivalent workloads and durability settings when
+comparing engines.
+
+## Testing
 
 ```sh
 zig build test
-```
-
-Run tests with safety checks enabled:
-
-```sh
 zig build test -Doptimize=ReleaseSafe
+zig build fuzz --fuzz=10000
 ```
 
-The Linux native library and C header are installed by `zig build`. See
-`include/zigritedb.h` for handle ownership, batch rules, and durability modes.
-
-Run the native API and process-failure tests on Linux x86-64:
+Run the C API, crash, I/O failure, and restart checks on Linux x86-64:
 
 ```sh
 zig build native-test
 python3 tests/native/native_faults.py zig-out/lib/libzigritedb_native.so zig-out/bin/native_smoke
 python3 tests/native/native_workloads.py zig-out/lib/libzigritedb_native.so
 ```
-
-## Native integration
-
-Storage currently supports Linux. Link against `libzigritedb_native` and include
-`zigritedb.h`; no database server or separate storage library is needed.
-
-- Open an existing world directory with `zg_open`.
-- Store chunk components separately using `zg_write`. Batch IDs increase per region;
-  `zg_last_batch_id` lets a caller resume after reopening.
-- Use `zg_write_group` for up to 64 same-region save batches with one final sync.
-  Each batch is atomic; the whole group is not atomic on failure.
-- `zg_get` uses a caller-owned buffer and reports the required size.
-- `zg_compact_async` queues background work. `zg_maintenance_wait` drains it and
-  reports errors. Reads continue during rewriting; same-region writes wait.
-- Finish caller operations before `zg_close`. Close drains maintenance and frees
-  the handle even if it reports an error.
-
-Normal writes use sync durability by default. Buffered writes can be lost after
-a crash until a successful flush, eviction, or close. Save groups always sync
-before returning success. A failed write may have reached disk; inspect the
-returned status before retrying.
-
-There are at most four reusable native write buffers and one background worker
-per handle. The maintenance queue holds 16 regions. Shard and segment limits are
-configured through `zg_options`. Cache misses still serialize while files open.
-
-The future ZPHP binding should own the native handle, translate statuses, and
-pass component bytes without changing their encoding. Quark still needs a world
-provider and a defined component schema. Bedrock LevelDB import/export belongs
-in a separate offline tool once that schema exists.
-
-## Benchmarks and fuzzing
-
-On Linux:
-
-```sh
-zig build bench -Doptimize=ReleaseSafe
-python3 tests/bench/run.py --directory /path/to/benchmark/filesystem
-zig build fuzz --fuzz=10000
-```
-
-The benchmark creates temporary databases and prints JSON for save latency,
-hot/random reads, reads during compaction, replay, CPU, peak memory, and database
-size. Group samples represent 16 batches per call; buffered saves are not durable
-until the final flush. These synthetic workloads are not a Bedrock LevelDB
-comparison or a substitute for real server traces. Keep the filesystem, build
-mode, workload, and durability settings consistent when comparing results.
-
-## Related Projects
-
-Other projects in the Bedrock-Phanatics ecosystem:
-
-* [zig-protocol](https://github.com/Bedrock-Phanatics/zig-protocol) — A Minecraft Bedrock protocol library written in Zig.
-* [Quark](https://github.com/Bedrock-Phanatics/Quark) — Minecraft Bedrock server software written in PHP and utilizing a Zig runtime. ZigriteDB was originally created for Quark.
-* [zig-nbt](https://github.com/Bedrock-Phanatics/zig-nbt) — An NBT library for Minecraft Bedrock written in Zig.
-
-Feel free to ⭐ any of the projects if you find them useful.
 
 ## License
 
