@@ -9,8 +9,8 @@
 ZigriteDB is a storage engine for Minecraft Bedrock world data, written in Zig.
 It stores chunk components independently and combines append-only writes,
 batched saves, and LZ4 compression to reduce work on the save path. Originally
-built for [Quark](https://github.com/Bedrock-Phanatics/Quark), it exposes a C API
-for integration with other runtimes.
+built for [Quark](https://github.com/Bedrock-Phanatics/Quark), it provides a native
+Zig API and a C ABI for integration with other languages.
 
 **Status:** Active development. Storage currently supports Linux; the API and
 on-disk format may change. Not yet recommended for production worlds.
@@ -33,72 +33,99 @@ zig build -Doptimize=ReleaseSafe
 ```
 
 The build installs libraries in `zig-out/lib` and the C header in `zig-out/include`.
-Link against `libzigritedb_native` to embed the engine in your application.
+Zig applications import the module directly.
 
-## API
+## Zig API
 
-Open a world, save a component, and read it back. This example uses a new, empty
-`world` directory and batch ID `1`.
+With a checkout at `vendor/zigritedb`, add the module to your application's
+`build.zig`, using its existing `target`, `optimize`, and `exe` values:
 
-```c
-#include <stdio.h>
-#include "zigritedb.h"
+```zig
+exe.root_module.addImport("zigritedb", b.createModule(.{
+    .root_source_file = b.path("vendor/zigritedb/src/root.zig"),
+    .target = target,
+    .optimize = optimize,
+}));
+```
 
-int main(void) {
-    zg_options options;
-    int status = zg_options_init(&options);
-    if (status != ZG_OK) return 1;
+Create a `world` directory before running this example. It opens the world,
+saves a chunk component, and reads it into a caller-owned buffer.
 
-    zg_handle *world = NULL;
-    status = zg_open((const uint8_t *)"world", 5, &options, &world);
-    if (status != ZG_OK) {
-        fprintf(stderr, "%s\n", zg_status_message(status));
-        return 1;
-    }
+```zig
+const std = @import("std");
+const db = @import("zigritedb");
 
-    const uint8_t data[] = {1, 2, 3, 4};
-    zg_operation save = {
-        .key = {.chunk_x = 4, .chunk_z = 8, .component = ZG_METADATA},
-        .remove = ZG_PUT,
-        .value = data,
-        .value_len = sizeof(data),
+pub fn main() !void {
+    const allocator = std.heap.page_allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const dir = try std.Io.Dir.cwd().openDir(io, "world", .{});
+    defer dir.close(io);
+    var world = try db.World.open(allocator, io, dir, .{});
+    defer world.deinit();
+
+    const key: db.Key = .{
+        .dimension = 0,
+        .chunk_x = 4,
+        .chunk_z = 8,
+        .component = .metadata,
     };
+    const last_id = (try world.lastBatchId(key.region())) orelse 0;
+    const data = "chunk data";
+    _ = try world.write(.{ .entries = &.{.{
+        .key = key,
+        .header = .{
+            .kind = .put,
+            .batch_id = try std.math.add(u64, last_id, 1),
+            .stored_len = data.len,
+            .raw_len = data.len,
+        },
+        .value = data,
+    }} });
 
-    status = zg_write(world, 1, &save, 1);
-    if (status == ZG_OK) {
-        uint8_t output[64];
-        size_t required = 0;
-        status = zg_get(world, &save.key, output, sizeof(output), &required);
-    }
-
-    int close_status = zg_close(world);
-    if (status == ZG_OK) status = close_status;
-    if (status != ZG_OK) fprintf(stderr, "%s\n", zg_status_message(status));
-    return status == ZG_OK ? 0 : 1;
+    var buffer: [64]u8 = undefined;
+    const saved = (try world.get(key, &buffer)) orelse return error.NotFound;
+    std.debug.print("{s}\n", .{saved});
+    try world.close();
 }
 ```
 
-Each batch is atomic and belongs to one 32×32 chunk region. Batch IDs increase
-per region; use `zg_last_batch_id` to resume after reopening and coordinate IDs
-between writers. Values are application-owned component bytes.
+Each `WriteBatch` is atomic and belongs to one 32×32 chunk region. Batch IDs
+increase per region; `World.lastBatchId` lets a writer resume after reopening.
+Concurrent writers must coordinate IDs. Values are application-owned component
+bytes; this example stores them without compression.
 
-| Operation | API |
+| Operation | Zig API |
 | --- | --- |
-| Save or delete components | `zg_write` |
-| Save multiple batches with a shared final sync | `zg_write_group` |
-| Read a component | `zg_get` |
-| Flush buffered saves | `zg_flush` |
-| Queue background compaction | `zg_compact_async` |
-| Wait for queued maintenance | `zg_maintenance_wait` |
+| Save or delete components | `World.write` |
+| Save multiple batches with a shared final sync | `World.writeGroup` |
+| Read a component | `World.get` |
+| Read with required buffer size | `World.getSized` |
+| Flush buffered saves | `World.flush` |
+| Compact a region | `World.compact` |
+
+Use `World` for region routing and caching, or `Store` to manage a single region.
+See the [module exports](src/root.zig) and [world API](src/world/world.zig) for
+available types and options.
 
 Writes sync by default. Buffered writes can be lost until a successful flush,
 eviction, or close. Save groups sync before returning success, but a failed
 group can leave earlier batches committed. A write error does not guarantee
-that nothing reached disk.
+that nothing reached disk. Use `close` to flush and report errors; `deinit`
+releases resources without flushing.
 
-`zg_get` reports the required buffer size. Finish all calls before `zg_close`,
-which drains maintenance and frees the handle even on error. See the
-[public header](include/zigritedb.h) for options, limits, and the full API.
+## C ABI
+
+For C, PHP, and other runtimes, link against `libzigritedb_native` and include
+[zigritedb.h](include/zigritedb.h). The C ABI exposes the same engine through
+`zg_open`, `zg_write`, `zg_write_group`, `zg_get`, and `zg_close`.
+
+The native handle also manages background compaction through `zg_compact_async`
+and `zg_maintenance_wait`. Finish all calls before `zg_close`, which drains
+maintenance and frees the handle even on error. Zig callers use the Zig API
+directly without C bindings.
 
 ## Benchmarks
 
