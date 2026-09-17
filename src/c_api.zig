@@ -413,11 +413,11 @@ fn status(err: anyerror) Status {
         error.BufferTooSmall => .buffer_too_small,
         error.DirectoryBusy, error.QueueFull, error.AlreadyQueued => .busy,
         error.CleanupPending => .cleanup_pending,
-        error.NeedsRecovery => .needs_recovery,
+        error.NeedsRecovery, error.MissingManifest => .needs_recovery,
         error.BatchOrder => .batch_order,
         error.BatchTooLarge, error.IndexFull, error.TooManySegments, error.SegmentFull, error.GenerationExhausted, error.SegmentIdExhausted => .limit,
         error.InvalidArgument, error.InvalidSubchunkY, error.RegionMismatch, error.InvalidBufferSize, error.InvalidShardLimit => .invalid_argument,
-        error.InvalidMagic, error.ChecksumMismatch, error.InvalidCompressedData, error.TruncatedHeader, error.TruncatedRecord, error.TruncatedManifest, error.InvalidLength, error.InvalidCommit, error.BatchMismatch, error.IdentityMismatch, error.IncompleteBatch, error.InvalidGeneration, error.InvalidSegmentCount, error.InvalidSegmentId, error.InvalidSegmentOrder, error.InvalidActiveSegment, error.InvalidBatchId, error.InvalidCommitCount, error.IndexMismatch => .corruption,
+        error.InvalidMagic, error.ChecksumMismatch, error.InvalidCompressedData, error.TruncatedHeader, error.TruncatedRecord, error.TruncatedManifest, error.InvalidLength, error.InvalidCommit, error.BatchMismatch, error.IdentityMismatch, error.IncompleteBatch, error.InvalidGeneration, error.InvalidSegmentCount, error.InvalidSegmentId, error.InvalidSegmentOrder, error.InvalidActiveSegment, error.InvalidBatchId, error.InvalidCommitCount, error.IndexMismatch, error.MissingSegment => .corruption,
         error.UnsupportedVersion, error.UnsupportedCompression, error.InvalidFlags, error.UnknownKind => .unsupported,
         else => .io_error,
     };

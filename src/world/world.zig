@@ -222,7 +222,13 @@ pub const World = struct {
         store.* = if (created)
             try Store.create(self.allocator, self.io, dir, region, self.options.shard)
         else
-            try Store.open(self.allocator, self.io, dir, self.options.shard);
+            Store.open(self.allocator, self.io, dir, self.options.shard) catch |err| blk: {
+                if (err != error.MissingManifest or !create) return err;
+                break :blk Store.create(self.allocator, self.io, dir, region, self.options.shard) catch |create_err| {
+                    if (create_err == error.DirectoryNotEmpty) return error.MissingManifest;
+                    return create_err;
+                };
+            };
         errdefer store.deinit();
         if (!std.meta.eql(store.shard.index.region, region)) return error.RegionMismatch;
         try self.directory.syncEntries();

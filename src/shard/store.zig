@@ -53,6 +53,12 @@ pub const Store = struct {
         const handle = try files.createSegment(directory.dir, io, 1, 1);
         errdefer handle.close(io);
         devices[0] = .{ .handle = handle, .io = io };
+        errdefer |err| {
+            if (err == error.OutOfMemory and (devices[0].length() catch 1) == 0) {
+                files.removeSegment(directory.dir, io, 1, 1) catch {};
+                directory.syncEntries() catch {};
+            }
+        }
 
         var shard = try Shard.create(allocator, io, devices[0], .{
             .generation = 1,

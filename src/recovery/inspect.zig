@@ -43,7 +43,7 @@ pub fn inspect(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, option
     var segments: []const u64 = &.{};
 
     const handle = files.openManifest(directory.dir, io) catch |err| switch (err) {
-        error.FileNotFound => null,
+        error.MissingManifest => null,
         else => return err,
     };
     if (handle) |opened| {

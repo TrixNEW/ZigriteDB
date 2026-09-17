@@ -86,7 +86,7 @@ test "unfinished publication blocks startup" {
     try testing.expectError(error.NeedsRecovery, db.Store.open(testing.allocator, io, tmp.dir, try options()));
     try tmp.dir.deleteFile(io, "MANIFEST.tmp");
     try tmp.dir.deleteFile(io, segment_name);
-    try testing.expectError(error.FileNotFound, db.Store.open(testing.allocator, io, tmp.dir, try options()));
+    try testing.expectError(error.MissingSegment, db.Store.open(testing.allocator, io, tmp.dir, try options()));
 }
 
 test "manifest and segment symlinks are rejected" {

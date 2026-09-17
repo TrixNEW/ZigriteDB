@@ -205,3 +205,45 @@ test "save groups sync buffered batches and reject mixed regions before writing"
     try testing.expectEqualStrings("last", (try reopened.get(item(1, 0, "").key, &output)).?);
     try testing.expectEqualStrings("other", (try reopened.get(item(1, 1, "").key, &output)).?);
 }
+
+test "region creation can retry allocation failures without losing files" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    for (0..32) |offset| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var failing = testing.FailingAllocator.init(testing.allocator, .{});
+        var world = try db.World.open(failing.allocator(), io, tmp.dir, .{});
+        defer world.deinit();
+        failing.fail_index = failing.alloc_index + offset;
+        if (world.write(.{ .entries = &.{item(1, 0, "saved")} })) |_| {
+            return;
+        } else |err| {
+            try testing.expect(err == error.OutOfMemory);
+        }
+        failing.fail_index = std.math.maxInt(usize);
+        _ = try world.write(.{ .entries = &.{item(1, 0, "saved")} });
+        var output: [16]u8 = undefined;
+        try testing.expectEqualStrings("saved", (try world.get(item(1, 0, "").key, &output)).?);
+    }
+    return error.AllocationRetriesExhausted;
+}
+
+test "missing manifests never overwrite orphaned region data" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = "00000000-00000000-00000000.region";
+    try tmp.dir.createDir(io, path, .default_dir);
+    const dir = try tmp.dir.openDir(io, path, .{});
+    defer dir.close(io);
+    const file = try dir.createFile(io, "orphan", .{ .read = true, .exclusive = true });
+    defer file.close(io);
+    const device: db.storage.File = .{ .handle = file, .io = io };
+    try device.writeAll("preserve", 0);
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+    defer world.deinit();
+    try testing.expectError(error.MissingManifest, world.write(.{ .entries = &.{item(1, 0, "new")} }));
+    var output: [8]u8 = undefined;
+    try device.readExact(&output, 0);
+    try testing.expectEqualStrings("preserve", &output);
+}

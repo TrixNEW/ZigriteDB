@@ -12,7 +12,10 @@ pub fn openSegment(dir: std.Io.Dir, io: std.Io, generation: u64, id: u64, writab
     var buffer: [48]u8 = undefined;
     const name = try segmentName(&buffer, generation, id);
 
-    return openRegular(dir, io, name, writable);
+    return openRegular(dir, io, name, writable) catch |err| {
+        if (err == error.FileNotFound) return error.MissingSegment;
+        return err;
+    };
 }
 
 pub fn removeSegment(dir: std.Io.Dir, io: std.Io, generation: u64, id: u64) !void {
@@ -21,7 +24,10 @@ pub fn removeSegment(dir: std.Io.Dir, io: std.Io, generation: u64, id: u64) !voi
     try dir.deleteFile(io, name);
 }
 pub fn openManifest(dir: std.Io.Dir, io: std.Io) !std.Io.File {
-    return openRegular(dir, io, "MANIFEST", false);
+    return openRegular(dir, io, "MANIFEST", false) catch |err| {
+        if (err == error.FileNotFound) return error.MissingManifest;
+        return err;
+    };
 }
 
 fn segmentName(buffer: []u8, generation: u64, id: u64) ![:0]u8 {

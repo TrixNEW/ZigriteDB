@@ -231,11 +231,12 @@ def check_permissions(api, root):
     assert os.WIFEXITED(result) and os.WEXITSTATUS(result) == 0
 
 
-def check_concurrency(library, root):
+def check_concurrency(library, root, shard_limit=16):
     api = API(library)
     api.options.max_segment_size = 1024 * 1024
+    api.options.max_open_shards = shard_limit
     api.options.compression_threshold = 32
-    path = root / "concurrent"
+    path = root / f"concurrent-{shard_limit}"
     path.mkdir()
     handle = api.open(path)
     start = threading.Barrier(4)
@@ -283,7 +284,7 @@ def check_concurrency(library, root):
         assert api.lib.zg_compact_async(handle, 0, 1, 0) == 0
     finally:
         assert api.lib.zg_close(handle) == 0
-    print("Concurrent C API reads, writes, flush and compaction passed")
+    print(f"Concurrent C API reads, writes and maintenance passed with {shard_limit} cached shards")
 
 
 def main():
@@ -320,7 +321,8 @@ def main():
                     _, acknowledged = trace(api, case, point, mode)
                     verify(api, case, root / f"recovered-{grouped}-{mode}-{point}", acknowledged)
             print(f"{len(events) * 4} syscall-boundary crash and I/O fault cases passed: {sorted(set(events))}")
-        check_concurrency(library, root)
+        for shard_limit in (1, 2, 16):
+            check_concurrency(library, root, shard_limit)
     signal.alarm(0)
 
 

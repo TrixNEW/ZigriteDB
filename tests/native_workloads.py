@@ -2,6 +2,7 @@
 import ctypes as c
 from pathlib import Path
 import random
+import signal
 import sys
 import tempfile
 
@@ -64,6 +65,42 @@ def check(library, path):
     print("600 seeded batches, deletes, restarts and compactions passed")
 
 
+
+def check_damaged_files(library):
+    api = API(library)
+    segment = "0000000000000001-0000000000000001.segment"
+    cases = (("MANIFEST", "missing", 8), (segment, "missing", 6),
+             (segment, "truncated", 8), (segment, "corrupt", 6), ("MANIFEST", "corrupt", 6))
+    for name, damage, expected_status in cases:
+        with tempfile.TemporaryDirectory(prefix="zigritedb-damaged-") as path:
+            handle = api.open(path)
+            assert api.write(handle, 1, [b"saved"]) == 0
+            assert api.lib.zg_close(handle) == 0
+            source = Path(path) / "00000000-00000000-00000000.region" / name
+            if damage == "missing":
+                saved = source.with_suffix(".saved")
+                source.rename(saved)
+                source = saved
+            else:
+                data = bytearray(source.read_bytes())
+                if damage == "truncated":
+                    data.pop()
+                else:
+                    data[-1] ^= 1
+                source.write_bytes(data)
+            original = source.read_bytes()
+            handle = api.open(path)
+            try:
+                assert api.read(handle, 0)[0] == expected_status, (name, damage)
+                assert api.write(handle, 2, [b"replacement"]) == expected_status
+                assert source.read_bytes() == original
+            finally:
+                assert api.lib.zg_close(handle) == 0
+    print("Missing, truncated and corrupt files fail safely without overwriting data")
+
+
 if __name__ == "__main__":
+    signal.alarm(120)
+    check_damaged_files(Path(sys.argv[1]).resolve())
     with tempfile.TemporaryDirectory(prefix="zigritedb-model-") as path:
         check(Path(sys.argv[1]).resolve(), Path(path))

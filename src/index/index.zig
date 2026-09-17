@@ -167,7 +167,7 @@ pub const Index = struct {
         const new_count = @as(u64, self.entries.count()) - removals + additions;
         if (new_count > self.max_keys) return error.IndexFull;
 
-        try self.entries.ensureUnusedCapacity(self.allocator, additions);
+        try self.entries.ensureTotalCapacity(self.allocator, @intCast(new_count));
 
         return .{
             .allocator = self.allocator,
@@ -180,11 +180,11 @@ pub const Index = struct {
         var changes = prepared.changes.iterator();
 
         while (changes.next()) |change| {
-            if (change.value_ptr.*) |location| {
-                self.entries.putAssumeCapacity(change.key_ptr.*, location);
-            } else {
-                _ = self.entries.remove(change.key_ptr.*);
-            }
+            if (change.value_ptr.* == null) _ = self.entries.remove(change.key_ptr.*);
+        }
+        changes = prepared.changes.iterator();
+        while (changes.next()) |change| {
+            if (change.value_ptr.*) |location| self.entries.putAssumeCapacity(change.key_ptr.*, location);
         }
 
         self.last_batch_id = prepared.batch_id;

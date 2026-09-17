@@ -219,3 +219,35 @@ test "read indexed data after reopening a file" {
     var scratch: [128]u8 = undefined;
     try testing.expectEqualStrings("saved", (try index.read(item(1, 0, "").key, file, &scratch)).?);
 }
+
+test "replacement batches reuse index capacity without early publication" {
+    var bytes: [4096]u8 = undefined;
+    try header(1, &bytes);
+    var initial: [6]db.entry.Entry = undefined;
+    var replacement: [12]db.entry.Entry = undefined;
+    for (0..6) |i| {
+        initial[i] = item(1, @intCast(i), "old");
+        replacement[i] = item(2, @intCast(i), null);
+        replacement[6 + i] = item(2, @intCast(6 + i), "new");
+    }
+    const end = try append(&initial, &bytes, 48);
+    var index = try db.index.rebuild(testing.allocator, metadata, &.{bytes[0..end]}, 6);
+    defer index.deinit();
+    const capacity = index.entries.capacity();
+    const next = try append(&replacement, &bytes, end);
+    var prepared = try index.prepare(.{
+        .id = 2,
+        .records = bytes[end .. next - db.batch.commit_len],
+        .end_offset = next,
+    }, 1);
+    defer prepared.deinit();
+    try testing.expectEqual(capacity, index.entries.capacity());
+    try testing.expect((try index.get(initial[0].key)) != null);
+    try testing.expectEqual(null, try index.get(replacement[6].key));
+    index.publish(&prepared);
+    try testing.expectEqual(@as(usize, 6), index.count());
+    for (0..6) |i| {
+        try testing.expectEqual(null, try index.get(initial[i].key));
+        try testing.expectEqual(@as(u64, 2), (try index.get(replacement[6 + i].key)).?.batch_id);
+    }
+}
