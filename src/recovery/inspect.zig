@@ -1,10 +1,11 @@
 const std = @import("std");
 
+const Region = @import("../format/key.zig").Region;
+const manifest = @import("../format/manifest.zig");
+const File = @import("../io/file.zig").File;
 const Directory = @import("../storage/directory.zig").Directory;
 const files = @import("../storage/files.zig");
-const File = @import("../io/file.zig").File;
-const manifest = @import("../format/manifest.zig");
-const Region = @import("../format/key.zig").Region;
+
 const Scanner = @import("file_scan.zig").Scanner(File);
 
 pub const Options = struct {

@@ -1,7 +1,8 @@
-const index_module = @import("../index/index.zig");
-const entry = @import("../format/entry.zig");
 const commit = @import("../batch/commit.zig");
+const entry = @import("../format/entry.zig");
+const index_module = @import("../index/index.zig");
 const Batch = @import("../recovery/scan.zig").Batch;
+
 pub fn compactBatch(index: *const index_module.Index, segment_id: u64, batch: Batch, output: []u8) ![]const u8 {
     const start = batch.end_offset - commit.commit_len - batch.records.len;
     var read: usize = 0;
@@ -9,7 +10,7 @@ pub fn compactBatch(index: *const index_module.Index, segment_id: u64, batch: Ba
     while (read < batch.records.len) {
         const decoded = try entry.decode(batch.records[read..]);
         const location = try index.get(decoded.entry.key);
-        // The final batch preserves the last batch ID, even when no keys remain.
+        // The final batch preserves the last batch ID, even if no keys remain
         const keep = batch.id == index.last_batch_id or if (location) |live|
             live.segment_id == segment_id and live.offset == start + read
         else

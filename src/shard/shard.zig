@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const WriteBatch = @import("../batch/write.zig").WriteBatch;
 const commit = @import("../batch/commit.zig");
+const WriteBatch = @import("../batch/write.zig").WriteBatch;
 const entry = @import("../format/entry.zig");
 const Key = @import("../format/key.zig").Key;
 const manifest = @import("../format/manifest.zig");

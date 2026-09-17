@@ -1,13 +1,13 @@
 const std = @import("std");
 
+const WriteBatch = @import("../batch/write.zig").WriteBatch;
 const Key = @import("../format/key.zig").Key;
 const Region = @import("../format/key.zig").Region;
-const WriteBatch = @import("../batch/write.zig").WriteBatch;
+const segment = @import("../format/segment.zig");
 const store_module = @import("../shard/store.zig");
 const Store = store_module.Store;
 const Directory = @import("../storage/directory.zig").Directory;
 const AppendResult = @import("../storage/writer.zig").AppendResult;
-const segment = @import("../format/segment.zig");
 
 pub const Options = struct {
     max_open_shards: usize = 16,

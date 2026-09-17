@@ -1,6 +1,7 @@
 const std = @import("std");
-const db = @import("root.zig");
 const allocator = std.heap.page_allocator;
+
+const db = @import("root.zig");
 
 const abi_version: u32 = 1;
 const max_path_length: usize = 4096;

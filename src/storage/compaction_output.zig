@@ -1,9 +1,9 @@
 const std = @import("std");
 
+const Region = @import("../format/key.zig").Region;
+const segment = @import("../format/segment.zig");
 const File = @import("../io/file.zig").File;
 const files = @import("files.zig");
-const segment = @import("../format/segment.zig");
-const Region = @import("../format/key.zig").Region;
 
 pub const CompactionOutput = struct {
     io: std.Io,

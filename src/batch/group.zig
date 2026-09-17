@@ -1,6 +1,7 @@
 const std = @import("std");
-const WriteBatch = @import("write.zig").WriteBatch;
+
 const commit = @import("commit.zig");
+const WriteBatch = @import("write.zig").WriteBatch;
 
 pub const max_batches = 64;
 

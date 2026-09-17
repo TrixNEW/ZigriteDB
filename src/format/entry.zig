@@ -1,9 +1,9 @@
 const std = @import("std");
 const Crc32c = std.hash.crc.Crc32Iscsi;
 
+const lz4 = @import("../compression/lz4.zig");
 const key_format = @import("key.zig");
 const Key = key_format.Key;
-const lz4 = @import("../compression/lz4.zig");
 const record = @import("record.zig");
 
 pub const checksum_len = 4;

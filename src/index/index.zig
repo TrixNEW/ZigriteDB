@@ -1,14 +1,14 @@
 const std = @import("std");
 
+const commit = @import("../batch/commit.zig");
 const lz4 = @import("../compression/lz4.zig");
+const entry = @import("../format/entry.zig");
 const Key = @import("../format/key.zig").Key;
 const Region = @import("../format/key.zig").Region;
-const entry = @import("../format/entry.zig");
 const manifest = @import("../format/manifest.zig");
 const segment = @import("../format/segment.zig");
-const commit = @import("../batch/commit.zig");
-const recovery = @import("../recovery/scan.zig");
 const file_scan = @import("../recovery/file_scan.zig");
+const recovery = @import("../recovery/scan.zig");
 
 const EncodedKey = [Key.encoded_len]u8;
 const Map = std.AutoHashMapUnmanaged(EncodedKey, Location);

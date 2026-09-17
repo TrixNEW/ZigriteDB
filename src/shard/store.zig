@@ -6,17 +6,17 @@ const Region = @import("../format/key.zig").Region;
 const manifest = @import("../format/manifest.zig");
 const segment = @import("../format/segment.zig");
 const File = @import("../io/file.zig").File;
+const compactBatch = @import("../storage/compact_batch.zig").compactBatch;
+const CompactionOutput = @import("../storage/compaction_output.zig").CompactionOutput;
 const Directory = @import("../storage/directory.zig").Directory;
 const files = @import("../storage/files.zig");
 const publication = @import("../storage/publication.zig");
-const writer = @import("../storage/writer.zig");
-const Scanner = @import("../recovery/file_scan.zig").Scanner(File);
-const CompactionOutput = @import("../storage/compaction_output.zig").CompactionOutput;
-const compactBatch = @import("../storage/compact_batch.zig").compactBatch;
 const reclamation = @import("../storage/reclamation.zig");
+const writer = @import("../storage/writer.zig");
 const shard_module = @import("shard.zig");
-
 pub const Options = shard_module.Options;
+
+const Scanner = @import("../recovery/file_scan.zig").Scanner(File);
 const Shard = shard_module.Shard(File);
 
 pub const CompactionResult = struct {

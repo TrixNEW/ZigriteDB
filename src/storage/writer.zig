@@ -1,11 +1,3 @@
-const std = @import("std");
-
-const commit = @import("../batch/commit.zig");
-const record_entry = @import("../format/entry.zig");
-const WriteBatch = @import("../batch/write.zig").WriteBatch;
-const segment = @import("../format/segment.zig");
-const file_scan = @import("../recovery/file_scan.zig");
-
 pub const Durability = enum {
     sync,
     buffered,
@@ -138,5 +130,14 @@ pub fn Writer(comptime Device: type) type {
     };
 }
 
+
+const std = @import("std");
+
+const commit = @import("../batch/commit.zig");
+const WriteBatch = @import("../batch/write.zig").WriteBatch;
+const record_entry = @import("../format/entry.zig");
 const test_entry = @import("../format/entry.zig");
+const segment = @import("../format/segment.zig");
 const storage_file = @import("../io/file.zig");
+const file_scan = @import("../recovery/file_scan.zig");
+
