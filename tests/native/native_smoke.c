@@ -93,6 +93,24 @@ int main(int argc, char **argv) {
     assert(zg_compact_async(handle, 0, 0, 0) == ZG_OK);
     assert(zg_maintenance_wait(handle) == ZG_OK);
     assert(zg_compact_async(handle, 0, 0, 0) == ZG_OK);
+    uint8_t many_out0[16], many_out1[2], many_out2[16], many_out3[16];
+    zg_read_request many_requests[4] = {
+        {operations[0].key, many_out0, sizeof(many_out0)},
+        {operations[1].key, many_out1, sizeof(many_out1)},
+        {{0, 99, 0, 0, 5}, many_out2, sizeof(many_out2)},
+        {operations[1].key, many_out3, sizeof(many_out3)},
+    };
+    zg_read_result many_results[4];
+    assert(zg_get_many(NULL, many_requests, many_results, 4) == ZG_INVALID_ARGUMENT);
+    assert(zg_get_many(handle, NULL, many_results, 4) == ZG_INVALID_ARGUMENT);
+    assert(zg_get_many(handle, many_requests, many_results, 0) == ZG_INVALID_ARGUMENT);
+    assert(zg_get_many(handle, many_requests, many_results, ZG_MAX_READ_BATCH + 1) == ZG_LIMIT);
+    assert(zg_get_many(handle, many_requests, many_results, 4) == ZG_OK);
+    assert(many_results[0].status == ZG_OK && many_results[0].required == 0);
+    assert(many_results[1].status == ZG_BUFFER_TOO_SMALL && many_results[1].required == 5);
+    assert(many_results[2].status == ZG_NOT_FOUND);
+    assert(many_results[3].status == ZG_OK && many_results[3].required == 5);
+    assert(memcmp(many_out3, "small", 5) == 0);
     assert(zg_flush(handle) == ZG_OK);
     zg_stats stats;
     assert(zg_stats_get(NULL, &stats) == ZG_INVALID_ARGUMENT);

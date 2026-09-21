@@ -224,3 +224,84 @@ test "getSized required always matches the size that produced it" {
 
     try testing.expectEqual(null, failure);
 }
+
+test "getMany verifies each segment header once instead of once per key" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var stats: db.Stats = .{};
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const two_entry_size = try (db.WriteBatch{ .entries = &.{ item(1, 0, "aa"), item(1, 1, "bb") } }).size();
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{
+        .max_segments = 3,
+        .max_segment_size = 48 + two_entry_size,
+        .batch_buffer_size = 256,
+        .stats = &stats,
+    });
+    defer store.deinit();
+
+    _ = try store.write(.{ .entries = &.{ item(1, 0, "aa"), item(1, 1, "bb") } }); // segment 1
+    _ = try store.write(.{ .entries = &.{ item(2, 2, "cc"), item(2, 3, "dd") } }); // rotates to segment 2
+
+    var out: [4][16]u8 = undefined;
+    const requests = [_]db.ReadRequest{
+        .{ .key = item(1, 0, "").key, .output = &out[0] },
+        .{ .key = item(1, 1, "").key, .output = &out[1] },
+        .{ .key = item(1, 2, "").key, .output = &out[2] },
+        .{ .key = item(1, 3, "").key, .output = &out[3] },
+    };
+    var results: [4]db.ReadResult = undefined;
+
+    stats.reset();
+    try store.getMany(&requests, &results);
+    for (results) |r| try testing.expectEqual(db.ReadStatus.ok, r.status);
+    // 2 header checks + 4 records
+    try testing.expectEqual(@as(u64, 6), stats.disk_reads.load(.monotonic));
+
+    stats.reset();
+    for (requests) |request| _ = try store.get(request.key, request.output);
+    // independent gets re-check the header every time: 4 headers + 4 records
+    try testing.expectEqual(@as(u64, 8), stats.disk_reads.load(.monotonic));
+}
+
+fn getManyLoop(store: *db.Store, requests: []const db.ReadRequest, results: []db.ReadResult, failure: *?anyerror) void {
+    for (0..1000) |_| {
+        store.getMany(requests, results) catch |err| {
+            failure.* = err;
+            return;
+        };
+        for (results) |r| {
+            if (r.status != .ok) {
+                failure.* = error.TestUnexpectedResult;
+                return;
+            }
+        }
+    }
+}
+
+test "getMany during compaction stays safe" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{ .max_segment_size = 4096, .batch_buffer_size = 512 });
+    defer store.deinit();
+    _ = try store.write(.{ .entries = &.{ item(1, 0, "aa"), item(1, 1, "bb") } });
+
+    var out: [2][16]u8 = undefined;
+    const requests = [_]db.ReadRequest{
+        .{ .key = item(1, 0, "").key, .output = &out[0] },
+        .{ .key = item(1, 1, "").key, .output = &out[1] },
+    };
+    var results: [2]db.ReadResult = undefined;
+    var failure: ?anyerror = null;
+    const reader = try std.Thread.spawn(.{}, getManyLoop, .{ &store, &requests, &results, &failure });
+
+    var batch: u64 = 2;
+    for (0..20) |_| {
+        _ = try store.write(.{ .entries = &.{item(batch, 2, "saved")} });
+        batch += 1;
+        _ = try store.compact();
+    }
+    reader.join();
+
+    try testing.expectEqual(null, failure);
+}

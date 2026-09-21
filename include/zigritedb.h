@@ -10,6 +10,7 @@ extern "C" {
 #define ZG_MAX_PATH_LENGTH 4096u
 #define ZG_MAX_BATCH_RECORDS 4096u
 #define ZG_MAX_GROUP_BATCHES 64u
+#define ZG_MAX_READ_BATCH 256u
 /* Includes the bytes used by each record header and checksum. */
 #define ZG_MAX_BATCH_BYTES (64u * 1024u * 1024u)
 #define ZG_MAX_VALUE_SIZE (16u * 1024u * 1024u)
@@ -51,6 +52,15 @@ typedef struct {
     const zg_operation *operations;
     size_t count;
 } zg_batch;
+typedef struct {
+    zg_key key;
+    uint8_t *output;
+    size_t capacity;
+} zg_read_request;
+typedef struct {
+    int status; /* ZG_OK, ZG_NOT_FOUND, or ZG_BUFFER_TOO_SMALL */
+    size_t required;
+} zg_read_result;
 /* Cumulative counters since open or the last zg_stats_reset. */
 typedef struct {
     uint64_t get_calls, writes, records_written;
@@ -85,6 +95,9 @@ int zg_write(zg_handle *handle, uint64_t batch_id, const zg_operation *operation
 int zg_write_group(zg_handle *handle, const zg_batch *batches, size_t count);
 /* Pass your own buffer. required gives the value size even when the buffer is too small. */
 int zg_get(zg_handle *handle, const zg_key *key, uint8_t *output, size_t capacity, size_t *required);
+/* Batch read across one or more regions, at most ZG_MAX_READ_BATCH keys. results[i]
+   corresponds to requests[i]; one bad buffer or missing key doesn't fail the rest. */
+int zg_get_many(zg_handle *handle, const zg_read_request *requests, zg_read_result *results, size_t count);
 /* Buffered writes reach disk after a successful flush, shard eviction, or close. */
 int zg_flush(zg_handle *handle);
 int zg_compact(zg_handle *handle, int32_t dimension, int32_t region_x, int32_t region_z);

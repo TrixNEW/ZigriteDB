@@ -247,3 +247,32 @@ test "missing manifests never overwrite orphaned region data" {
     try device.readExact(&output, 0);
     try testing.expectEqualStrings("preserve", &output);
 }
+
+test "getMany across two regions returns correctly-ordered results" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+    defer world.deinit();
+
+    _ = try world.write(.{ .entries = &.{item(1, 0, "region0")} });
+    _ = try world.write(.{ .entries = &.{item(1, 32, "region1")} });
+
+    var out0: [16]u8 = undefined;
+    var out1: [16]u8 = undefined;
+    var miss_out: [16]u8 = undefined;
+    // order is deliberately mixed up, plus a miss in a region that was never created
+    const requests = [_]db.ReadRequest{
+        .{ .key = item(1, 32, "").key, .output = &out1 },
+        .{ .key = item(1, 0, "").key, .output = &out0 },
+        .{ .key = item(1, 99, "").key, .output = &miss_out },
+    };
+    var results: [3]db.ReadResult = undefined;
+    try world.getMany(&requests, &results);
+
+    try testing.expectEqual(db.ReadStatus.ok, results[0].status);
+    try testing.expectEqualStrings("region1", out1[0..results[0].value.len]);
+    try testing.expectEqual(db.ReadStatus.ok, results[1].status);
+    try testing.expectEqualStrings("region0", out0[0..results[1].value.len]);
+    try testing.expectEqual(db.ReadStatus.not_found, results[2].status);
+}

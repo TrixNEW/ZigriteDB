@@ -14,6 +14,11 @@ pub const Options = struct {
     shard: store_module.Options = .{},
 };
 
+pub const ReadRequest = store_module.ReadRequest;
+pub const ReadStatus = store_module.ReadStatus;
+pub const ReadResult = store_module.ReadResult;
+pub const max_distinct_regions = 8;
+
 pub const World = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -77,6 +82,47 @@ pub const World = struct {
         const store = (try self.acquire(key.region(), false)) orelse return null;
         defer self.unpin(store);
         return store.getSized(key, output, required);
+    }
+
+    /// Groups requests by region, acquires each Store once, and scatters results back in order.
+    pub fn getMany(self: *World, requests: []const ReadRequest, results: []ReadResult) !void {
+        std.debug.assert(requests.len == results.len);
+        for (requests) |request| _ = try request.key.encode();
+        @memset(results, .{});
+        if (requests.len == 0) return;
+
+        var regions: [max_distinct_regions]Region = undefined;
+        var region_count: usize = 0;
+        for (requests) |request| {
+            const found = request.key.region();
+            const seen = for (regions[0..region_count]) |existing| {
+                if (std.meta.eql(existing, found)) break true;
+            } else false;
+            if (seen) continue;
+            if (region_count == regions.len) return error.TooManyKeys;
+            regions[region_count] = found;
+            region_count += 1;
+        }
+
+        var sub_requests: [store_module.max_batch_keys]ReadRequest = undefined;
+        var sub_indices: [store_module.max_batch_keys]usize = undefined;
+        var sub_results: [store_module.max_batch_keys]ReadResult = undefined;
+
+        for (regions[0..region_count]) |region| {
+            var sub_count: usize = 0;
+            for (requests, 0..) |request, i| {
+                if (!std.meta.eql(request.key.region(), region)) continue;
+                if (sub_count == sub_requests.len) return error.TooManyKeys;
+                sub_requests[sub_count] = request;
+                sub_indices[sub_count] = i;
+                sub_count += 1;
+            }
+
+            const store = (try self.acquire(region, false)) orelse continue;
+            defer self.unpin(store);
+            try store.getMany(sub_requests[0..sub_count], sub_results[0..sub_count]);
+            for (sub_indices[0..sub_count], sub_results[0..sub_count]) |i, result| results[i] = result;
+        }
     }
 
     pub fn lastBatchId(self: *World, region: Region) !?u64 {

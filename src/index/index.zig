@@ -69,33 +69,51 @@ pub const Index = struct {
     /// Scratch and output must not overlap.
     pub fn readInto(self: *const Index, key: Key, device: anytype, scratch: []u8, output: []u8) !?[]const u8 {
         const item = (try self.readRecord(key, device, scratch)) orelse return null;
+        return try decodeInto(item, output);
+    }
+
+    /// Like `readInto`, but skips the header check. Only safe if the caller already verified it this batch.
+    pub fn readIntoUnverified(self: *const Index, key: Key, device: anytype, scratch: []u8, output: []u8) !?[]const u8 {
+        const location = (try self.get(key)) orelse return null;
+        const item = try self.readRecordAt(location, key, device, scratch);
+        return try decodeInto(item, output);
+    }
+
+    fn decodeInto(item: entry.Entry, output: []u8) ![]const u8 {
         if (output.len < item.header.raw_len) return error.BufferTooSmall;
         if (item.header.compression == .lz4) return try lz4.decompress(item.value, output, item.header.raw_len);
         @memcpy(output[0..item.value.len], item.value);
         return output[0..item.value.len];
     }
 
-    fn readRecord(self: *const Index, key: Key, device: anytype, scratch: []u8) !?entry.Entry {
-        const location = (try self.get(key)) orelse return null;
-        const len = std.math.add(usize, entry.overhead, location.stored_len) catch return error.InvalidLength;
-
-        if (scratch.len < len) return error.BufferTooSmall;
-
+    /// The header only changes on rotation, so it's fine to check it once per segment.
+    pub fn verifySegmentHeader(self: *const Index, device: anytype, segment_id: u64) !void {
         var header_bytes: [segment.encoded_len]u8 = undefined;
         try device.readExact(&header_bytes, 0);
 
         const header = try segment.Header.decode(&header_bytes);
         try header.checkIdentity(.{
-            .segment_id = location.segment_id,
+            .segment_id = segment_id,
             .generation = self.generation,
             .region = self.region,
         });
 
+        if (self.stats) |s| {
+            _ = s.disk_reads.fetchAdd(1, .monotonic);
+            _ = s.bytes_read.fetchAdd(header_bytes.len, .monotonic);
+        }
+    }
+
+    fn readRecordAt(self: *const Index, location: Location, key: Key, device: anytype, scratch: []u8) !entry.Entry {
+        const len = std.math.add(usize, entry.overhead, location.stored_len) catch return error.InvalidLength;
+
+        if (scratch.len < len) return error.BufferTooSmall;
+
         try device.readExact(scratch[0..len], location.offset);
 
         if (self.stats) |s| {
-            _ = s.disk_reads.fetchAdd(2, .monotonic);
-            _ = s.bytes_read.fetchAdd(@intCast(header_bytes.len + len), .monotonic);
+            _ = s.disk_reads.fetchAdd(1, .monotonic);
+            _ = s.bytes_read.fetchAdd(@intCast(len), .monotonic);
         }
 
         const decoded = try entry.decode(scratch[0..len]);
@@ -109,6 +127,12 @@ pub const Index = struct {
         if (!same_record) return error.IndexMismatch;
 
         return decoded.entry;
+    }
+
+    fn readRecord(self: *const Index, key: Key, device: anytype, scratch: []u8) !?entry.Entry {
+        const location = (try self.get(key)) orelse return null;
+        try self.verifySegmentHeader(device, location.segment_id);
+        return try self.readRecordAt(location, key, device, scratch);
     }
 
     fn apply(self: *Index, batch: recovery.Batch, segment_id: u64) !void {

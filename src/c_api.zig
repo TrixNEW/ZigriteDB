@@ -339,6 +339,49 @@ pub export fn zg_get(optional: ?*Handle, key: ?*const Key, output: ?[*]u8, capac
     return .ok;
 }
 
+pub const ReadRequest = extern struct {
+    key: Key,
+    output: ?[*]u8,
+    capacity: usize,
+};
+
+pub const ReadResult = extern struct {
+    status: Status = .not_found,
+    required: usize = 0,
+};
+
+const max_c_batch = 256;
+
+/// One region-fanning batch read. A bad buffer or missing key never fails the others.
+pub export fn zg_get_many(optional: ?*Handle, requests: ?[*]const ReadRequest, results: ?[*]ReadResult, count: usize) Status {
+    const handle = optional orelse return .invalid_argument;
+    if (requests == null or results == null or count == 0) return .invalid_argument;
+    if (count > max_c_batch) return .limit;
+
+    var native_requests: [max_c_batch]db.ReadRequest = undefined;
+    var native_results: [max_c_batch]db.ReadResult = undefined;
+    for (requests.?[0..count], 0..) |request, i| {
+        const key = request.key.native() catch |err| return status(err);
+        if (request.output == null and request.capacity != 0) return .invalid_argument;
+        const bytes: []u8 = if (request.output) |ptr| ptr[0..request.capacity] else &.{};
+        native_requests[i] = .{ .key = key, .output = bytes };
+    }
+
+    handle.world.getMany(native_requests[0..count], native_results[0..count]) catch |err| return status(err);
+
+    for (native_results[0..count], 0..) |result, i| {
+        results.?[i] = .{
+            .status = switch (result.status) {
+                .ok => .ok,
+                .not_found => .not_found,
+                .buffer_too_small => .buffer_too_small,
+            },
+            .required = result.required,
+        };
+    }
+    return .ok;
+}
+
 pub export fn zg_flush(optional: ?*Handle) Status {
     const handle = optional orelse return .invalid_argument;
     handle.world.flush() catch |err| return status(err);
@@ -453,7 +496,7 @@ fn status(err: anyerror) Status {
         error.CleanupPending => .cleanup_pending,
         error.NeedsRecovery, error.MissingManifest => .needs_recovery,
         error.BatchOrder => .batch_order,
-        error.BatchTooLarge, error.IndexFull, error.TooManySegments, error.SegmentFull, error.GenerationExhausted, error.SegmentIdExhausted => .limit,
+        error.BatchTooLarge, error.IndexFull, error.TooManySegments, error.SegmentFull, error.GenerationExhausted, error.SegmentIdExhausted, error.TooManyKeys => .limit,
         error.InvalidArgument, error.InvalidSubchunkY, error.RegionMismatch, error.InvalidBufferSize, error.InvalidShardLimit => .invalid_argument,
         error.InvalidMagic, error.ChecksumMismatch, error.InvalidCompressedData, error.TruncatedHeader, error.TruncatedRecord, error.TruncatedManifest, error.InvalidLength, error.InvalidCommit, error.BatchMismatch, error.IdentityMismatch, error.IncompleteBatch, error.InvalidGeneration, error.InvalidSegmentCount, error.InvalidSegmentId, error.InvalidSegmentOrder, error.InvalidActiveSegment, error.InvalidBatchId, error.InvalidCommitCount, error.IndexMismatch, error.MissingSegment => .corruption,
         error.UnsupportedVersion, error.UnsupportedCompression, error.InvalidFlags, error.UnknownKind => .unsupported,

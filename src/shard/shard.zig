@@ -67,6 +67,27 @@ pub fn Shard(comptime Device: type) type {
             location: index_module.Location,
         };
 
+        /// Bulk-read request/result types, used by `getMany`.
+        pub const max_batch_keys = 128;
+
+        pub const ReadRequest = struct {
+            key: Key,
+            output: []u8,
+        };
+
+        pub const ReadStatus = enum(u8) { ok, not_found, buffer_too_small };
+
+        pub const ReadResult = struct {
+            status: ReadStatus = .not_found,
+            required: usize = 0,
+            value: []const u8 = &.{},
+        };
+
+        const BatchSlot = struct {
+            segment_position: u16,
+            location: index_module.Location,
+        };
+
         pub fn create(allocator: std.mem.Allocator, io: std.Io, device: Device, header: segment.Header, options: Options) !Self {
             try options.validate();
 
@@ -287,6 +308,36 @@ pub fn Shard(comptime Device: type) type {
             if (generation.readers == 0) self.idle.broadcast(self.io);
         }
 
+        /// Resolves every key under one lock and pins the generation once for the whole batch.
+        fn pinMany(self: *Self, requests: []const ReadRequest, slots: []?BatchSlot) !?*Generation {
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
+
+            if (self.closed or self.closing) return error.Closed;
+
+            const generation = self.generation;
+            var hits: usize = 0;
+            for (requests, slots) |request, *slot| {
+                const location = (try generation.index.get(request.key)) orelse {
+                    slot.* = null;
+                    continue;
+                };
+                var position: ?u16 = null;
+                for (generation.segment_ids[0..generation.segment_count], 0..) |id, i| {
+                    if (id == location.segment_id) {
+                        position = @intCast(i);
+                        break;
+                    }
+                }
+                slot.* = .{ .segment_position = position orelse return error.IndexMismatch, .location = location };
+                hits += 1;
+            }
+
+            if (hits == 0) return null;
+            generation.readers += 1;
+            return generation;
+        }
+
         /// Most records fit on the stack, so only the rare oversized one needs a heap alloc.
         const inline_scratch_len = 8192;
 
@@ -315,6 +366,68 @@ pub fn Shard(comptime Device: type) type {
             if (output.len < pinned.location.raw_len) return error.BufferTooSmall;
 
             return self.readPinned(pinned, key, output);
+        }
+
+        /// Reads many keys with one pin, verifying each segment header only once. A bad buffer or a miss only touches that key's result.
+        pub fn getMany(self: *Self, requests: []const ReadRequest, results: []ReadResult) !void {
+            std.debug.assert(requests.len == results.len);
+            @memset(results, .{});
+            const n = requests.len;
+            if (n == 0) return;
+            if (n > max_batch_keys) return error.TooManyKeys;
+
+            var slots: [max_batch_keys]?BatchSlot = undefined;
+            const generation = (try self.pinMany(requests, slots[0..n])) orelse return;
+            defer self.unpin(generation);
+
+            var order: [max_batch_keys]u8 = undefined;
+            for (0..n) |i| order[i] = @intCast(i);
+            sortByLocation(order[0..n], slots[0..n]);
+
+            var stack_scratch: [inline_scratch_len]u8 = undefined;
+            var verified_segment: ?u64 = null;
+
+            for (order[0..n]) |idx| {
+                const slot = slots[idx] orelse continue;
+                const device = generation.devices[slot.segment_position];
+
+                if (verified_segment == null or verified_segment.? != slot.location.segment_id) {
+                    try generation.index.verifySegmentHeader(device, slot.location.segment_id);
+                    verified_segment = slot.location.segment_id;
+                }
+
+                const required = slot.location.raw_len;
+                if (requests[idx].output.len < required) {
+                    results[idx] = .{ .status = .buffer_too_small, .required = required };
+                    continue;
+                }
+
+                const len = std.math.add(usize, entry.overhead, slot.location.stored_len) catch return error.InvalidLength;
+                const scratch = if (len <= stack_scratch.len) stack_scratch[0..len] else try self.allocator.alloc(u8, len);
+                defer if (len > stack_scratch.len) self.allocator.free(scratch);
+
+                const value = (try generation.index.readIntoUnverified(requests[idx].key, device, scratch, requests[idx].output)) orelse
+                    return error.IndexMismatch;
+                results[idx] = .{ .status = .ok, .required = required, .value = value };
+            }
+        }
+
+        /// Groups same-segment locations together and pushes misses to the end.
+        fn sortByLocation(order: []u8, slots: []const ?BatchSlot) void {
+            var i: usize = 1;
+            while (i < order.len) : (i += 1) {
+                const key = order[i];
+                var j = i;
+                while (j > 0 and locationLessThan(slots, key, order[j - 1])) : (j -= 1) order[j] = order[j - 1];
+                order[j] = key;
+            }
+        }
+
+        fn locationLessThan(slots: []const ?BatchSlot, a_idx: u8, b_idx: u8) bool {
+            const a = slots[a_idx] orelse return false;
+            const b = slots[b_idx] orelse return true;
+            if (a.location.segment_id != b.location.segment_id) return a.location.segment_id < b.location.segment_id;
+            return a.location.offset < b.location.offset;
         }
 
         /// Installs the new generation and writer, and hands back the old one (still open).

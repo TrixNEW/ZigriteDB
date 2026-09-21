@@ -19,6 +19,11 @@ pub const Options = shard_module.Options;
 const Scanner = @import("../recovery/file_scan.zig").Scanner(File);
 const Shard = shard_module.Shard(File);
 
+pub const ReadRequest = Shard.ReadRequest;
+pub const ReadStatus = Shard.ReadStatus;
+pub const ReadResult = Shard.ReadResult;
+pub const max_batch_keys = Shard.max_batch_keys;
+
 pub const CompactionResult = struct {
     generation: u64,
     segment_count: usize,
@@ -348,6 +353,20 @@ pub const Store = struct {
         self.mutex.unlock(self.io);
 
         return self.shard.getSized(key, output, required);
+    }
+
+    /// One region's worth of a bulk read. See `World.getMany` for the multi-region entry point.
+    pub fn getMany(self: *Store, requests: []const ReadRequest, results: []ReadResult) !void {
+        std.debug.assert(requests.len == results.len);
+        try self.mutex.lock(self.io);
+        if (self.closed) {
+            self.mutex.unlock(self.io);
+            return error.Closed;
+        }
+        if (self.shard.options.stats) |s| _ = s.get_calls.fetchAdd(requests.len, .monotonic);
+        self.mutex.unlock(self.io);
+
+        return self.shard.getMany(requests, results);
     }
 
     pub fn lastBatchId(self: *Store) !u64 {

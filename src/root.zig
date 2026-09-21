@@ -19,6 +19,9 @@ pub const inspection = @import("recovery/inspect.zig");
 pub const recovery = @import("recovery/scan.zig");
 pub const shard = @import("shard/shard.zig");
 pub const Store = @import("shard/store.zig").Store;
+pub const ReadRequest = @import("shard/store.zig").ReadRequest;
+pub const ReadStatus = @import("shard/store.zig").ReadStatus;
+pub const ReadResult = @import("shard/store.zig").ReadResult;
 pub const Stats = @import("stats.zig").Stats;
 pub const directory = @import("storage/directory.zig");
 pub const publication = @import("storage/publication.zig");
@@ -27,6 +30,8 @@ pub const segment_writer = @import("storage/writer.zig");
 pub const maintenance = @import("world/maintenance.zig");
 pub const World = @import("world/world.zig").World;
 pub const WorldOptions = @import("world/world.zig").Options;
+pub const getChunkComponents = @import("world/chunk.zig").getChunkComponents;
+pub const ChunkComponent = @import("world/chunk.zig").ChunkComponent;
 
 test {
     std.testing.refAllDecls(@This());

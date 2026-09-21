@@ -30,6 +30,66 @@ static void scanAreas(zg_handle *handle, const char *label, int size, uint32_t *
     report(label, samples, AREA_ANCHORS, now() - phase_started);
 }
 
+/* Writes n components of one chunk: fixed components first, then subchunks. */
+static void writeWideChunk(zg_handle *handle, int chunk_x, int n, const uint8_t *value, size_t value_len) {
+    static const uint32_t fixed[4] = {1, 2, 3, 4};
+    zg_operation operations[32];
+    int i = 0;
+    for (; i < 4 && i < n; ++i) operations[i] = (zg_operation){{0, chunk_x, 0, 0, fixed[i]}, ZG_PUT, value, value_len};
+    if (i < n) operations[i++] = (zg_operation){{0, chunk_x, 0, 0, 5}, ZG_PUT, value, value_len};
+    for (int y = 0; i < n; ++y, ++i) operations[i] = (zg_operation){{0, chunk_x, 0, y, 0}, ZG_PUT, value, value_len};
+    check(zg_write(handle, 1, operations, (size_t)n));
+}
+
+static void chunkReadKeys(zg_key *keys, int chunk_x, int n) {
+    static const uint32_t fixed[4] = {1, 2, 3, 4};
+    int i = 0;
+    for (; i < 4 && i < n; ++i) keys[i] = (zg_key){0, chunk_x, 0, 0, fixed[i]};
+    if (i < n) keys[i++] = (zg_key){0, chunk_x, 0, 0, 5};
+    for (int y = 0; i < n; ++y, ++i) keys[i] = (zg_key){0, chunk_x, 0, y, 0};
+}
+
+/* n independent zg_get calls vs one zg_get_many call, timed per whole chunk load. */
+static void chunkReadBenchmark(zg_handle *handle, int chunk_x, int n, size_t count, uint8_t *output) {
+    zg_key keys[32];
+    chunkReadKeys(keys, chunk_x, n);
+    double *samples = malloc(count * sizeof(*samples));
+    if (!samples) exit(1);
+    char label[32];
+
+    snprintf(label, sizeof(label), "chunk_read_%d_individual", n);
+    double started = now();
+    for (size_t c = 0; c < count; ++c) {
+        double before = now();
+        for (int k = 0; k < n; ++k) {
+            size_t required;
+            check(zg_get(handle, &keys[k], output, 1024, &required));
+        }
+        samples[c] = now() - before;
+    }
+    report(label, samples, count, now() - started);
+    printf(",");
+
+    zg_read_request requests[32];
+    zg_read_result results[32];
+    static uint8_t many_output[32][1024];
+    for (int k = 0; k < n; ++k) requests[k] = (zg_read_request){keys[k], many_output[k], sizeof(many_output[k])};
+
+    snprintf(label, sizeof(label), "chunk_read_%d_many", n);
+    started = now();
+    for (size_t c = 0; c < count; ++c) {
+        double before = now();
+        check(zg_get_many(handle, requests, results, (size_t)n));
+        samples[c] = now() - before;
+    }
+    report(label, samples, count, now() - started);
+    for (int k = 0; k < n; ++k) {
+        if (results[k].status != ZG_OK) exit(1);
+    }
+
+    free(samples);
+}
+
 int main(int argc, char **argv) {
     if (argc != 4) {
         fprintf(stderr, "usage: native_bench EMPTY_DIRECTORY BATCHES sync|group|buffered\n");
@@ -132,6 +192,15 @@ int main(int argc, char **argv) {
     scanAreas(handle, "area_reads_16x16", 16, &random, output);
     printf(",");
     scanAreas(handle, "area_reads_32x32", 32, &random, output);
+    printf(",");
+
+    /* A disjoint chunk, far from every other phase's keys, carrying all 32 possible components. */
+    writeWideChunk(handle, 20000, 32, values[0], sizeof(values[0]));
+    chunkReadBenchmark(handle, 20000, 4, count, output);
+    printf(",");
+    chunkReadBenchmark(handle, 20000, 16, count, output);
+    printf(",");
+    chunkReadBenchmark(handle, 20000, 32, count, output);
     printf(",");
 
     started = now();
