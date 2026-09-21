@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// Shared atomic counters for one World/Handle; a null pointer disables instrumentation.
+/// Shared atomic counters for one World/Handle. A null pointer just disables instrumentation.
 pub const Stats = struct {
     get_calls: std.atomic.Value(u64) = .init(0),
     writes: std.atomic.Value(u64) = .init(0),
@@ -19,7 +19,7 @@ pub const Stats = struct {
     recovery_attempts: std.atomic.Value(u64) = .init(0),
     recovery_errors: std.atomic.Value(u64) = .init(0),
 
-    /// Not safe against concurrent operations; call only when the handle is quiescent.
+    /// Not safe against concurrent operations, only call this when the handle is quiescent.
     pub fn reset(self: *Stats) void {
         inline for (std.meta.fields(Stats)) |field| {
             @field(self, field.name).store(0, .monotonic);

@@ -34,7 +34,7 @@ test "store installs compacted generations and reclaims old files" {
     try store.close();
     var reopened = try db.Store.open(testing.allocator, io, tmp.dir, .{});
     defer reopened.deinit();
-    try testing.expectEqual(@as(u64, 3), reopened.shard.index.generation);
+    try testing.expectEqual(@as(u64, 3), reopened.shard.generation.index.generation);
     try testing.expectError(error.BatchOrder, reopened.write(.{ .entries = &.{item(3, 1, "late")} }));
     _ = try reopened.write(.{ .entries = &.{item(4, 1, "new")} });
     try reopened.close();
@@ -51,7 +51,7 @@ test "failed compaction publication keeps the old view and stops writes" {
     const temporary = try tmp.dir.createFile(io, "MANIFEST.tmp", .{ .exclusive = true });
     temporary.close(io);
     try testing.expectError(error.PathAlreadyExists, store.compact());
-    try testing.expectEqual(@as(u64, 1), store.shard.index.generation);
+    try testing.expectEqual(@as(u64, 1), store.shard.generation.index.generation);
     var value: [128]u8 = undefined;
     try testing.expectEqualStrings("saved", (try store.get(item(1, 0, "").key, &value)).?);
     try testing.expectError(error.WriterFailed, store.write(.{ .entries = &.{item(2, 0, "later")} }));
@@ -91,7 +91,7 @@ fn compactWithAllocator(allocator: std.mem.Allocator) !void {
     _ = store.compact() catch |err| {
         var value: [128]u8 = undefined;
         try testing.expectEqualStrings("saved", (try store.get(item(1, 0, "").key, &value)).?);
-        try testing.expectEqual(@as(u64, 1), store.shard.index.generation);
+        try testing.expectEqual(@as(u64, 1), store.shard.generation.index.generation);
         return err;
     };
     try store.close();
@@ -128,7 +128,7 @@ test "compaction stops writes after source corruption" {
     byte[0] ^= 1;
     try store.devices[0].writeAll(&byte, offset);
     try testing.expectError(error.ChecksumMismatch, store.compact());
-    try testing.expectEqual(@as(u64, 1), store.shard.index.generation);
+    try testing.expectEqual(@as(u64, 1), store.shard.generation.index.generation);
     var value: [128]u8 = undefined;
     try testing.expectEqualStrings("saved", (try store.get(item(2, 0, "").key, &value)).?);
     try testing.expectError(error.WriterFailed, store.write(.{ .entries = &.{item(3, 1, "later")} }));
@@ -147,7 +147,80 @@ test "compaction stops writes after source truncation" {
         _ = try store.write(.{ .entries = &.{item(2, 1, "lost")} });
         try store.devices[0].handle.setLength(io, first.end + @as(u64, if (partial) 1 else 0));
         try testing.expectError(if (partial) error.NeedsRecovery else error.FileChanged, store.compact());
-        try testing.expectEqual(@as(u64, 1), store.shard.index.generation);
+        try testing.expectEqual(@as(u64, 1), store.shard.generation.index.generation);
         try testing.expectError(error.WriterFailed, store.write(.{ .entries = &.{item(3, 2, "later")} }));
     }
+}
+
+fn readLoop(store: *db.Store, key: db.Key, iterations: usize, failure: *?anyerror) void {
+    var output: [128]u8 = undefined;
+    for (0..iterations) |_| {
+        _ = store.get(key, &output) catch |err| {
+            failure.* = err;
+            return;
+        };
+    }
+}
+
+test "reads during compaction stay safe and see a valid value" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{ .max_segment_size = 4096, .batch_buffer_size = 512 });
+    defer store.deinit();
+    _ = try store.write(.{ .entries = &.{item(1, 0, "saved")} });
+
+    var failure: ?anyerror = null;
+    const key = item(1, 0, "").key;
+    const reader = try std.Thread.spawn(.{}, readLoop, .{ &store, key, @as(usize, 3000), &failure });
+
+    var batch: u64 = 2;
+    for (0..20) |_| {
+        _ = try store.write(.{ .entries = &.{item(batch, 1, "saved")} });
+        batch += 1;
+        _ = try store.compact();
+    }
+    reader.join();
+
+    try testing.expectEqual(null, failure);
+}
+
+/// Regression test: `required` should match the status even when a write races it.
+fn getSizedLoop(store: *db.Store, key: db.Key, iterations: usize, failure: *?[]const u8) void {
+    var small: [16]u8 = undefined;
+    for (0..iterations) |_| {
+        var required: usize = 0;
+        if (store.getSized(key, &small, &required)) |value| {
+            if (value != null and required != 16) failure.* = "size mismatch on success";
+        } else |err| {
+            if (err != error.BufferTooSmall or required != 512) failure.* = "size mismatch on BufferTooSmall";
+        }
+    }
+}
+
+test "getSized required always matches the size that produced it" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{ .max_segment_size = 1 << 20, .batch_buffer_size = 4096 });
+    defer store.deinit();
+    var small_value: [16]u8 = undefined;
+    @memset(&small_value, 'a');
+    _ = try store.write(.{ .entries = &.{item(1, 0, &small_value)} });
+
+    var failure: ?[]const u8 = null;
+    const key = item(1, 0, "").key;
+    const reader = try std.Thread.spawn(.{}, getSizedLoop, .{ &store, key, @as(usize, 3000), &failure });
+
+    var large_value: [512]u8 = undefined;
+    @memset(&large_value, 'b');
+    var batch: u64 = 2;
+    for (0..1500) |i| {
+        const value: []const u8 = if (i % 2 == 0) &large_value else &small_value;
+        _ = try store.write(.{ .entries = &.{item(batch, 0, value)} });
+        batch += 1;
+    }
+    reader.join();
+
+    try testing.expectEqual(null, failure);
 }

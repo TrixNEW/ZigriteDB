@@ -9,7 +9,7 @@ static void makeDir(const char *path) {
     if (mkdir(path, 0700)) exit(1);
 }
 
-/* Times AREA_ANCHORS NxN chunk-area scans as one sample each; misses are expected. */
+/* Times AREA_ANCHORS NxN chunk-area scans as one sample each. Misses are expected. */
 static void scanAreas(zg_handle *handle, const char *label, int size, uint32_t *random, uint8_t *output) {
     double samples[AREA_ANCHORS];
     double phase_started = now();
@@ -82,7 +82,7 @@ int main(int argc, char **argv) {
     printf("{\"mode\":\"%s\",\"batches\":%zu,\"raw_value_bytes\":%zu,", argv[3], count, count * 4096);
     report("save_calls", samples, calls, elapsed);
 
-    /* Contrasts with save_calls' 4-component batches; a disjoint chunk range avoids collisions. */
+    /* Contrasts with save_calls' 4-component batches. Uses a disjoint chunk range so it can't collide. */
     started = now();
     for (size_t i = 0; i < count; ++i) {
         zg_operation single = {{0, (int)(10000 + i % 4096), 0, 0, 5}, ZG_PUT, values[0], sizeof(values[0])};
@@ -159,7 +159,7 @@ int main(int argc, char **argv) {
         if (required != sizeof(output) || memcmp(output, values[0], required)) return 1;
     }
     report("post_compaction_reads", samples, count, now() - started);
-    /* Snapshot before closing: reopening below hands us a fresh Handle with its own zeroed Stats. */
+    /* Grab this before closing, reopening below gives us a fresh Handle with its own zeroed Stats. */
     reportStats(handle);
 
     check(zg_close(handle));

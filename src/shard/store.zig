@@ -178,7 +178,7 @@ pub const Store = struct {
         const minimum_size = std.math.add(u64, segment.encoded_len, size) catch return error.BatchTooLarge;
         if (minimum_size > self.shard.options.max_segment_size) return error.BatchTooLarge;
         if (batch.entries[0].header.batch_id <= self.shard.writer.last_batch_id) return error.BatchOrder;
-        if (!std.meta.eql(batch.entries[0].key.region(), self.shard.index.region)) return error.RegionMismatch;
+        if (!std.meta.eql(batch.entries[0].key.region(), self.shard.generation.index.region)) return error.RegionMismatch;
 
         const result = self.shard.write(batch) catch |err| blk: {
             if (err != error.SegmentFull) return err;
@@ -212,7 +212,7 @@ pub const Store = struct {
         defer if (locked) self.mutex.unlock(self.io);
         if (self.closed) return error.Closed;
         if (self.shard.writer.failed) return error.WriterFailed;
-        const generation = std.math.add(u64, self.shard.index.generation, 1) catch return error.GenerationExhausted;
+        const generation = std.math.add(u64, self.shard.generation.index.generation, 1) catch return error.GenerationExhausted;
         const options = self.shard.options;
         const compaction_started: ?std.Io.Clock.Timestamp = if (options.stats != null) std.Io.Clock.Timestamp.now(self.io, .awake) else null;
         try self.shard.flush();
@@ -234,7 +234,7 @@ pub const Store = struct {
             .io = self.io,
             .dir = self.directory.dir,
             .generation = generation,
-            .region = self.shard.index.region,
+            .region = self.shard.generation.index.region,
             .max_size = options.max_segment_size,
             .ids = ids,
         };
@@ -243,24 +243,24 @@ pub const Store = struct {
         locked = false;
         var previous: u64 = 0;
         var source_bytes: u64 = 0;
-        for (self.devices[0..self.file_count], self.shard.segment_ids[0..self.file_count], 0..) |device, id, position| {
+        for (self.devices[0..self.file_count], self.shard.generation.segment_ids[0..self.file_count], 0..) |device, id, position| {
             var scanner = Scanner.init(device, .{
-                .generation = self.shard.index.generation,
+                .generation = self.shard.generation.index.generation,
                 .segment_id = id,
-                .region = self.shard.index.region,
+                .region = self.shard.generation.index.region,
             }, if (position == self.file_count - 1) .active else .sealed, previous, options.max_segment_size) catch |err| return self.sourceFailure(err);
             source_bytes = try std.math.add(u64, source_bytes, scanner.length);
             while (scanner.next(scratch) catch |err| return self.sourceFailure(err)) |batch| {
-                try output.append(try compactBatch(&self.shard.index, id, batch, filtered));
+                try output.append(try compactBatch(&self.shard.generation.index, id, batch, filtered));
             }
             if (scanner.has_tail) return self.sourceFailure(error.NeedsRecovery);
             previous = scanner.last_batch_id;
         }
-        if (previous != self.shard.index.last_batch_id) return self.sourceFailure(error.FileChanged);
+        if (previous != self.shard.generation.index.last_batch_id) return self.sourceFailure(error.FileChanged);
         try output.finish();
         const metadata: manifest.Manifest = .{
             .generation = generation,
-            .region = self.shard.index.region,
+            .region = self.shard.generation.index.region,
             .segments = ids[0..output.count],
         };
         const bytes = try metadata.encode(manifest_buffer);
@@ -281,13 +281,17 @@ pub const Store = struct {
             return err;
         };
 
-        var old = self.shard;
-        defer old.deinit();
         const old_devices = self.devices;
         const old_count = self.file_count;
-        self.shard = next;
+        const old_generation = self.shard.swap(next.generation, next.writer);
+        self.allocator.free(next.scratch);
         self.devices = devices;
         self.file_count = opened;
+        self.mutex.unlock(self.io);
+        locked = false;
+
+        // Only the old generation waits here, new reads already see the swap above.
+        self.shard.drain(old_generation);
         for (old_devices[0..old_count]) |device| device.handle.close(self.io);
         self.allocator.free(old_devices);
 
@@ -298,12 +302,15 @@ pub const Store = struct {
             if (compaction_started) |t| _ = s.compaction_duration_ns.fetchAdd(@intCast(t.untilNow(self.io).raw.nanoseconds), .monotonic);
         }
 
+        const cleanup = reclamation.reclaim(&self.directory, generation, old_generation.index.generation, old_generation.segment_ids[0..old_count]);
+        old_generation.destroy();
+
         return .{
             .generation = generation,
             .segment_count = opened,
             .source_bytes = source_bytes,
             .output_bytes = output.bytes,
-            .cleanup = reclamation.reclaim(&self.directory, generation, old.index.generation, old.segment_ids[0..old_count]),
+            .cleanup = cleanup,
         };
     }
 
@@ -314,15 +321,18 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.Closed;
         if (self.shard.writer.failed) return error.WriterFailed;
-        return reclamation.reclaim(&self.directory, self.shard.index.generation, generation, ids);
+        return reclamation.reclaim(&self.directory, self.shard.generation.index.generation, generation, ids);
     }
 
+    /// Only the lookup happens under `mutex`. The disk read runs unlocked.
     pub fn get(self: *Store, key: Key, output: []u8) !?[]const u8 {
         try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-
-        if (self.closed) return error.Closed;
+        if (self.closed) {
+            self.mutex.unlock(self.io);
+            return error.Closed;
+        }
         if (self.shard.options.stats) |s| _ = s.get_calls.fetchAdd(1, .monotonic);
+        self.mutex.unlock(self.io);
 
         return self.shard.get(key, output);
     }
@@ -330,27 +340,28 @@ pub const Store = struct {
     pub fn getSized(self: *Store, key: Key, output: []u8, required: *usize) !?[]const u8 {
         required.* = 0;
         try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.closed) return error.Closed;
+        if (self.closed) {
+            self.mutex.unlock(self.io);
+            return error.Closed;
+        }
         if (self.shard.options.stats) |s| _ = s.get_calls.fetchAdd(1, .monotonic);
-        const location = (try self.shard.index.get(key)) orelse return null;
-        required.* = location.raw_len;
-        if (output.len < location.raw_len) return error.BufferTooSmall;
-        return self.shard.get(key, output);
+        self.mutex.unlock(self.io);
+
+        return self.shard.getSized(key, output, required);
     }
 
     pub fn lastBatchId(self: *Store) !u64 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.Closed;
-        return self.shard.index.last_batch_id;
+        return self.shard.generation.index.last_batch_id;
     }
 
     pub fn valueSize(self: *Store, key: Key) !?u32 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.Closed;
-        const location = (try self.shard.index.get(key)) orelse return null;
+        const location = (try self.shard.generation.index.get(key)) orelse return null;
         return location.raw_len;
     }
 
@@ -398,7 +409,7 @@ pub const Store = struct {
         if (self.file_count == self.shard.options.max_segments) return error.TooManySegments;
 
         const id = std.math.add(u64, self.shard.writer.header.segment_id, 1) catch return error.SegmentIdExhausted;
-        const handle = try files.createSegment(self.directory.dir, self.io, self.shard.index.generation, id);
+        const handle = try files.createSegment(self.directory.dir, self.io, self.shard.generation.index.generation, id);
         errdefer handle.close(self.io);
 
         const device: File = .{ .handle = handle, .io = self.io };

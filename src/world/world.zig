@@ -230,7 +230,7 @@ pub const World = struct {
                 };
             };
         errdefer store.deinit();
-        if (!std.meta.eql(store.shard.index.region, region)) return error.RegionMismatch;
+        if (!std.meta.eql(store.shard.generation.index.region, region)) return error.RegionMismatch;
         try self.directory.syncEntries();
         std.mem.copyBackwards(Slot, self.slots[1 .. self.count + 1], self.slots[0..self.count]);
         self.slots[0] = .{ .region = region, .store = store };

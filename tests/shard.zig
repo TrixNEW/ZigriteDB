@@ -195,6 +195,52 @@ test "losing unsynced writes preserves the last flushed batch" {
         try testing.expectEqualStrings(if (flush) "new" else "saved", (try reopened.get(item(1, 0, "").key, &value)).?);
         const extra = try reopened.get(item(2, 1, "").key, &value);
         if (flush) try testing.expectEqualStrings("extra", extra.?) else try testing.expectEqual(null, extra);
-        try testing.expectEqual(@as(u64, if (flush) 2 else 1), reopened.index.last_batch_id);
+        try testing.expectEqual(@as(u64, if (flush) 2 else 1), reopened.generation.index.last_batch_id);
     }
+}
+
+const ReadResult = struct { len: ?usize = null, err: ?anyerror = null };
+
+fn concurrentRead(shard: *Shard, key: db.Key, buffer: []u8, result: *ReadResult) void {
+    if (shard.get(key, buffer)) |value| {
+        result.len = if (value) |v| v.len else null;
+    } else |err| {
+        result.err = err;
+    }
+}
+
+test "concurrent same-key reads all see the correct value" {
+    var device: Device = .{};
+    var shard = try Shard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "shared")} });
+    const key = item(1, 0, "").key;
+
+    var buffers: [8][128]u8 = undefined;
+    var results: [8]ReadResult = undefined;
+    for (&results) |*r| r.* = .{};
+    var threads: [8]std.Thread = undefined;
+    for (0..8) |i| threads[i] = try std.Thread.spawn(.{}, concurrentRead, .{ &shard, key, &buffers[i], &results[i] });
+    for (threads) |t| t.join();
+
+    for (0..8) |i| {
+        try testing.expectEqual(null, results[i].err);
+        try testing.expectEqualStrings("shared", buffers[i][0 .. results[i].len orelse 0]);
+    }
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+}
+
+test "a corrupted read releases its pin so close does not hang" {
+    var device: Device = .{};
+    var shard = try Shard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "old")} });
+
+    device.bytes[db.segment.encoded_len + 10] ^= 1;
+
+    var output: [128]u8 = undefined;
+    try testing.expectError(error.ChecksumMismatch, shard.get(item(1, 0, "").key, &output));
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+
+    try shard.close();
 }

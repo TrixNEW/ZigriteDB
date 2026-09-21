@@ -34,16 +34,38 @@ pub fn Shard(comptime Device: type) type {
         allocator: std.mem.Allocator,
         io: std.Io,
         writer: writer_module.Writer(Device),
-        index: index_module.Index,
+        generation: *Generation,
         options: Options,
         scratch: []u8,
-        devices: []Device,
-        segment_ids: []u64,
-        segment_count: usize,
         mutex: std.Io.Mutex = .init,
+        idle: std.Io.Condition = .init,
         closed: bool = false,
+        closing: bool = false,
 
         const Self = @This();
+
+        /// What compaction swaps out atomically. A pinned read keeps it alive a bit longer.
+        pub const Generation = struct {
+            allocator: std.mem.Allocator,
+            index: index_module.Index,
+            devices: []Device,
+            segment_ids: []u64,
+            segment_count: usize,
+            readers: usize = 0,
+
+            pub fn destroy(self: *Generation) void {
+                self.index.deinit();
+                self.allocator.free(self.devices);
+                self.allocator.free(self.segment_ids);
+                self.allocator.destroy(self);
+            }
+        };
+
+        const Pinned = struct {
+            generation: *Generation,
+            device: Device,
+            location: index_module.Location,
+        };
 
         pub fn create(allocator: std.mem.Allocator, io: std.Io, device: Device, header: segment.Header, options: Options) !Self {
             try options.validate();
@@ -59,6 +81,23 @@ pub fn Shard(comptime Device: type) type {
             devices[0] = device;
             ids[0] = header.segment_id;
 
+            // Has to happen before the writer touches disk, otherwise a failure here would leave a non-empty file behind.
+            const generation = try allocator.create(Generation);
+            errdefer allocator.destroy(generation);
+            generation.* = .{
+                .allocator = allocator,
+                .index = .{
+                    .allocator = allocator,
+                    .region = header.region,
+                    .generation = header.generation,
+                    .max_keys = options.max_keys,
+                    .stats = options.stats,
+                },
+                .devices = devices,
+                .segment_ids = ids,
+                .segment_count = 1,
+            };
+
             var writer = try writer_module.Writer(Device).create(device, header, options.max_segment_size, 0);
             writer.stats = options.stats;
             writer.io = io;
@@ -67,18 +106,9 @@ pub fn Shard(comptime Device: type) type {
                 .allocator = allocator,
                 .io = io,
                 .writer = writer,
-                .index = .{
-                    .allocator = allocator,
-                    .region = header.region,
-                    .generation = header.generation,
-                    .max_keys = options.max_keys,
-                    .stats = options.stats,
-                },
+                .generation = generation,
                 .options = options,
                 .scratch = scratch,
-                .devices = devices,
-                .segment_ids = ids,
-                .segment_count = 1,
             };
         }
 
@@ -131,6 +161,16 @@ pub fn Shard(comptime Device: type) type {
 
             try device.sync();
 
+            const generation = try allocator.create(Generation);
+            errdefer allocator.destroy(generation);
+            generation.* = .{
+                .allocator = allocator,
+                .index = index,
+                .devices = devices,
+                .segment_ids = ids,
+                .segment_count = source_devices.len,
+            };
+
             return .{
                 .allocator = allocator,
                 .io = io,
@@ -148,12 +188,9 @@ pub fn Shard(comptime Device: type) type {
                     .stats = options.stats,
                     .io = io,
                 },
-                .index = index,
+                .generation = generation,
                 .options = options,
                 .scratch = scratch,
-                .devices = devices,
-                .segment_ids = ids,
-                .segment_count = source_devices.len,
             };
         }
 
@@ -163,27 +200,27 @@ pub fn Shard(comptime Device: type) type {
 
             if (self.closed) return error.Closed;
             if (self.writer.failed) return error.WriterFailed;
-            if (self.segment_count == self.options.max_segments) return error.TooManySegments;
+            if (self.generation.segment_count == self.options.max_segments) return error.TooManySegments;
             if (id <= self.writer.header.segment_id) return error.InvalidSegmentOrder;
             if (try device.length() != 0) return error.FileNotEmpty;
 
-            const count = self.segment_count + 1;
+            const count = self.generation.segment_count + 1;
             const buffer = try self.allocator.alloc(u8, manifest.header_len + count * 8 + 4);
             defer self.allocator.free(buffer);
 
-            self.segment_ids[self.segment_count] = id;
+            self.generation.segment_ids[self.generation.segment_count] = id;
             const bytes = try (manifest.Manifest{
-                .generation = self.index.generation,
-                .region = self.index.region,
-                .segments = self.segment_ids[0..count],
+                .generation = self.generation.index.generation,
+                .region = self.generation.index.region,
+                .segments = self.generation.segment_ids[0..count],
             }).encode(buffer);
 
             try self.writer.flush();
 
             var next = try writer_module.Writer(Device).create(device, .{
                 .segment_id = id,
-                .generation = self.index.generation,
-                .region = self.index.region,
+                .generation = self.generation.index.generation,
+                .region = self.generation.index.region,
             }, self.options.max_segment_size, self.writer.last_batch_id);
             next.stats = self.options.stats;
             next.io = self.io;
@@ -193,10 +230,10 @@ pub fn Shard(comptime Device: type) type {
                 return err;
             };
 
-            self.devices[self.segment_count] = device;
-            self.segment_count = count;
+            self.generation.devices[self.generation.segment_count] = device;
+            self.generation.segment_count = count;
             self.writer = next;
-            self.index.active_offset = segment.encoded_len;
+            self.generation.index.active_offset = segment.encoded_len;
         }
         pub fn write(self: *Self, batch: WriteBatch) !writer_module.AppendResult {
             try self.mutex.lock(self.io);
@@ -209,7 +246,7 @@ pub fn Shard(comptime Device: type) type {
             const end = std.math.add(u64, self.writer.offset, bytes.len) catch return error.SegmentFull;
             if (end > self.options.max_segment_size) return error.SegmentFull;
 
-            var prepared = try self.index.prepare(.{
+            var prepared = try self.generation.index.prepare(.{
                 .id = batch.entries[0].header.batch_id,
                 .records = bytes[0 .. bytes.len - commit.commit_len],
                 .end_offset = std.math.cast(usize, end) orelse return error.InvalidLength,
@@ -217,25 +254,86 @@ pub fn Shard(comptime Device: type) type {
             defer prepared.deinit();
 
             const result = try self.writer.appendEncoded(bytes, self.options.durability);
-            self.index.publish(&prepared);
-            self.index.active_offset = @intCast(result.end);
+            self.generation.index.publish(&prepared);
+            self.generation.index.active_offset = @intCast(result.end);
 
             return result;
         }
 
-        pub fn get(self: *Self, key: Key, output: []u8) !?[]const u8 {
+        /// Resolves and pins under the lock. Caller has to `unpin` when it's done.
+        fn pin(self: *Self, key: Key) !?Pinned {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
 
-            if (self.closed) return error.Closed;
+            if (self.closed or self.closing) return error.Closed;
 
-            const location = (try self.index.get(key)) orelse return null;
+            const generation = self.generation;
+            const location = (try generation.index.get(key)) orelse return null;
 
-            for (self.segment_ids[0..self.segment_count], self.devices[0..self.segment_count]) |id, device| {
-                if (id == location.segment_id) return self.index.readInto(key, device, self.scratch, output);
+            for (generation.segment_ids[0..generation.segment_count], generation.devices[0..generation.segment_count]) |id, device| {
+                if (id != location.segment_id) continue;
+                generation.readers += 1;
+                return .{ .generation = generation, .device = device, .location = location };
             }
 
             return error.IndexMismatch;
+        }
+
+        fn unpin(self: *Self, generation: *Generation) void {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+
+            generation.readers -= 1;
+            if (generation.readers == 0) self.idle.broadcast(self.io);
+        }
+
+        /// Most records fit on the stack, so only the rare oversized one needs a heap alloc.
+        const inline_scratch_len = 8192;
+
+        fn readPinned(self: *Self, pinned: Pinned, key: Key, output: []u8) !?[]const u8 {
+            const len = std.math.add(usize, entry.overhead, pinned.location.stored_len) catch return error.InvalidLength;
+            var stack_scratch: [inline_scratch_len]u8 = undefined;
+            const scratch = if (len <= stack_scratch.len) stack_scratch[0..len] else try self.allocator.alloc(u8, len);
+            defer if (len > stack_scratch.len) self.allocator.free(scratch);
+
+            return pinned.generation.index.readInto(key, pinned.device, scratch, output);
+        }
+
+        pub fn get(self: *Self, key: Key, output: []u8) !?[]const u8 {
+            const pinned = (try self.pin(key)) orelse return null;
+            defer self.unpin(pinned.generation);
+
+            return self.readPinned(pinned, key, output);
+        }
+
+        /// Uses one pin for both the size check and the read, so `required` can't go stale.
+        pub fn getSized(self: *Self, key: Key, output: []u8, required: *usize) !?[]const u8 {
+            const pinned = (try self.pin(key)) orelse return null;
+            defer self.unpin(pinned.generation);
+
+            required.* = pinned.location.raw_len;
+            if (output.len < pinned.location.raw_len) return error.BufferTooSmall;
+
+            return self.readPinned(pinned, key, output);
+        }
+
+        /// Installs the new generation and writer, and hands back the old one (still open).
+        pub fn swap(self: *Self, generation: *Generation, next_writer: writer_module.Writer(Device)) *Generation {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+
+            const old = self.generation;
+            self.generation = generation;
+            self.writer = next_writer;
+            return old;
+        }
+
+        /// Blocks until nobody's still pinning `generation`.
+        pub fn drain(self: *Self, generation: *Generation) void {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+
+            while (generation.readers != 0) self.idle.waitUncancelable(self.io, &self.mutex);
         }
 
         pub fn flush(self: *Self) !void {
@@ -253,6 +351,7 @@ pub fn Shard(comptime Device: type) type {
 
             if (self.closed) return;
 
+            self.closing = true;
             const result = self.writer.flush();
             self.release();
             try result;
@@ -262,14 +361,17 @@ pub fn Shard(comptime Device: type) type {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
 
-            if (!self.closed) self.release();
+            if (!self.closed) {
+                self.closing = true;
+                self.release();
+            }
         }
 
+        /// Called with `mutex` already held. Waits for pinned readers before freeing.
         fn release(self: *Self) void {
-            self.index.deinit();
+            while (self.generation.readers != 0) self.idle.waitUncancelable(self.io, &self.mutex);
+            self.generation.destroy();
             self.allocator.free(self.scratch);
-            self.allocator.free(self.devices);
-            self.allocator.free(self.segment_ids);
             self.closed = true;
         }
     };
