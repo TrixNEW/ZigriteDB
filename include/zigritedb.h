@@ -51,6 +51,16 @@ typedef struct {
     const zg_operation *operations;
     size_t count;
 } zg_batch;
+/* Cumulative counters since open or the last zg_stats_reset. */
+typedef struct {
+    uint64_t get_calls, writes, records_written;
+    uint64_t raw_bytes_written, compressed_bytes_written;
+    uint64_t disk_reads, bytes_read;
+    uint64_t fsync_count, fsync_duration_ns;
+    uint64_t segment_rotations;
+    uint64_t compactions, compaction_input_bytes, compaction_output_bytes, compaction_duration_ns;
+    uint64_t recovery_attempts, recovery_errors;
+} zg_stats;
 
 /* The message belongs to the library. Do not free it. */
 const char *zg_status_message(int status);
@@ -86,6 +96,10 @@ int zg_compact_async(zg_handle *handle, int32_t dimension, int32_t region_x, int
 int zg_maintenance_wait(zg_handle *handle);
 /* Copies committed data to an empty directory. Leaves the source untouched. */
 int zg_recover_region(const uint8_t *source, size_t source_len, const uint8_t *destination, size_t destination_len, const zg_options *options);
+/* Snapshots the handle's runtime counters. */
+int zg_stats_get(zg_handle *handle, zg_stats *out);
+/* Zeroes the handle's runtime counters. Not safe to call concurrently with other operations. */
+int zg_stats_reset(zg_handle *handle);
 #ifdef __cplusplus
 }
 #endif

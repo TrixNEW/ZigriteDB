@@ -127,6 +127,7 @@ pub const Handle = struct {
     writers: [4]?WriteContext = .{null} ** 4,
     writer_limit: usize,
     threshold: u32,
+    stats: db.Stats = .{},
 
     fn acquireWriter(self: *Handle) !*WriteContext {
         const io = self.threaded.io();
@@ -221,9 +222,11 @@ pub export fn zg_open(path: ?[*]const u8, length: usize, options: ?*const Option
 
 fn open(path: ?[*]const u8, length: usize, options: Options) !*Handle {
     const name = try pathSlice(path, length);
-    const config = try options.native();
+    var config = try options.native();
     const handle = try allocator.create(Handle);
     errdefer allocator.destroy(handle);
+    handle.stats = .{};
+    config.shard.stats = &handle.stats;
     handle.threaded = std.Io.Threaded.init(allocator, .{});
     errdefer handle.threaded.deinit();
     const io = handle.threaded.io();
@@ -339,6 +342,40 @@ pub export fn zg_get(optional: ?*Handle, key: ?*const Key, output: ?[*]u8, capac
 pub export fn zg_flush(optional: ?*Handle) Status {
     const handle = optional orelse return .invalid_argument;
     handle.world.flush() catch |err| return status(err);
+    return .ok;
+}
+
+pub const StatsSnapshot = extern struct {
+    get_calls: u64 = 0,
+    writes: u64 = 0,
+    records_written: u64 = 0,
+    raw_bytes_written: u64 = 0,
+    compressed_bytes_written: u64 = 0,
+    disk_reads: u64 = 0,
+    bytes_read: u64 = 0,
+    fsync_count: u64 = 0,
+    fsync_duration_ns: u64 = 0,
+    segment_rotations: u64 = 0,
+    compactions: u64 = 0,
+    compaction_input_bytes: u64 = 0,
+    compaction_output_bytes: u64 = 0,
+    compaction_duration_ns: u64 = 0,
+    recovery_attempts: u64 = 0,
+    recovery_errors: u64 = 0,
+};
+
+pub export fn zg_stats_get(optional: ?*Handle, out: ?*StatsSnapshot) Status {
+    const handle = optional orelse return .invalid_argument;
+    const target = out orelse return .invalid_argument;
+    inline for (std.meta.fields(StatsSnapshot)) |field| {
+        @field(target, field.name) = @field(handle.stats, field.name).load(.monotonic);
+    }
+    return .ok;
+}
+
+pub export fn zg_stats_reset(optional: ?*Handle) Status {
+    const handle = optional orelse return .invalid_argument;
+    handle.stats.reset();
     return .ok;
 }
 

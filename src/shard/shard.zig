@@ -8,6 +8,7 @@ const manifest = @import("../format/manifest.zig");
 const segment = @import("../format/segment.zig");
 const index_module = @import("../index/index.zig");
 const writer_module = @import("../storage/writer.zig");
+const Stats = @import("../stats.zig").Stats;
 
 pub const Options = struct {
     max_keys: u32 = 65536,
@@ -15,6 +16,7 @@ pub const Options = struct {
     max_segment_size: u64 = 256 * 1024 * 1024,
     batch_buffer_size: usize = 1024 * 1024,
     durability: writer_module.Durability = .sync,
+    stats: ?*Stats = null,
 
     pub fn validate(self: Options) !void {
         if (self.max_segments == 0 or self.max_segments > manifest.max_segments) return error.InvalidSegmentCount;
@@ -57,7 +59,9 @@ pub fn Shard(comptime Device: type) type {
             devices[0] = device;
             ids[0] = header.segment_id;
 
-            const writer = try writer_module.Writer(Device).create(device, header, options.max_segment_size, 0);
+            var writer = try writer_module.Writer(Device).create(device, header, options.max_segment_size, 0);
+            writer.stats = options.stats;
+            writer.io = io;
 
             return .{
                 .allocator = allocator,
@@ -68,6 +72,7 @@ pub fn Shard(comptime Device: type) type {
                     .region = header.region,
                     .generation = header.generation,
                     .max_keys = options.max_keys,
+                    .stats = options.stats,
                 },
                 .options = options,
                 .scratch = scratch,
@@ -116,6 +121,7 @@ pub fn Shard(comptime Device: type) type {
                 options.max_segment_size,
             );
             errdefer index.deinit();
+            index.stats = options.stats;
 
             if (index.has_tail) return error.NeedsRecovery;
 
@@ -139,6 +145,8 @@ pub fn Shard(comptime Device: type) type {
                     .offset = index.active_offset,
                     .synced_offset = index.active_offset,
                     .last_batch_id = index.last_batch_id,
+                    .stats = options.stats,
+                    .io = io,
                 },
                 .index = index,
                 .options = options,
@@ -172,11 +180,13 @@ pub fn Shard(comptime Device: type) type {
 
             try self.writer.flush();
 
-            const next = try writer_module.Writer(Device).create(device, .{
+            var next = try writer_module.Writer(Device).create(device, .{
                 .segment_id = id,
                 .generation = self.index.generation,
                 .region = self.index.region,
             }, self.options.max_segment_size, self.writer.last_batch_id);
+            next.stats = self.options.stats;
+            next.io = self.io;
 
             publisher.publish(bytes) catch |err| {
                 self.writer.failed = true;

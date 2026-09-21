@@ -31,6 +31,15 @@ class Batch(c.Structure):
     _fields_ = [("id", c.c_uint64), ("operations", c.POINTER(Operation)), ("count", c.c_size_t)]
 
 
+class Stats(c.Structure):
+    _fields_ = [(name, c.c_uint64) for name in (
+        "get_calls", "writes", "records_written", "raw_bytes_written", "compressed_bytes_written",
+        "disk_reads", "bytes_read", "fsync_count", "fsync_duration_ns", "segment_rotations",
+        "compactions", "compaction_input_bytes", "compaction_output_bytes", "compaction_duration_ns",
+        "recovery_attempts", "recovery_errors",
+    )]
+
+
 class API:
     def __init__(self, library):
         self.lib = c.CDLL(str(library))
@@ -47,6 +56,8 @@ class API:
             "zg_last_batch_id": [c.c_void_p, c.c_int32, c.c_int32, c.c_int32, c.POINTER(c.c_uint64)],
             "zg_compact": [c.c_void_p, c.c_int32, c.c_int32, c.c_int32],
             "zg_recover_region": [c.c_char_p, c.c_size_t, c.c_char_p, c.c_size_t, c.POINTER(Options)],
+            "zg_stats_get": [c.c_void_p, c.POINTER(Stats)],
+            "zg_stats_reset": [c.c_void_p],
         }
         for name, arguments in signatures.items():
             fn = getattr(self.lib, name)
@@ -287,6 +298,40 @@ def check_concurrency(library, root, shard_limit=16):
     print(f"Concurrent C API reads, writes and maintenance passed with {shard_limit} cached shards")
 
 
+def check_stats(library, root):
+    api = API(library)
+    path = root / "stats"
+    path.mkdir()
+    handle = api.open(path)
+    try:
+        assert api.write(handle, 1, [b"first", b"second"]) == 0
+        assert api.read(handle, 0)[0] == 0
+        # index 5: unwritten but same region as 0/1, so the miss still hits this Store.
+        assert api.read(handle, 5)[0] == 1
+        assert api.lib.zg_compact(handle, 0, 0, 0) == 0
+
+        stats = Stats()
+        assert api.lib.zg_stats_get(handle, c.byref(stats)) == 0
+        assert stats.get_calls == 3, stats.get_calls  # read(0) probes+reads (2), read(5) misses (1)
+        assert stats.writes == 1, stats.writes
+        assert stats.records_written >= stats.writes
+        assert stats.raw_bytes_written == stats.compressed_bytes_written == len(b"first") + len(b"second")
+        assert stats.disk_reads > 0 and stats.bytes_read > 0
+        assert stats.fsync_count > 0
+        assert stats.compactions == 1
+
+        assert api.lib.zg_stats_get(None, c.byref(stats)) == 2
+        assert api.lib.zg_stats_get(handle, None) == 2
+
+        assert api.lib.zg_stats_reset(handle) == 0
+        assert api.lib.zg_stats_get(handle, c.byref(stats)) == 0
+        for name, _ in Stats._fields_:
+            assert getattr(stats, name) == 0, name
+    finally:
+        assert api.lib.zg_close(handle) == 0
+    print("Runtime stats counters moved and reset correctly")
+
+
 def main():
     assert sys.platform == "linux" and platform.machine() == "x86_64"
     library, smoke = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
@@ -295,6 +340,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="zigritedb-native-") as temporary:
         root = Path(temporary)
         check_permissions(api, root)
+        check_stats(library, root)
         c_root = root / "c-smoke"
         c_root.mkdir()
         env = dict(os.environ, LD_LIBRARY_PATH=str(library.parent))

@@ -180,12 +180,27 @@ pub const Store = struct {
         if (batch.entries[0].header.batch_id <= self.shard.writer.last_batch_id) return error.BatchOrder;
         if (!std.meta.eql(batch.entries[0].key.region(), self.shard.index.region)) return error.RegionMismatch;
 
-        return self.shard.write(batch) catch |err| {
+        const result = self.shard.write(batch) catch |err| blk: {
             if (err != error.SegmentFull) return err;
 
             try self.rotate();
-            return self.shard.write(batch);
+            break :blk try self.shard.write(batch);
         };
+
+        if (self.shard.options.stats) |s| {
+            _ = s.writes.fetchAdd(1, .monotonic);
+            _ = s.records_written.fetchAdd(@intCast(batch.entries.len), .monotonic);
+            var raw_bytes: u64 = 0;
+            var compressed_bytes: u64 = 0;
+            for (batch.entries) |item| {
+                raw_bytes += item.header.raw_len;
+                compressed_bytes += item.header.stored_len;
+            }
+            _ = s.raw_bytes_written.fetchAdd(raw_bytes, .monotonic);
+            _ = s.compressed_bytes_written.fetchAdd(compressed_bytes, .monotonic);
+        }
+
+        return result;
     }
 
     /// Installs a compacted generation, then reclaims the old segments.
@@ -199,6 +214,7 @@ pub const Store = struct {
         if (self.shard.writer.failed) return error.WriterFailed;
         const generation = std.math.add(u64, self.shard.index.generation, 1) catch return error.GenerationExhausted;
         const options = self.shard.options;
+        const compaction_started: ?std.Io.Clock.Timestamp = if (options.stats != null) std.Io.Clock.Timestamp.now(self.io, .awake) else null;
         try self.shard.flush();
 
         const scratch = try self.allocator.alloc(u8, options.batch_buffer_size + segment.encoded_len);
@@ -275,6 +291,13 @@ pub const Store = struct {
         for (old_devices[0..old_count]) |device| device.handle.close(self.io);
         self.allocator.free(old_devices);
 
+        if (options.stats) |s| {
+            _ = s.compactions.fetchAdd(1, .monotonic);
+            _ = s.compaction_input_bytes.fetchAdd(source_bytes, .monotonic);
+            _ = s.compaction_output_bytes.fetchAdd(output.bytes, .monotonic);
+            if (compaction_started) |t| _ = s.compaction_duration_ns.fetchAdd(@intCast(t.untilNow(self.io).raw.nanoseconds), .monotonic);
+        }
+
         return .{
             .generation = generation,
             .segment_count = opened,
@@ -299,6 +322,7 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
 
         if (self.closed) return error.Closed;
+        if (self.shard.options.stats) |s| _ = s.get_calls.fetchAdd(1, .monotonic);
 
         return self.shard.get(key, output);
     }
@@ -308,6 +332,7 @@ pub const Store = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.Closed;
+        if (self.shard.options.stats) |s| _ = s.get_calls.fetchAdd(1, .monotonic);
         const location = (try self.shard.index.get(key)) orelse return null;
         required.* = location.raw_len;
         if (output.len < location.raw_len) return error.BufferTooSmall;
@@ -382,6 +407,7 @@ pub const Store = struct {
 
         self.devices[self.file_count] = device;
         self.file_count += 1;
+        if (self.shard.options.stats) |s| _ = s.segment_rotations.fetchAdd(1, .monotonic);
     }
 
     fn release(self: *Store) void {

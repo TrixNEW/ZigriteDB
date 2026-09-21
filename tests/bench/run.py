@@ -11,13 +11,17 @@ import tempfile
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, default=Path("zig-out/bin/native_bench"))
+    parser.add_argument("--concurrency-binary", type=Path, default=Path("zig-out/bin/native_bench_concurrency"))
     parser.add_argument("--library", type=Path, default=Path("zig-out/lib"))
     parser.add_argument("--directory", type=Path)
     parser.add_argument("--batches", type=int, default=2048)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--threads", type=int, default=4)
     args = parser.parse_args()
     if args.batches < 128 or args.batches > 1000000 or args.batches % 16 or args.repeats < 1:
         parser.error("use 128..1000000 batches in multiples of 16 and at least one repeat")
+    if args.threads < 1 or args.threads > 32:
+        parser.error("use 1..32 threads")
     env = dict(os.environ, LD_LIBRARY_PATH=str(args.library.resolve()))
     results = []
     for mode in ("sync", "group", "buffered"):
@@ -26,9 +30,21 @@ def main():
                 run = subprocess.run([str(args.binary.resolve()), path, str(args.batches), mode],
                                      env=env, check=True, capture_output=True, text=True, timeout=600)
                 result = json.loads(run.stdout)
+                result["binary"] = "native_bench"
                 result["repeat"] = repeat
                 result["database_bytes"] = sum(file.stat().st_size for file in Path(path).rglob("*") if file.is_file())
+                stats = result.get("stats")
+                if stats and stats.get("compressed_bytes_written"):
+                    result["compression_ratio"] = stats["raw_bytes_written"] / stats["compressed_bytes_written"]
                 results.append(result)
+    for repeat in range(args.repeats):
+        with tempfile.TemporaryDirectory(prefix="zigritedb-bench-concurrency-", dir=args.directory) as path:
+            run = subprocess.run([str(args.concurrency_binary.resolve()), path, str(args.batches), str(args.threads)],
+                                 env=env, check=True, capture_output=True, text=True, timeout=600)
+            result = json.loads(run.stdout)
+            result["binary"] = "native_bench_concurrency"
+            result["repeat"] = repeat
+            results.append(result)
     print(json.dumps({"platform": platform.platform(), "synthetic": True,
                       "group_batches_per_call": 16, "results": results}, indent=2))
 

@@ -9,6 +9,7 @@ const manifest = @import("../format/manifest.zig");
 const segment = @import("../format/segment.zig");
 const file_scan = @import("../recovery/file_scan.zig");
 const recovery = @import("../recovery/scan.zig");
+const Stats = @import("../stats.zig").Stats;
 
 const EncodedKey = [Key.encoded_len]u8;
 const Map = std.AutoHashMapUnmanaged(EncodedKey, Location);
@@ -42,6 +43,7 @@ pub const Index = struct {
     last_batch_id: u64 = 0,
     active_offset: usize = segment.encoded_len,
     has_tail: bool = false,
+    stats: ?*Stats = null,
 
     pub fn deinit(self: *Index) void {
         self.entries.deinit(self.allocator);
@@ -90,6 +92,11 @@ pub const Index = struct {
         });
 
         try device.readExact(scratch[0..len], location.offset);
+
+        if (self.stats) |s| {
+            _ = s.disk_reads.fetchAdd(2, .monotonic);
+            _ = s.bytes_read.fetchAdd(@intCast(header_bytes.len + len), .monotonic);
+        }
 
         const decoded = try entry.decode(scratch[0..len]);
         const same_record =

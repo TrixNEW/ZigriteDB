@@ -34,7 +34,10 @@ test "recovery copies committed batches and leaves the source intact" {
     const orphan = try source.dir.createFile(io, "0000000000000001-0000000000000003.segment", .{ .exclusive = true });
     orphan.close(io);
 
-    const result = try db.recovery_copy.recoverTo(testing.allocator, io, source.dir, destination.dir, .{});
+    var stats: db.Stats = .{};
+    const result = try db.recovery_copy.recoverTo(testing.allocator, io, source.dir, destination.dir, .{ .stats = &stats });
+    try testing.expectEqual(@as(u64, 1), stats.recovery_attempts.load(.monotonic));
+    try testing.expectEqual(@as(u64, 0), stats.recovery_errors.load(.monotonic));
     try testing.expectEqual(@as(usize, 2), result.segment_count);
     try testing.expectEqual(@as(u64, 2), result.committed_batches);
     try testing.expectEqual(@as(u64, 2), result.last_batch_id);
@@ -66,7 +69,10 @@ test "recovery never publishes corrupt data or replaces a destination" {
     const handle = try source.dir.openFile(io, active_name, .{ .mode = .read_write });
     defer handle.close(io);
     try (db.storage.File{ .handle = handle, .io = io }).writeAll("bad!", 48);
-    try testing.expectError(error.InvalidMagic, db.recovery_copy.recoverTo(testing.allocator, io, source.dir, destination.dir, .{}));
+    var stats: db.Stats = .{};
+    try testing.expectError(error.InvalidMagic, db.recovery_copy.recoverTo(testing.allocator, io, source.dir, destination.dir, .{ .stats = &stats }));
+    try testing.expectEqual(@as(u64, 1), stats.recovery_attempts.load(.monotonic));
+    try testing.expectEqual(@as(u64, 1), stats.recovery_errors.load(.monotonic));
     try testing.expectError(error.FileNotFound, destination.dir.statFile(io, "MANIFEST", .{}));
     try testing.expectError(error.DirectoryNotEmpty, db.recovery_copy.recoverTo(testing.allocator, io, source.dir, destination.dir, .{}));
 }

@@ -94,6 +94,15 @@ int main(int argc, char **argv) {
     assert(zg_maintenance_wait(handle) == ZG_OK);
     assert(zg_compact_async(handle, 0, 0, 0) == ZG_OK);
     assert(zg_flush(handle) == ZG_OK);
+    zg_stats stats;
+    assert(zg_stats_get(NULL, &stats) == ZG_INVALID_ARGUMENT);
+    assert(zg_stats_get(handle, NULL) == ZG_INVALID_ARGUMENT);
+    assert(zg_stats_get(handle, &stats) == ZG_OK);
+    assert(stats.get_calls > 0 && stats.writes > 0 && stats.compactions > 0);
+    assert(zg_stats_reset(NULL) == ZG_INVALID_ARGUMENT);
+    assert(zg_stats_reset(handle) == ZG_OK);
+    assert(zg_stats_get(handle, &stats) == ZG_OK);
+    assert(stats.get_calls == 0 && stats.writes == 0 && stats.compactions == 0);
     assert(zg_close(handle) == ZG_OK);
     assert(zg_close(NULL) == ZG_INVALID_ARGUMENT);
     puts("C API smoke test passed");
