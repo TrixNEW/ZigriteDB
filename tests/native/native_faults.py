@@ -60,6 +60,7 @@ class API:
             "zg_recover_region": [c.c_char_p, c.c_size_t, c.c_char_p, c.c_size_t, c.POINTER(Options)],
             "zg_stats_get": [c.c_void_p, c.POINTER(Stats)],
             "zg_stats_reset": [c.c_void_p],
+            "zg_prefetch": [c.c_void_p, c.POINTER(Key), c.c_size_t],
         }
         for name, arguments in signatures.items():
             fn = getattr(self.lib, name)
@@ -249,7 +250,6 @@ def check_concurrency(library, root, shard_limit=16):
     api.options.max_segment_size = 1024 * 1024
     api.options.max_open_shards = shard_limit
     api.options.compression_threshold = 32
-    # Small enough to exercise eviction.
     api.options.cache_bytes = 16 * 1024
     path = root / f"concurrent-{shard_limit}"
     path.mkdir()
@@ -310,13 +310,12 @@ def check_stats(library, root):
     try:
         assert api.write(handle, 1, [b"first", b"second"]) == 0
         assert api.read(handle, 0)[0] == 0
-        # Same region as 0 and 1, but never written.
         assert api.read(handle, 5)[0] == 1
         assert api.lib.zg_compact(handle, 0, 0, 0) == 0
 
         stats = Stats()
         assert api.lib.zg_stats_get(handle, c.byref(stats)) == 0
-        assert stats.get_calls == 3, stats.get_calls  # Two reads and one miss.
+        assert stats.get_calls == 3, stats.get_calls
         assert stats.writes == 1, stats.writes
         assert stats.records_written >= stats.writes
         assert stats.raw_bytes_written == stats.compressed_bytes_written == len(b"first") + len(b"second")
@@ -336,6 +335,12 @@ def check_stats(library, root):
         batch_id = c.c_uint64()
         assert api.lib.zg_last_batch_id(handle, 0, 0, 0, c.byref(batch_id)) == 0
         assert batch_id.value == 2, batch_id.value
+        assert api.read(handle, 0) == (0, b"next")
+
+        keys = (Key * 3)(Key(0, 0, 0, 0, 5), Key(0, 0, 0, 0, 5), Key(0, 1, 0, 0, 5))
+        assert api.lib.zg_prefetch(handle, keys, 3) == 0
+        assert api.lib.zg_prefetch(handle, None, 0) == 0
+        assert api.lib.zg_prefetch(handle, None, 1) == 2
         assert api.read(handle, 0) == (0, b"next")
     finally:
         assert api.lib.zg_close(handle) == 0

@@ -23,7 +23,6 @@ test "hits only match the batch the index points at" {
 
     cache.put(io, key(0), 2, "new");
     try testing.expectEqualStrings("new", cache.get(io, key(0), 2, &output).?);
-    // Newer batches win over stale reads.
     cache.put(io, key(0), 1, "old");
     try testing.expectEqualStrings("new", cache.get(io, key(0), 2, &output).?);
 
@@ -81,6 +80,26 @@ test "concurrent gets and puts never return another key's or batch's bytes" {
     for (cache.shards) |shard| try testing.expect(shard.used <= shard.capacity);
 }
 
+test "warm pulls a value into the cache so the next read hits" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stats: db.Stats = .{};
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .shard = .{ .stats = &stats }, .cache = .{ .bytes = 64 * 1024 } });
+    defer world.deinit();
+    const saved = item(1, 0, "saved");
+    _ = try world.write(.{ .entries = &.{saved} });
+
+    try world.warm(saved.key);
+    try world.warm(item(1, 1, "").key);
+    try world.warm(item(1, 99 * 32, "").key);
+    const hits = stats.cache_hits.load(.monotonic);
+    var output: [16]u8 = undefined;
+    try testing.expectEqualStrings("saved", (try world.get(saved.key, &output)).?);
+    try testing.expectEqual(hits + 1, stats.cache_hits.load(.monotonic));
+    try world.close();
+}
+
 test "world reads stay correct through overwrites, deletes, compaction and eviction" {
     if (!db.directory.supported) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
@@ -106,7 +125,6 @@ test "world reads stay correct through overwrites, deletes, compaction and evict
     _ = try world.compact(first.key.region());
     try testing.expectEqualStrings("second", (try world.get(first.key, &output)).?);
 
-    // Exercise eviction across regions.
     _ = try world.write(.{ .entries = &.{item(1, 32, "other")} });
     const hits = stats.cache_hits.load(.monotonic);
     try testing.expectEqualStrings("second", (try world.get(first.key, &output)).?);

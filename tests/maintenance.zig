@@ -18,6 +18,31 @@ const Work = struct {
     }
 };
 
+test "a non-draining queue drops pending work on close" {
+    var work: Work = .{};
+    var queue: db.maintenance.WorkQueue(Work, db.Region, 4, false, Work.run) = .{ .io = io, .context = &work };
+    try queue.submit(.{ .dimension = 0, .x = 0, .z = 0 });
+    work.started.waitUncancelable(io);
+    for (1..5) |x| try queue.submit(.{ .dimension = 0, .x = @intCast(x), .z = 0 });
+    try testing.expectError(error.QueueFull, queue.submit(.{ .dimension = 0, .x = 9, .z = 0 }));
+
+    const closer = try std.Thread.spawn(.{}, closeQueue, .{&queue});
+    while (true) {
+        queue.mutex.lockUncancelable(io);
+        const stopping = queue.stopping;
+        queue.mutex.unlock(io);
+        if (stopping) break;
+        std.Thread.yield() catch {};
+    }
+    work.release.set(io);
+    closer.join();
+    try testing.expectEqual(@as(usize, 1), work.completed);
+}
+
+fn closeQueue(queue: anytype) void {
+    queue.close() catch {};
+}
+
 test "maintenance bounds queued work and drains after a failure" {
     var work: Work = .{};
     var queue: db.maintenance.Queue(Work, Work.run) = .{ .io = io, .context = &work };

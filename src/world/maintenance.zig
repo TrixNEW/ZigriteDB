@@ -3,40 +3,49 @@ const std = @import("std");
 const Region = @import("../format/key.zig").Region;
 
 pub fn Queue(comptime Context: type, comptime run: fn (*Context, Region) anyerror!void) type {
+    return WorkQueue(Context, Region, 16, true, run);
+}
+
+/// Bounded background queue with optional draining on close.
+pub fn WorkQueue(
+    comptime Context: type,
+    comptime Item: type,
+    comptime capacity: usize,
+    comptime drain_on_close: bool,
+    comptime run: fn (*Context, Item) anyerror!void,
+) type {
     return struct {
         io: std.Io,
         context: *Context,
         mutex: std.Io.Mutex = .init,
         changed: std.Io.Condition = .init,
         thread: ?std.Thread = null,
-        regions: [16]Region = undefined,
+        items: [capacity]Item = undefined,
         head: usize = 0,
         count: usize = 0,
-        active: ?Region = null,
+        active: ?Item = null,
         failure: ?anyerror = null,
         stopping: bool = false,
 
         const Self = @This();
 
-        /// Keep the queue and context at stable addresses until close returns.
-        pub fn submit(self: *Self, region: Region) !void {
+        pub fn submit(self: *Self, item: Item) !void {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
             if (self.stopping) return error.Closed;
-            if (self.count == self.regions.len) return error.QueueFull;
+            if (self.count == self.items.len) return error.QueueFull;
             if (self.active) |active| {
-                if (std.meta.eql(active, region)) return error.AlreadyQueued;
+                if (std.meta.eql(active, item)) return error.AlreadyQueued;
             }
             for (0..self.count) |i| {
-                if (std.meta.eql(self.regions[(self.head + i) % self.regions.len], region)) return error.AlreadyQueued;
+                if (std.meta.eql(self.items[(self.head + i) % self.items.len], item)) return error.AlreadyQueued;
             }
             if (self.thread == null) self.thread = try std.Thread.spawn(.{}, work, .{self});
-            self.regions[(self.head + self.count) % self.regions.len] = region;
+            self.items[(self.head + self.count) % self.items.len] = item;
             self.count += 1;
             self.changed.broadcast(self.io);
         }
 
-        /// Waits for queued work and reports the first failure since the last wait.
         pub fn wait(self: *Self) !void {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
@@ -46,10 +55,10 @@ pub fn Queue(comptime Context: type, comptime run: fn (*Context, Region) anyerro
             if (failure) |err| return err;
         }
 
-        /// Finish submit and wait calls before closing.
         pub fn close(self: *Self) !void {
             self.mutex.lockUncancelable(self.io);
             self.stopping = true;
+            if (!drain_on_close) self.count = 0;
             self.changed.broadcast(self.io);
             const thread = self.thread;
             self.mutex.unlock(self.io);
@@ -67,12 +76,12 @@ pub fn Queue(comptime Context: type, comptime run: fn (*Context, Region) anyerro
             while (true) {
                 while (self.count == 0 and !self.stopping) self.changed.waitUncancelable(self.io, &self.mutex);
                 if (self.count == 0) return;
-                const region = self.regions[self.head];
-                self.head = (self.head + 1) % self.regions.len;
+                const item = self.items[self.head];
+                self.head = (self.head + 1) % self.items.len;
                 self.count -= 1;
-                self.active = region;
+                self.active = item;
                 self.mutex.unlock(self.io);
-                const result = run(self.context, region);
+                const result = run(self.context, item);
                 self.mutex.lockUncancelable(self.io);
                 result catch |err| {
                     if (self.failure == null) self.failure = err;

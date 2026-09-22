@@ -115,6 +115,8 @@ int zg_compact(zg_handle *handle, int32_t dimension, int32_t region_x, int32_t r
 int zg_last_batch_id(zg_handle *handle, int32_t dimension, int32_t region_x, int32_t region_z, uint64_t *out);
 /* Queues one region. Returns ZG_BUSY for duplicates or a full 16-slot queue. */
 int zg_compact_async(zg_handle *handle, int32_t dimension, int32_t region_x, int32_t region_z);
+/* Queues keys for background cache loading. Best effort. */
+int zg_prefetch(zg_handle *handle, const zg_key *keys, size_t count);
 /* Drains queued work and reports its first error. Close also drains the queue. */
 int zg_maintenance_wait(zg_handle *handle);
 /* Copies committed data to an empty directory. Leaves the source untouched. */

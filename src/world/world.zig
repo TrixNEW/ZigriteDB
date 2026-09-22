@@ -100,6 +100,15 @@ pub const World = struct {
         return store.get(key, output);
     }
 
+    /// Loads a key into the value cache.
+    pub fn warm(self: *World, key: Key) !void {
+        if (self.options.shard.cache == null) return;
+        const size = (try self.valueSize(key)) orelse return;
+        const buffer = try self.allocator.alloc(u8, size);
+        defer self.allocator.free(buffer);
+        _ = try self.get(key, buffer);
+    }
+
     pub fn getSized(self: *World, key: Key, output: []u8, required: *usize) !?[]const u8 {
         required.* = 0;
         _ = try key.encode();
