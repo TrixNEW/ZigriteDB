@@ -9,9 +9,12 @@ const Store = store_module.Store;
 const Directory = @import("../storage/directory.zig").Directory;
 const AppendResult = @import("../storage/writer.zig").AppendResult;
 
+const cache_module = @import("../cache/value.zig");
+
 pub const Options = struct {
     max_open_shards: usize = 16,
     shard: store_module.Options = .{},
+    cache: cache_module.Options = .{},
 };
 
 pub const ReadRequest = store_module.ReadRequest;
@@ -37,17 +40,25 @@ pub const World = struct {
         users: usize = 0,
     };
 
-    /// Concurrent calls need a thread-safe allocator.
     pub fn open(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: Options) !World {
         if (options.max_open_shards == 0 or options.max_open_shards > 1024) return error.InvalidShardLimit;
         try options.shard.validate();
         var directory = try Directory.init(dir, io);
         errdefer directory.deinit();
         const slots = try allocator.alloc(Slot, options.max_open_shards);
-        return .{ .allocator = allocator, .io = io, .directory = directory, .options = options, .slots = slots };
+        errdefer allocator.free(slots);
+
+        var result: World = .{ .allocator = allocator, .io = io, .directory = directory, .options = options, .slots = slots };
+        if (options.cache.bytes > 0) {
+            const cache = try allocator.create(cache_module.Cache);
+            errdefer allocator.destroy(cache);
+            cache.* = try cache_module.Cache.init(allocator, options.cache);
+            cache.stats = options.shard.stats;
+            result.options.shard.cache = cache;
+        }
+        return result;
     }
 
-    /// Batch IDs are ordered per region.
     pub fn write(self: *World, batch: WriteBatch) !AppendResult {
         const size = try batch.size();
         if (size > self.options.shard.batch_buffer_size) return error.BufferTooSmall;
@@ -84,7 +95,6 @@ pub const World = struct {
         return store.getSized(key, output, required);
     }
 
-    /// Groups requests by region, acquires each Store once, and scatters results back in order.
     pub fn getMany(self: *World, requests: []const ReadRequest, results: []ReadResult) !void {
         std.debug.assert(requests.len == results.len);
         for (requests) |request| _ = try request.key.encode();
@@ -143,7 +153,6 @@ pub const World = struct {
         return try store.compact();
     }
 
-    /// Flushes the shards cached when this call starts.
     pub fn flush(self: *World) !void {
         var stores: [1024]*Store = undefined;
         try self.mutex.lock(self.io);
@@ -299,6 +308,11 @@ pub const World = struct {
     }
 
     fn release(self: *World) void {
+        if (self.options.shard.cache) |cache| {
+            cache.deinit();
+            self.allocator.destroy(cache);
+            self.options.shard.cache = null;
+        }
         self.allocator.free(self.slots);
         self.directory.deinit();
         self.count = 0;

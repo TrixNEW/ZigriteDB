@@ -9,7 +9,6 @@ static void makeDir(const char *path) {
     if (mkdir(path, 0700)) exit(1);
 }
 
-/* Times AREA_ANCHORS NxN chunk-area scans as one sample each. Misses are expected. */
 static void scanAreas(zg_handle *handle, const char *label, int size, uint32_t *random, uint8_t *output) {
     double samples[AREA_ANCHORS];
     double phase_started = now();
@@ -30,7 +29,6 @@ static void scanAreas(zg_handle *handle, const char *label, int size, uint32_t *
     report(label, samples, AREA_ANCHORS, now() - phase_started);
 }
 
-/* Writes n components of one chunk: fixed components first, then subchunks. */
 static void writeWideChunk(zg_handle *handle, int chunk_x, int n, const uint8_t *value, size_t value_len) {
     static const uint32_t fixed[4] = {1, 2, 3, 4};
     zg_operation operations[32];
@@ -49,7 +47,6 @@ static void chunkReadKeys(zg_key *keys, int chunk_x, int n) {
     for (int y = 0; i < n; ++y, ++i) keys[i] = (zg_key){0, chunk_x, 0, y, 0};
 }
 
-/* n independent zg_get calls vs one zg_get_many call, timed per whole chunk load. */
 static void chunkReadBenchmark(zg_handle *handle, int chunk_x, int n, size_t count, uint8_t *output) {
     zg_key keys[32];
     chunkReadKeys(keys, chunk_x, n);
@@ -91,8 +88,8 @@ static void chunkReadBenchmark(zg_handle *handle, int chunk_x, int n, size_t cou
 }
 
 int main(int argc, char **argv) {
-    if (argc != 4) {
-        fprintf(stderr, "usage: native_bench EMPTY_DIRECTORY BATCHES sync|group|buffered\n");
+    if (argc != 4 && argc != 5) {
+        fprintf(stderr, "usage: native_bench EMPTY_DIRECTORY BATCHES sync|group|buffered [CACHE_MB]\n");
         return 1;
     }
     char *end;
@@ -109,6 +106,7 @@ int main(int argc, char **argv) {
     options.max_open_shards = 8;
     options.max_segment_size = 16 * 1024 * 1024;
     options.buffered = grouped || buffered;
+    options.cache_bytes = argc == 5 ? strtoull(argv[4], NULL, 10) * 1024 * 1024 : 0;
     zg_handle *handle;
     check(zg_open((const uint8_t *)argv[1], strlen(argv[1]), &options, &handle));
     uint8_t values[4][1024], output[1024];
@@ -142,7 +140,6 @@ int main(int argc, char **argv) {
     printf("{\"mode\":\"%s\",\"batches\":%zu,\"raw_value_bytes\":%zu,", argv[3], count, count * 4096);
     report("save_calls", samples, calls, elapsed);
 
-    /* Contrasts with save_calls' 4-component batches. Uses a disjoint chunk range so it can't collide. */
     started = now();
     for (size_t i = 0; i < count; ++i) {
         zg_operation single = {{0, (int)(10000 + i % 4096), 0, 0, 5}, ZG_PUT, values[0], sizeof(values[0])};
@@ -173,7 +170,6 @@ int main(int argc, char **argv) {
         printf(",");
     }
 
-    /* All 4 components of the hot chunk, timed as one unit. */
     started = now();
     for (size_t i = 0; i < count; ++i) {
         double before = now();
@@ -194,7 +190,6 @@ int main(int argc, char **argv) {
     scanAreas(handle, "area_reads_32x32", 32, &random, output);
     printf(",");
 
-    /* A disjoint chunk, far from every other phase's keys, carrying all 32 possible components. */
     writeWideChunk(handle, 20000, 32, values[0], sizeof(values[0]));
     chunkReadBenchmark(handle, 20000, 4, count, output);
     printf(",");
@@ -217,7 +212,6 @@ int main(int argc, char **argv) {
     check(zg_maintenance_wait(handle));
     printf(",\"compaction_ms\":%.3f,", (now() - started) * 1e3);
 
-    /* Steady-state reads of the same 8 keys, now that compaction has finished. */
     started = now();
     for (size_t i = 0; i < count; ++i) {
         zg_key key = {0, (int32_t)(i % 8 * 32), 0, 0, 1};
@@ -228,7 +222,7 @@ int main(int argc, char **argv) {
         if (required != sizeof(output) || memcmp(output, values[0], required)) return 1;
     }
     report("post_compaction_reads", samples, count, now() - started);
-    /* Grab this before closing, reopening below gives us a fresh Handle with its own zeroed Stats. */
+    /* Save stats before reopening the handle. */
     reportStats(handle);
 
     check(zg_close(handle));
@@ -241,7 +235,6 @@ int main(int argc, char **argv) {
     printf(",\"reopen_and_replay_ms\":%.3f", (now() - started) * 1e3);
     check(zg_close(handle));
 
-    /* Contrast with reopen_and_replay_ms above: a small, freshly created region. */
     {
         char path[4160];
         if ((size_t)snprintf(path, sizeof(path), "%s-small", argv[1]) >= sizeof(path)) return 1;
@@ -263,7 +256,6 @@ int main(int argc, char **argv) {
         check(zg_close(small));
     }
 
-    /* Forces one region out of the open-shard cache, then times reopening it. */
     {
         char path[4160];
         if ((size_t)snprintf(path, sizeof(path), "%s-evict", argv[1]) >= sizeof(path)) return 1;

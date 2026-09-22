@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const batch = @import("batch/commit.zig");
+pub const cache = @import("cache/value.zig");
 pub const WriteBatch = @import("batch/write.zig").WriteBatch;
 pub const lz4 = @import("compression/lz4.zig");
 pub const entry = @import("format/entry.zig");

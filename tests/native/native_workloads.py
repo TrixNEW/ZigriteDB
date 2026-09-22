@@ -16,6 +16,7 @@ def check(library, path):
     api.options.max_segment_size = 8192
     api.options.batch_buffer_size = 4096
     api.options.compression_threshold = 128
+    api.options.cache_bytes = 64 * 1024
     rng = random.Random(20260915)
     expected = {}
     handle = api.open(path)

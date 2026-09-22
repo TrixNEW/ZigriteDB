@@ -33,6 +33,9 @@ typedef struct {
     uint32_t max_segments, batch_buffer_size;
     uint64_t max_segment_size;
     uint32_t buffered, compression_threshold;
+    /* Shared decoded-value cache. */
+    uint64_t cache_bytes;
+    uint32_t cache_shards, reserved;
 } zg_options;
 typedef struct {
     int32_t dimension, chunk_x, chunk_z, subchunk_y;
@@ -70,6 +73,7 @@ typedef struct {
     uint64_t segment_rotations;
     uint64_t compactions, compaction_input_bytes, compaction_output_bytes, compaction_duration_ns;
     uint64_t recovery_attempts, recovery_errors;
+    uint64_t cache_hits, cache_misses, cache_evictions;
 } zg_stats;
 
 /* The message belongs to the library. Do not free it. */

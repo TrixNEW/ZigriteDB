@@ -16,7 +16,8 @@ import tempfile
 class Options(c.Structure):
     _fields_ = [(name, c.c_uint32) for name in (
         "version", "struct_size", "max_open_shards", "max_keys", "max_segments", "batch_buffer_size"
-    )] + [("max_segment_size", c.c_uint64), ("buffered", c.c_uint32), ("compression_threshold", c.c_uint32)]
+    )] + [("max_segment_size", c.c_uint64), ("buffered", c.c_uint32), ("compression_threshold", c.c_uint32),
+          ("cache_bytes", c.c_uint64), ("cache_shards", c.c_uint32), ("reserved", c.c_uint32)]
 
 
 class Key(c.Structure):
@@ -36,7 +37,7 @@ class Stats(c.Structure):
         "get_calls", "writes", "records_written", "raw_bytes_written", "compressed_bytes_written",
         "disk_reads", "bytes_read", "fsync_count", "fsync_duration_ns", "segment_rotations",
         "compactions", "compaction_input_bytes", "compaction_output_bytes", "compaction_duration_ns",
-        "recovery_attempts", "recovery_errors",
+        "recovery_attempts", "recovery_errors", "cache_hits", "cache_misses", "cache_evictions",
     )]
 
 
@@ -247,6 +248,8 @@ def check_concurrency(library, root, shard_limit=16):
     api.options.max_segment_size = 1024 * 1024
     api.options.max_open_shards = shard_limit
     api.options.compression_threshold = 32
+    # Small enough to exercise eviction.
+    api.options.cache_bytes = 16 * 1024
     path = root / f"concurrent-{shard_limit}"
     path.mkdir()
     handle = api.open(path)
@@ -306,13 +309,13 @@ def check_stats(library, root):
     try:
         assert api.write(handle, 1, [b"first", b"second"]) == 0
         assert api.read(handle, 0)[0] == 0
-        # index 5: unwritten but same region as 0/1, so the miss still hits this Store.
+        # Same region as 0 and 1, but never written.
         assert api.read(handle, 5)[0] == 1
         assert api.lib.zg_compact(handle, 0, 0, 0) == 0
 
         stats = Stats()
         assert api.lib.zg_stats_get(handle, c.byref(stats)) == 0
-        assert stats.get_calls == 3, stats.get_calls  # read(0) probes+reads (2), read(5) misses (1)
+        assert stats.get_calls == 3, stats.get_calls  # Two reads and one miss.
         assert stats.writes == 1, stats.writes
         assert stats.records_written >= stats.writes
         assert stats.raw_bytes_written == stats.compressed_bytes_written == len(b"first") + len(b"second")

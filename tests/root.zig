@@ -25,4 +25,5 @@ test {
     _ = @import("store_compaction.zig");
     _ = @import("reclamation.zig");
     _ = @import("stats.zig");
+    _ = @import("cache.zig");
 }

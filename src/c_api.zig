@@ -64,6 +64,9 @@ pub const Options = extern struct {
     max_segment_size: u64 = 256 * 1024 * 1024,
     buffered: u32 = 0,
     compression_threshold: u32 = 256,
+    cache_bytes: u64 = 0,
+    cache_shards: u32 = 16,
+    reserved: u32 = 0,
 
     fn native(self: Options) !db.WorldOptions {
         if (self.version != abi_version or self.struct_size != @sizeOf(Options) or self.buffered > 1) return error.InvalidArgument;
@@ -77,7 +80,13 @@ pub const Options = extern struct {
                 .max_segment_size = self.max_segment_size,
                 .durability = if (self.buffered == 1) .buffered else .sync,
             },
+            .cache = .{
+                .bytes = std.math.cast(usize, self.cache_bytes) orelse return error.InvalidArgument,
+                .shards = self.cache_shards,
+            },
         };
+        if (self.reserved != 0) return error.InvalidArgument;
+        if (result.cache.shards == 0 or result.cache.shards > 1024) return error.InvalidArgument;
         if (result.max_open_shards == 0 or result.max_open_shards > 1024) return error.InvalidArgument;
         result.shard.validate() catch return error.InvalidArgument;
         return result;
@@ -352,7 +361,7 @@ pub const ReadResult = extern struct {
 
 const max_c_batch = 256;
 
-/// One region-fanning batch read. A bad buffer or missing key never fails the others.
+/// Batch reads isolate per-key failures.
 pub export fn zg_get_many(optional: ?*Handle, requests: ?[*]const ReadRequest, results: ?[*]ReadResult, count: usize) Status {
     const handle = optional orelse return .invalid_argument;
     if (requests == null or results == null or count == 0) return .invalid_argument;
@@ -405,6 +414,9 @@ pub const StatsSnapshot = extern struct {
     compaction_duration_ns: u64 = 0,
     recovery_attempts: u64 = 0,
     recovery_errors: u64 = 0,
+    cache_hits: u64 = 0,
+    cache_misses: u64 = 0,
+    cache_evictions: u64 = 0,
 };
 
 pub export fn zg_stats_get(optional: ?*Handle, out: ?*StatsSnapshot) Status {

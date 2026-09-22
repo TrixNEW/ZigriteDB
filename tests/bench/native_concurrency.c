@@ -43,7 +43,7 @@ static void *writeTask(void *arg) {
         double before, elapsed;
         int status;
         if (task->submit_lock) {
-            /* Keeps assigned batch IDs in submission order, avoiding spurious BatchOrder errors. */
+            /* Keep batch IDs in submission order. */
             pthread_mutex_lock(task->submit_lock);
             unsigned long long id = atomic_fetch_add(task->next_batch_id, 1ULL);
             before = now();
@@ -96,6 +96,8 @@ static void makeDir(const char *path) {
     if (mkdir(path, 0700)) exit(1);
 }
 
+static uint64_t cache_bytes = 0;
+
 static zg_handle *openScenario(const char *base, const char *suffix, uint32_t max_open_shards) {
     char path[4160];
     if ((size_t)snprintf(path, sizeof(path), "%s-%s", base, suffix) >= sizeof(path)) exit(1);
@@ -103,6 +105,7 @@ static zg_handle *openScenario(const char *base, const char *suffix, uint32_t ma
     zg_options options;
     check(zg_options_init(&options));
     options.max_open_shards = max_open_shards;
+    options.cache_bytes = cache_bytes;
     zg_handle *handle;
     check(zg_open((const uint8_t *)path, strlen(path), &options, &handle));
     return handle;
@@ -198,10 +201,11 @@ static void differentRegionWrites(const char *base, size_t total_iterations, int
 }
 
 int main(int argc, char **argv) {
-    if (argc != 4) {
-        fprintf(stderr, "usage: native_bench_concurrency EMPTY_DIRECTORY BATCHES THREADS\n");
+    if (argc != 4 && argc != 5) {
+        fprintf(stderr, "usage: native_bench_concurrency EMPTY_DIRECTORY BATCHES THREADS [CACHE_MB]\n");
         return 1;
     }
+    if (argc == 5) cache_bytes = strtoull(argv[4], NULL, 10) * 1024 * 1024;
     char *end;
     unsigned long batches = strtoul(argv[2], &end, 10);
     if (*end || batches < 16) return 1;

@@ -9,6 +9,7 @@ const segment = @import("../format/segment.zig");
 const index_module = @import("../index/index.zig");
 const writer_module = @import("../storage/writer.zig");
 const Stats = @import("../stats.zig").Stats;
+const Cache = @import("../cache/value.zig").Cache;
 
 pub const Options = struct {
     max_keys: u32 = 65536,
@@ -17,6 +18,7 @@ pub const Options = struct {
     batch_buffer_size: usize = 1024 * 1024,
     durability: writer_module.Durability = .sync,
     stats: ?*Stats = null,
+    cache: ?*Cache = null,
 
     pub fn validate(self: Options) !void {
         if (self.max_segments == 0 or self.max_segments > manifest.max_segments) return error.InvalidSegmentCount;
@@ -44,7 +46,7 @@ pub fn Shard(comptime Device: type) type {
 
         const Self = @This();
 
-        /// What compaction swaps out atomically. A pinned read keeps it alive a bit longer.
+        /// Generation state kept alive while reads are pinned.
         pub const Generation = struct {
             allocator: std.mem.Allocator,
             index: index_module.Index,
@@ -67,7 +69,6 @@ pub fn Shard(comptime Device: type) type {
             location: index_module.Location,
         };
 
-        /// Bulk-read request/result types, used by `getMany`.
         pub const max_batch_keys = 128;
 
         pub const ReadRequest = struct {
@@ -102,7 +103,6 @@ pub fn Shard(comptime Device: type) type {
             devices[0] = device;
             ids[0] = header.segment_id;
 
-            // Has to happen before the writer touches disk, otherwise a failure here would leave a non-empty file behind.
             const generation = try allocator.create(Generation);
             errdefer allocator.destroy(generation);
             generation.* = .{
@@ -281,7 +281,7 @@ pub fn Shard(comptime Device: type) type {
             return result;
         }
 
-        /// Resolves and pins under the lock. Caller has to `unpin` when it's done.
+        /// Resolves and pins a generation.
         fn pin(self: *Self, key: Key) !?Pinned {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
@@ -308,7 +308,6 @@ pub fn Shard(comptime Device: type) type {
             if (generation.readers == 0) self.idle.broadcast(self.io);
         }
 
-        /// Resolves every key under one lock and pins the generation once for the whole batch.
         fn pinMany(self: *Self, requests: []const ReadRequest, slots: []?BatchSlot) !?*Generation {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
@@ -338,16 +337,21 @@ pub fn Shard(comptime Device: type) type {
             return generation;
         }
 
-        /// Most records fit on the stack, so only the rare oversized one needs a heap alloc.
+        /// Uses stack scratch for small records.
         const inline_scratch_len = 8192;
 
         fn readPinned(self: *Self, pinned: Pinned, key: Key, output: []u8) !?[]const u8 {
+            const batch_id = pinned.location.batch_id;
+            if (self.options.cache) |cache| if (cache.get(self.io, key, batch_id, output)) |value| return value;
+
             const len = std.math.add(usize, entry.overhead, pinned.location.stored_len) catch return error.InvalidLength;
             var stack_scratch: [inline_scratch_len]u8 = undefined;
             const scratch = if (len <= stack_scratch.len) stack_scratch[0..len] else try self.allocator.alloc(u8, len);
             defer if (len > stack_scratch.len) self.allocator.free(scratch);
 
-            return pinned.generation.index.readInto(key, pinned.device, scratch, output);
+            const value = (try pinned.generation.index.readInto(key, pinned.device, scratch, output)) orelse return null;
+            if (self.options.cache) |cache| cache.put(self.io, key, batch_id, value);
+            return value;
         }
 
         pub fn get(self: *Self, key: Key, output: []u8) !?[]const u8 {
@@ -357,7 +361,7 @@ pub fn Shard(comptime Device: type) type {
             return self.readPinned(pinned, key, output);
         }
 
-        /// Uses one pin for both the size check and the read, so `required` can't go stale.
+        /// Keeps the size check and read under one pin.
         pub fn getSized(self: *Self, key: Key, output: []u8, required: *usize) !?[]const u8 {
             const pinned = (try self.pin(key)) orelse return null;
             defer self.unpin(pinned.generation);
@@ -368,7 +372,6 @@ pub fn Shard(comptime Device: type) type {
             return self.readPinned(pinned, key, output);
         }
 
-        /// Reads many keys with one pin, verifying each segment header only once. A bad buffer or a miss only touches that key's result.
         pub fn getMany(self: *Self, requests: []const ReadRequest, results: []ReadResult) !void {
             std.debug.assert(requests.len == results.len);
             @memset(results, .{});
@@ -390,6 +393,13 @@ pub fn Shard(comptime Device: type) type {
             for (order[0..n]) |idx| {
                 const slot = slots[idx] orelse continue;
                 const device = generation.devices[slot.segment_position];
+                const key = requests[idx].key;
+                const batch_id = slot.location.batch_id;
+
+                if (self.options.cache) |cache| if (cache.get(self.io, key, batch_id, requests[idx].output)) |value| {
+                    results[idx] = .{ .status = .ok, .required = value.len, .value = value };
+                    continue;
+                };
 
                 if (verified_segment == null or verified_segment.? != slot.location.segment_id) {
                     try generation.index.verifySegmentHeader(device, slot.location.segment_id);
@@ -406,13 +416,13 @@ pub fn Shard(comptime Device: type) type {
                 const scratch = if (len <= stack_scratch.len) stack_scratch[0..len] else try self.allocator.alloc(u8, len);
                 defer if (len > stack_scratch.len) self.allocator.free(scratch);
 
-                const value = (try generation.index.readIntoUnverified(requests[idx].key, device, scratch, requests[idx].output)) orelse
+                const value = (try generation.index.readIntoUnverified(key, device, scratch, requests[idx].output)) orelse
                     return error.IndexMismatch;
+                if (self.options.cache) |cache| cache.put(self.io, key, batch_id, value);
                 results[idx] = .{ .status = .ok, .required = required, .value = value };
             }
         }
 
-        /// Groups same-segment locations together and pushes misses to the end.
         fn sortByLocation(order: []u8, slots: []const ?BatchSlot) void {
             var i: usize = 1;
             while (i < order.len) : (i += 1) {
@@ -430,7 +440,7 @@ pub fn Shard(comptime Device: type) type {
             return a.location.offset < b.location.offset;
         }
 
-        /// Installs the new generation and writer, and hands back the old one (still open).
+        /// Swaps in the new generation and returns the old one.
         pub fn swap(self: *Self, generation: *Generation, next_writer: writer_module.Writer(Device)) *Generation {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
@@ -441,7 +451,7 @@ pub fn Shard(comptime Device: type) type {
             return old;
         }
 
-        /// Blocks until nobody's still pinning `generation`.
+        /// Waits for all pins on a generation.
         pub fn drain(self: *Self, generation: *Generation) void {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
@@ -480,7 +490,7 @@ pub fn Shard(comptime Device: type) type {
             }
         }
 
-        /// Called with `mutex` already held. Waits for pinned readers before freeing.
+        /// Waits for pinned readers before freeing.
         fn release(self: *Self) void {
             while (self.generation.readers != 0) self.idle.waitUncancelable(self.io, &self.mutex);
             self.generation.destroy();
