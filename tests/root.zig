@@ -30,4 +30,5 @@ test {
     _ = @import("unchanged.zig");
     _ = @import("iterate.zig");
     _ = @import("overlay.zig");
+    _ = @import("stress.zig");
 }
