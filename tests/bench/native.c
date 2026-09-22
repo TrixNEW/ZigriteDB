@@ -165,6 +165,18 @@ int main(int argc, char **argv) {
     report("unchanged_rewrites", samples, count, now() - started);
 
     started = now();
+    for (size_t i = 0; i < count; ++i) {
+        zg_key missing = {0, 1000000 + (int32_t)(i % 64) * 32, (int32_t)(i / 64 % 32), 0, 1};
+        size_t required;
+        double before = now();
+        int status = zg_get(handle, &missing, output, sizeof(output), &required);
+        samples[i] = now() - before;
+        if (status != ZG_NOT_FOUND) return 1;
+    }
+    printf(",");
+    report("sparse_region_reads", samples, count, now() - started);
+
+    started = now();
     check(zg_flush(handle));
     printf(",\"final_flush_ms\":%.3f,", (now() - started) * 1e3);
 
@@ -236,7 +248,6 @@ int main(int argc, char **argv) {
         if (required != sizeof(output) || memcmp(output, values[0], required)) return 1;
     }
     report("post_compaction_reads", samples, count, now() - started);
-    /* Save stats before reopening the handle. */
     reportStats(handle);
 
     check(zg_close(handle));

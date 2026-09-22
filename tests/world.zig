@@ -35,6 +35,23 @@ test "world routes regions and dimensions through a bounded cache" {
     try testing.expectError(error.Closed, reopened.get(deleted.key, &output));
 }
 
+test "a region remembered as missing is readable right after a write creates it" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .max_open_shards = 1 });
+    defer world.deinit();
+    var output: [16]u8 = undefined;
+    const saved = item(1, 64, "saved");
+
+    for (0..2) |_| try testing.expectEqual(null, try world.get(saved.key, &output));
+
+    _ = try world.write(.{ .entries = &.{saved} });
+    _ = try world.write(.{ .entries = &.{item(1, 0, "other")} });
+    try testing.expectEqualStrings("saved", (try world.get(saved.key, &output)).?);
+    try world.close();
+}
+
 test "missing reads and rejected batches create no region files" {
     if (!db.directory.supported) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
@@ -126,7 +143,6 @@ test "busy shards stay pinned while other regions write and close waits" {
     const reader = try std.Thread.spawn(.{}, readPinned, .{ &world, &read_result });
     var joined = false;
     defer if (!joined) reader.join();
-    // Release the reader even if an assertion fails.
     defer if (locked) {
         first.mutex.unlock(io);
         locked = false;
@@ -261,7 +277,7 @@ test "getMany across two regions returns correctly-ordered results" {
     var out0: [16]u8 = undefined;
     var out1: [16]u8 = undefined;
     var miss_out: [16]u8 = undefined;
-    // order is deliberately mixed up, plus a miss in a region that was never created
+    // Mixed order with a miss from an unknown region.
     const requests = [_]db.ReadRequest{
         .{ .key = item(1, 32, "").key, .output = &out1 },
         .{ .key = item(1, 0, "").key, .output = &out0 },

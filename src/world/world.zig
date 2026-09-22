@@ -34,6 +34,8 @@ pub const World = struct {
     closed: bool = false,
     closing: bool = false,
     changed: std.Io.Condition = .init,
+    /// Tracks missing regions to skip directory scans.
+    missing: [256]?Region = .{null} ** 256,
 
     const Slot = struct {
         region: Region,
@@ -230,6 +232,7 @@ pub const World = struct {
                 self.slots[0].users += 1;
                 return slot.store;
             }
+            if (!create and self.knownMissing(region)) return null;
             if (self.count < self.slots.len or self.hasIdle()) {
                 const store = (try self.load(region, create)) orelse return null;
                 self.slots[0].users = 1;
@@ -266,6 +269,17 @@ pub const World = struct {
         return false;
     }
 
+    fn missingSlot(region: Region) usize {
+        var hasher = std.hash.Wyhash.init(0);
+        std.hash.autoHash(&hasher, region);
+        return hasher.final() % 256;
+    }
+
+    fn knownMissing(self: *World, region: Region) bool {
+        const found = self.missing[missingSlot(region)] orelse return false;
+        return std.meta.eql(found, region);
+    }
+
     fn load(self: *World, region: Region, create: bool) !?*Store {
         var name_buffer: [40]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buffer, "{x:0>8}-{x:0>8}-{x:0>8}.region", .{
@@ -273,10 +287,16 @@ pub const World = struct {
             @as(u32, @bitCast(region.x)),
             @as(u32, @bitCast(region.z)),
         });
+        const missing = &self.missing[missingSlot(region)];
+        if (create and self.knownMissing(region)) missing.* = null;
+
         var created = false;
         const dir = self.directory.dir.openDir(self.io, name, .{ .follow_symlinks = false }) catch |err| blk: {
             if (err != error.FileNotFound) return err;
-            if (!create) return null;
+            if (!create) {
+                missing.* = region;
+                return null;
+            }
             try self.directory.dir.createDir(self.io, name, .default_dir);
             created = true;
             break :blk try self.directory.dir.openDir(self.io, name, .{ .follow_symlinks = false });
