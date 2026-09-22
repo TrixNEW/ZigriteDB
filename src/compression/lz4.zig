@@ -18,17 +18,29 @@ pub const Encoder = struct {
         var anchor: usize = 0;
         var pos: usize = 0;
         var used: usize = 0;
+        var misses: usize = 0;
         while (input.len >= 13 and pos <= input.len - 12) {
             const word = std.mem.readInt(u32, input[pos..][0..4], .little);
             const hash = (word *% 2654435761) >> 20;
             const previous = self.table[hash];
             self.table[hash] = @intCast(pos);
             if (previous >= pos or pos - previous > 65535 or !std.mem.eql(u8, input[previous..][0..4], input[pos..][0..4])) {
-                pos += 1;
+                pos += 1 + (misses >> 6);
+                misses += 1;
                 continue;
             }
+            misses = 0;
+            const limit = input.len - 5;
             var length: usize = 4;
-            while (pos + length < input.len - 5 and input[previous + length] == input[pos + length]) : (length += 1) {}
+            while (pos + length + 8 <= limit) {
+                const diff = std.mem.readInt(u64, input[previous + length ..][0..8], .little) ^
+                    std.mem.readInt(u64, input[pos + length ..][0..8], .little);
+                if (diff != 0) {
+                    length += @ctz(diff) / 8;
+                    break;
+                }
+                length += 8;
+            } else while (pos + length < limit and input[previous + length] == input[pos + length]) : (length += 1) {}
             const literals = pos - anchor;
             output[used] = @as(u8, @intCast(@min(literals, 15))) << 4 | @as(u8, @intCast(@min(length - 4, 15)));
             used += 1;
@@ -89,7 +101,13 @@ fn decodeBlock(input: []const u8, raw_len: usize, output: ?[]u8) Error!void {
         if (length > raw_len - written) return error.InvalidCompressedData;
         last_match = written;
         if (output) |bytes| {
-            for (0..length) |i| bytes[written + i] = bytes[written + i - offset];
+            const source = written - offset;
+            var copied: usize = 0;
+            while (copied < length) {
+                const n = @min(length - copied, offset + copied);
+                @memcpy(bytes[written + copied ..][0..n], bytes[source..][0..n]);
+                copied += n;
+            }
         }
         written += length;
     }
