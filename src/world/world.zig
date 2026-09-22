@@ -74,6 +74,7 @@ pub const World = struct {
     }
 
     pub fn writeNext(self: *World, entries: []Entry) !AppendResult {
+        for (entries) |*item| item.header.batch_id = 1;
         const batch: WriteBatch = .{ .entries = entries };
         const size = try batch.size();
         if (size > self.options.shard.batch_buffer_size) return error.BufferTooSmall;

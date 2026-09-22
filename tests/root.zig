@@ -29,4 +29,5 @@ test {
     _ = @import("group_commit.zig");
     _ = @import("unchanged.zig");
     _ = @import("iterate.zig");
+    _ = @import("overlay.zig");
 }

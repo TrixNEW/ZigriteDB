@@ -32,6 +32,7 @@ pub const segment_writer = @import("storage/writer.zig");
 pub const maintenance = @import("world/maintenance.zig");
 pub const World = @import("world/world.zig").World;
 pub const WorldOptions = @import("world/world.zig").Options;
+pub const OverlayWorld = @import("world/overlay.zig").OverlayWorld;
 pub const getChunkComponents = @import("world/chunk.zig").getChunkComponents;
 pub const ChunkComponent = @import("world/chunk.zig").ChunkComponent;
 
