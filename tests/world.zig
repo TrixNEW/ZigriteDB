@@ -52,6 +52,29 @@ test "a region remembered as missing is readable right after a write creates it"
     try world.close();
 }
 
+test "getMany takes more keys in one region than a store batch holds" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+    defer world.deinit();
+    for (0..32) |x| _ = try world.write(.{ .entries = &.{item(x + 1, @intCast(x), "v")} });
+
+    var outputs: [256][4]u8 = undefined;
+    var requests: [256]db.ReadRequest = undefined;
+    var results: [256]db.ReadResult = undefined;
+    for (&requests, &outputs, 0..) |*request, *output, i| {
+        var key = item(0, @intCast(i % 32), "").key;
+        key.chunk_z = @intCast(i / 32);
+        request.* = .{ .key = key, .output = output };
+    }
+    try world.getMany(&requests, &results);
+    for (results, 0..) |result, i| {
+        try testing.expectEqual(if (i < 32) db.ReadStatus.ok else db.ReadStatus.not_found, result.status);
+    }
+    try world.close();
+}
+
 test "missing reads and rejected batches create no region files" {
     if (!db.directory.supported) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
@@ -277,7 +300,6 @@ test "getMany across two regions returns correctly-ordered results" {
     var out0: [16]u8 = undefined;
     var out1: [16]u8 = undefined;
     var miss_out: [16]u8 = undefined;
-    // Mixed order with a miss from an unknown region.
     const requests = [_]db.ReadRequest{
         .{ .key = item(1, 32, "").key, .output = &out1 },
         .{ .key = item(1, 0, "").key, .output = &out0 },

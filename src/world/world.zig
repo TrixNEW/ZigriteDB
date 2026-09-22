@@ -36,7 +36,6 @@ pub const World = struct {
     closed: bool = false,
     closing: bool = false,
     changed: std.Io.Condition = .init,
-    /// Tracks missing regions to skip directory scans.
     missing: [256]?Region = .{null} ** 256,
 
     const Slot = struct {
@@ -103,7 +102,6 @@ pub const World = struct {
         return store.get(key, output);
     }
 
-    /// Loads a key into the value cache.
     pub fn warm(self: *World, key: Key) !void {
         if (self.options.shard.cache == null) return;
         const size = (try self.valueSize(key)) orelse return;
@@ -144,23 +142,25 @@ pub const World = struct {
         var sub_results: [store_module.max_batch_keys]ReadResult = undefined;
 
         for (distinct[0..region_count]) |region| {
-            var sub_count: usize = 0;
-            for (requests, 0..) |request, i| {
-                if (!std.meta.eql(request.key.region(), region)) continue;
-                if (sub_count == sub_requests.len) return error.TooManyKeys;
-                sub_requests[sub_count] = request;
-                sub_indices[sub_count] = i;
-                sub_count += 1;
-            }
-
             const store = (try self.acquire(region, false)) orelse continue;
             defer self.unpin(store);
-            try store.getMany(sub_requests[0..sub_count], sub_results[0..sub_count]);
-            for (sub_indices[0..sub_count], sub_results[0..sub_count]) |i, result| results[i] = result;
+
+            var next: usize = 0;
+            while (next < requests.len) {
+                var sub_count: usize = 0;
+                while (next < requests.len and sub_count < sub_requests.len) : (next += 1) {
+                    if (!std.meta.eql(requests[next].key.region(), region)) continue;
+                    sub_requests[sub_count] = requests[next];
+                    sub_indices[sub_count] = next;
+                    sub_count += 1;
+                }
+                if (sub_count == 0) break;
+                try store.getMany(sub_requests[0..sub_count], sub_results[0..sub_count]);
+                for (sub_indices[0..sub_count], sub_results[0..sub_count]) |i, result| results[i] = result;
+            }
         }
     }
 
-    /// Returns sorted regions found on disk.
     pub fn regions(self: *World, allocator: std.mem.Allocator) ![]Region {
         {
             try self.mutex.lock(self.io);
@@ -189,7 +189,6 @@ pub const World = struct {
 
     pub const max_range_regions = 1024;
 
-    /// Returns sorted keys in a chunk rectangle.
     pub fn keysInRange(self: *World, allocator: std.mem.Allocator, dimension: i32, filter: KeyFilter) ![]Key {
         const min_x = @divFloor(filter.min_chunk_x, 32);
         const max_x = @divFloor(filter.max_chunk_x, 32);
