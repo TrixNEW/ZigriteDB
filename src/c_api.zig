@@ -479,6 +479,39 @@ pub export fn zg_prefetch(optional: ?*Handle, keys: ?[*]const Key, count: usize)
     return .ok;
 }
 
+pub export fn zg_list_regions(optional: ?*Handle, out: ?[*]Region, capacity: usize, count: ?*usize) Status {
+    const handle = optional orelse return .invalid_argument;
+    const total = count orelse return .invalid_argument;
+    if (capacity != 0 and out == null) return .invalid_argument;
+    const found = handle.world.regions(allocator) catch |err| return status(err);
+    defer allocator.free(found);
+    total.* = found.len;
+    for (found[0..@min(found.len, capacity)], 0..) |region, i| {
+        out.?[i] = .{ .dimension = region.dimension, .x = region.x, .z = region.z };
+    }
+    return if (found.len > capacity) .buffer_too_small else .ok;
+}
+
+pub export fn zg_list_keys(optional: ?*Handle, dimension: i32, x: i32, z: i32, components: u32, out: ?[*]Key, capacity: usize, count: ?*usize) Status {
+    const handle = optional orelse return .invalid_argument;
+    const total = count orelse return .invalid_argument;
+    if (capacity != 0 and out == null) return .invalid_argument;
+    const region: db.Region = .{ .dimension = dimension, .x = x, .z = z };
+    const found = handle.world.keys(region, allocator, .{ .components = @truncate(components) }) catch |err| return status(err);
+    defer allocator.free(found);
+    total.* = found.len;
+    for (found[0..@min(found.len, capacity)], 0..) |key, i| {
+        out.?[i] = .{
+            .dimension = key.dimension,
+            .chunk_x = key.chunk_x,
+            .chunk_z = key.chunk_z,
+            .subchunk_y = key.subchunk_y,
+            .component = @intFromEnum(key.component),
+        };
+    }
+    return if (found.len > capacity) .buffer_too_small else .ok;
+}
+
 fn warmKey(world: *db.World, key: db.Key) !void {
     world.warm(key) catch {};
 }

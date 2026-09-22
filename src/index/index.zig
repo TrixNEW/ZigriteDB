@@ -5,6 +5,7 @@ const lz4 = @import("../compression/lz4.zig");
 const entry = @import("../format/entry.zig");
 const record = @import("../format/record.zig");
 const Key = @import("../format/key.zig").Key;
+const KeyFilter = @import("../format/key.zig").KeyFilter;
 const Region = @import("../format/key.zig").Region;
 const manifest = @import("../format/manifest.zig");
 const segment = @import("../format/segment.zig");
@@ -12,7 +13,7 @@ const file_scan = @import("../recovery/file_scan.zig");
 const recovery = @import("../recovery/scan.zig");
 const Stats = @import("../stats.zig").Stats;
 
-/// Local coords within the region instead of the full key, since one Index only ever holds one region's keys.
+/// Local coordinates packed into one key.
 const PackedKey = packed struct(u64) {
     local_x: u5,
     local_z: u5,
@@ -73,7 +74,6 @@ pub const Index = struct {
         return self.entries.get(try packKey(key));
     }
 
-    /// Callers already reject cross-region keys before they get here, so this never needs to tell regions apart.
     fn packKey(key: Key) !u64 {
         try key.validate();
         const packed_key: PackedKey = .{
@@ -85,7 +85,25 @@ pub const Index = struct {
         return @bitCast(packed_key);
     }
 
-    /// The returned value uses scratch.
+    fn unpackKey(self: *const Index, value: u64) Key {
+        const packed_key: PackedKey = @bitCast(value);
+        return .{
+            .dimension = self.region.dimension,
+            .chunk_x = self.region.x * 32 + @as(i32, packed_key.local_x),
+            .chunk_z = self.region.z * 32 + @as(i32, packed_key.local_z),
+            .component = @enumFromInt(packed_key.component),
+            .subchunk_y = packed_key.subchunk_y,
+        };
+    }
+
+    pub fn appendKeys(self: *const Index, allocator: std.mem.Allocator, filter: KeyFilter, list: *std.ArrayListUnmanaged(Key)) !void {
+        var it = self.entries.keyIterator();
+        while (it.next()) |value| {
+            const key = self.unpackKey(value.*);
+            if (filter.matches(key)) try list.append(allocator, key);
+        }
+    }
+
     pub fn read(self: *const Index, key: Key, device: anytype, scratch: []u8) !?[]const u8 {
         const item = (try self.readRecord(key, device, scratch)) orelse return null;
         if (item.header.compression == .none) return item.value;
@@ -93,13 +111,11 @@ pub const Index = struct {
         return try lz4.decompress(item.value, scratch[used..], item.header.raw_len);
     }
 
-    /// Scratch and output must not overlap.
     pub fn readInto(self: *const Index, key: Key, device: anytype, scratch: []u8, output: []u8) !?[]const u8 {
         const item = (try self.readRecord(key, device, scratch)) orelse return null;
         return try decodeInto(item, output);
     }
 
-    /// Like `readInto`, but skips the header check. Only safe if the caller already verified it this batch.
     pub fn readIntoUnverified(self: *const Index, key: Key, device: anytype, scratch: []u8, output: []u8) !?[]const u8 {
         const location = (try self.get(key)) orelse return null;
         const item = try self.readRecordAt(location, key, device, scratch);
@@ -113,7 +129,6 @@ pub const Index = struct {
         return output[0..item.value.len];
     }
 
-    /// The header only changes on rotation, so it's fine to check it once per segment.
     pub fn verifySegmentHeader(self: *const Index, device: anytype, segment_id: u64) !void {
         var header_bytes: [segment.encoded_len]u8 = undefined;
         try device.readExact(&header_bytes, 0);

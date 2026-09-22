@@ -3,6 +3,7 @@ const std = @import("std");
 const WriteBatch = @import("../batch/write.zig").WriteBatch;
 const Entry = @import("../format/entry.zig").Entry;
 const Key = @import("../format/key.zig").Key;
+const KeyFilter = @import("../format/key.zig").KeyFilter;
 const Region = @import("../format/key.zig").Region;
 const manifest = @import("../format/manifest.zig");
 const segment = @import("../format/segment.zig");
@@ -432,6 +433,15 @@ pub const Store = struct {
         if (self.closed) return error.Closed;
         if (self.shard.writer.failed) return error.WriterFailed;
         return reclamation.reclaim(&self.directory, self.shard.generation.index.generation, generation, ids);
+    }
+
+    pub fn keys(self: *Store, allocator: std.mem.Allocator, filter: KeyFilter) ![]Key {
+        {
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
+            if (self.closed) return error.Closed;
+        }
+        return self.shard.keys(allocator, filter);
     }
 
     pub fn get(self: *Store, key: Key, output: []u8) !?[]const u8 {

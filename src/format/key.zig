@@ -15,6 +15,28 @@ pub const Region = struct {
     z: i32,
 };
 
+pub const KeyFilter = struct {
+    components: u8 = 0xff,
+    min_chunk_x: i32 = std.math.minInt(i32),
+    max_chunk_x: i32 = std.math.maxInt(i32),
+    min_chunk_z: i32 = std.math.minInt(i32),
+    max_chunk_z: i32 = std.math.maxInt(i32),
+
+    pub fn matches(self: KeyFilter, key: Key) bool {
+        return self.components & (@as(u8, 1) << @intCast(@intFromEnum(key.component))) != 0 and
+            key.chunk_x >= self.min_chunk_x and key.chunk_x <= self.max_chunk_x and
+            key.chunk_z >= self.min_chunk_z and key.chunk_z <= self.max_chunk_z;
+    }
+};
+
+pub fn keyLessThan(_: void, a: Key, b: Key) bool {
+    if (a.dimension != b.dimension) return a.dimension < b.dimension;
+    if (a.chunk_x != b.chunk_x) return a.chunk_x < b.chunk_x;
+    if (a.chunk_z != b.chunk_z) return a.chunk_z < b.chunk_z;
+    if (a.component != b.component) return @intFromEnum(a.component) < @intFromEnum(b.component);
+    return a.subchunk_y < b.subchunk_y;
+}
+
 pub const Key = struct {
     dimension: i32,
     chunk_x: i32,

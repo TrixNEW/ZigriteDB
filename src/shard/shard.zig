@@ -3,7 +3,9 @@ const std = @import("std");
 const commit = @import("../batch/commit.zig");
 const WriteBatch = @import("../batch/write.zig").WriteBatch;
 const entry = @import("../format/entry.zig");
-const Key = @import("../format/key.zig").Key;
+const key_format = @import("../format/key.zig");
+const Key = key_format.Key;
+const KeyFilter = key_format.KeyFilter;
 const manifest = @import("../format/manifest.zig");
 const segment = @import("../format/segment.zig");
 const index_module = @import("../index/index.zig");
@@ -370,6 +372,21 @@ pub fn Shard(comptime Device: type) type {
 
             const stored = try pinned.generation.index.readRecordAt(location, item.key, pinned.device, scratch);
             return stored.header.compression == item.header.compression and std.mem.eql(u8, stored.value, item.value);
+        }
+
+        /// Returns a sorted key snapshot.
+        pub fn keys(self: *Self, allocator: std.mem.Allocator, filter: KeyFilter) ![]Key {
+            var list: std.ArrayListUnmanaged(Key) = .empty;
+            errdefer list.deinit(allocator);
+            {
+                try self.mutex.lock(self.io);
+                defer self.mutex.unlock(self.io);
+                if (self.closed or self.closing) return error.Closed;
+                try self.generation.index.appendKeys(allocator, filter, &list);
+            }
+            const result = try list.toOwnedSlice(allocator);
+            std.mem.sort(Key, result, {}, key_format.keyLessThan);
+            return result;
         }
 
         pub fn get(self: *Self, key: Key, output: []u8) !?[]const u8 {

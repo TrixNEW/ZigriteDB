@@ -24,6 +24,10 @@ class Key(c.Structure):
     _fields_ = [(name, c.c_int32) for name in ("dimension", "x", "z", "y")] + [("component", c.c_uint32)]
 
 
+class Region(c.Structure):
+    _fields_ = [(name, c.c_int32) for name in ("dimension", "x", "z")]
+
+
 class Operation(c.Structure):
     _fields_ = [("key", Key), ("remove", c.c_uint32), ("value", c.c_void_p), ("length", c.c_size_t)]
 
@@ -61,6 +65,9 @@ class API:
             "zg_stats_get": [c.c_void_p, c.POINTER(Stats)],
             "zg_stats_reset": [c.c_void_p],
             "zg_prefetch": [c.c_void_p, c.POINTER(Key), c.c_size_t],
+            "zg_list_regions": [c.c_void_p, c.POINTER(Region), c.c_size_t, c.POINTER(c.c_size_t)],
+            "zg_list_keys": [c.c_void_p, c.c_int32, c.c_int32, c.c_int32, c.c_uint32, c.POINTER(Key), c.c_size_t,
+                             c.POINTER(c.c_size_t)],
         }
         for name, arguments in signatures.items():
             fn = getattr(self.lib, name)
@@ -341,6 +348,16 @@ def check_stats(library, root):
         assert api.lib.zg_prefetch(handle, keys, 3) == 0
         assert api.lib.zg_prefetch(handle, None, 0) == 0
         assert api.lib.zg_prefetch(handle, None, 1) == 2
+
+        count = c.c_size_t()
+        assert api.lib.zg_list_regions(handle, None, 0, c.byref(count)) == 3 and count.value == 1
+        regions = (Region * 1)()
+        assert api.lib.zg_list_regions(handle, regions, 1, c.byref(count)) == 0
+        assert (regions[0].dimension, regions[0].x, regions[0].z) == (0, 0, 0)
+        keys = (Key * 2)()
+        assert api.lib.zg_list_keys(handle, 0, 0, 0, 0x3f, keys, 2, c.byref(count)) == 0 and count.value == 2
+        assert [(k.x, k.component) for k in keys] == [(0, 5), (1, 5)]
+        assert api.lib.zg_list_keys(handle, 0, 0, 0, 0x1f, keys, 2, c.byref(count)) == 0 and count.value == 0
         assert api.read(handle, 0) == (0, b"next")
     finally:
         assert api.lib.zg_close(handle) == 0

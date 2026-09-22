@@ -1,7 +1,9 @@
 const std = @import("std");
 
 const WriteBatch = @import("../batch/write.zig").WriteBatch;
-const Key = @import("../format/key.zig").Key;
+const key_format = @import("../format/key.zig");
+const Key = key_format.Key;
+const KeyFilter = key_format.KeyFilter;
 const Entry = @import("../format/entry.zig").Entry;
 const Region = @import("../format/key.zig").Region;
 const segment = @import("../format/segment.zig");
@@ -123,16 +125,16 @@ pub const World = struct {
         @memset(results, .{});
         if (requests.len == 0) return;
 
-        var regions: [max_distinct_regions]Region = undefined;
+        var distinct: [max_distinct_regions]Region = undefined;
         var region_count: usize = 0;
         for (requests) |request| {
             const found = request.key.region();
-            const seen = for (regions[0..region_count]) |existing| {
+            const seen = for (distinct[0..region_count]) |existing| {
                 if (std.meta.eql(existing, found)) break true;
             } else false;
             if (seen) continue;
-            if (region_count == regions.len) return error.TooManyKeys;
-            regions[region_count] = found;
+            if (region_count == distinct.len) return error.TooManyKeys;
+            distinct[region_count] = found;
             region_count += 1;
         }
 
@@ -140,7 +142,7 @@ pub const World = struct {
         var sub_indices: [store_module.max_batch_keys]usize = undefined;
         var sub_results: [store_module.max_batch_keys]ReadResult = undefined;
 
-        for (regions[0..region_count]) |region| {
+        for (distinct[0..region_count]) |region| {
             var sub_count: usize = 0;
             for (requests, 0..) |request, i| {
                 if (!std.meta.eql(request.key.region(), region)) continue;
@@ -155,6 +157,78 @@ pub const World = struct {
             try store.getMany(sub_requests[0..sub_count], sub_results[0..sub_count]);
             for (sub_indices[0..sub_count], sub_results[0..sub_count]) |i, result| results[i] = result;
         }
+    }
+
+    /// Returns sorted regions found on disk.
+    pub fn regions(self: *World, allocator: std.mem.Allocator) ![]Region {
+        {
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
+            if (self.closed or self.closing) return error.Closed;
+        }
+        var list: std.ArrayListUnmanaged(Region) = .empty;
+        errdefer list.deinit(allocator);
+        const dir = try self.directory.dir.openDir(self.io, ".", .{ .iterate = true, .follow_symlinks = false });
+        defer dir.close(self.io);
+        var iterator = dir.iterate();
+        while (try iterator.next(self.io)) |entry| {
+            if (entry.kind != .directory) continue;
+            if (parseRegionName(entry.name)) |region| try list.append(allocator, region);
+        }
+        const result = try list.toOwnedSlice(allocator);
+        std.mem.sort(Region, result, {}, regionLessThan);
+        return result;
+    }
+
+    pub fn keys(self: *World, region: Region, allocator: std.mem.Allocator, filter: KeyFilter) ![]Key {
+        const store = (try self.acquire(region, false)) orelse return &.{};
+        defer self.unpin(store);
+        return store.keys(allocator, filter);
+    }
+
+    pub const max_range_regions = 1024;
+
+    /// Returns sorted keys in a chunk rectangle.
+    pub fn keysInRange(self: *World, allocator: std.mem.Allocator, dimension: i32, filter: KeyFilter) ![]Key {
+        const min_x = @divFloor(filter.min_chunk_x, 32);
+        const max_x = @divFloor(filter.max_chunk_x, 32);
+        const min_z = @divFloor(filter.min_chunk_z, 32);
+        const max_z = @divFloor(filter.max_chunk_z, 32);
+        if (max_x < min_x or max_z < min_z) return &.{};
+        const width = @as(i64, max_x) - min_x + 1;
+        const depth = @as(i64, max_z) - min_z + 1;
+        if (width * depth > max_range_regions) return error.RangeTooLarge;
+
+        var list: std.ArrayListUnmanaged(Key) = .empty;
+        errdefer list.deinit(allocator);
+        var x = min_x;
+        while (x <= max_x) : (x += 1) {
+            var z = min_z;
+            while (z <= max_z) : (z += 1) {
+                const found = try self.keys(.{ .dimension = dimension, .x = x, .z = z }, allocator, filter);
+                defer allocator.free(found);
+                try list.appendSlice(allocator, found);
+            }
+        }
+        const result = try list.toOwnedSlice(allocator);
+        std.mem.sort(Key, result, {}, key_format.keyLessThan);
+        return result;
+    }
+
+    fn parseRegionName(name: []const u8) ?Region {
+        if (name.len != 33 or name[8] != '-' or name[17] != '-' or !std.mem.endsWith(u8, name, ".region")) return null;
+        var parts: [3]i32 = undefined;
+        for (&parts, 0..) |*part, i| {
+            const hex = name[i * 9 ..][0..8];
+            part.* = @bitCast(std.fmt.parseInt(u32, hex, 16) catch return null);
+        }
+        return .{ .dimension = parts[0], .x = parts[1], .z = parts[2] };
+    }
+
+    fn regionLessThan(_: void, a: Region, b: Region) bool {
+        if (a.dimension != b.dimension) return a.dimension < b.dimension;
+        if (a.x != b.x) return a.x < b.x;
+        return a.z < b.z;
     }
 
     pub fn lastBatchId(self: *World, region: Region) !?u64 {

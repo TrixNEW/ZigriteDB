@@ -28,4 +28,5 @@ test {
     _ = @import("cache.zig");
     _ = @import("group_commit.zig");
     _ = @import("unchanged.zig");
+    _ = @import("iterate.zig");
 }

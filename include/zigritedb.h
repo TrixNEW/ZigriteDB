@@ -117,6 +117,11 @@ int zg_last_batch_id(zg_handle *handle, int32_t dimension, int32_t region_x, int
 int zg_compact_async(zg_handle *handle, int32_t dimension, int32_t region_x, int32_t region_z);
 /* Queues keys for background cache loading. Best effort. */
 int zg_prefetch(zg_handle *handle, const zg_key *keys, size_t count);
+/* Lists up to capacity items and sets count to the total. */
+int zg_list_regions(zg_handle *handle, zg_region *out, size_t capacity, size_t *count);
+/* Lists sorted keys from one region. */
+int zg_list_keys(zg_handle *handle, int32_t dimension, int32_t region_x, int32_t region_z, uint32_t components,
+                 zg_key *out, size_t capacity, size_t *count);
 /* Drains queued work and reports its first error. Close also drains the queue. */
 int zg_maintenance_wait(zg_handle *handle);
 /* Copies committed data to an empty directory. Leaves the source untouched. */

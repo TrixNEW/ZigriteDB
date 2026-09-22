@@ -176,6 +176,20 @@ int main(int argc, char **argv) {
     printf(",");
     report("sparse_region_reads", samples, count, now() - started);
 
+    static zg_key listed[4096];
+    size_t listed_keys = 0;
+    started = now();
+    for (size_t i = 0; i < 256; ++i) {
+        size_t found;
+        double before = now();
+        check(zg_list_keys(handle, 0, (int32_t)(i % 8), 0, 0x3f, listed, 4096, &found));
+        samples[i] = now() - before;
+        listed_keys += found;
+    }
+    printf(",");
+    report("list_region_keys", samples, 256, now() - started);
+    printf(",\"listed_keys_per_region\":%zu", listed_keys / 256);
+
     started = now();
     check(zg_flush(handle));
     printf(",\"final_flush_ms\":%.3f,", (now() - started) * 1e3);
