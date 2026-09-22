@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const WriteBatch = @import("../batch/write.zig").WriteBatch;
+const Entry = @import("../format/entry.zig").Entry;
 const Key = @import("../format/key.zig").Key;
 const Region = @import("../format/key.zig").Region;
 const manifest = @import("../format/manifest.zig");
@@ -42,6 +43,13 @@ pub const Store = struct {
     mutex: std.Io.Mutex = .init,
     writer_mutex: std.Io.Mutex = .init,
     closed: bool = false,
+    // Group commit shares one fsync among waiting writers.
+    commit_mutex: std.Io.Mutex = .init,
+    committed: std.Io.Condition = .init,
+    appended_ticket: u64 = 0,
+    synced_ticket: u64 = 0,
+    syncing: bool = false,
+    commit_error: ?anyerror = null,
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, region: Region, options: Options) !Store {
         try options.validate();
@@ -146,33 +154,102 @@ pub const Store = struct {
         };
     }
 
+    /// Sync writes share one fsync among concurrent callers.
     pub fn write(self: *Store, batch: WriteBatch) !writer.AppendResult {
-        try self.writer_mutex.lock(self.io);
-        defer self.writer_mutex.unlock(self.io);
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-
-        return self.writeLocked(batch);
+        return self.commitWrite(batch, null);
     }
 
-    /// Each batch is atomic; an error can leave earlier batches applied.
+    /// Writes with the next batch ID for this region.
+    pub fn writeNext(self: *Store, entries: []Entry) !writer.AppendResult {
+        return self.commitWrite(.{ .entries = entries }, entries);
+    }
+
+    fn commitWrite(self: *Store, batch: WriteBatch, assign: ?[]Entry) !writer.AppendResult {
+        var result, const ticket = blk: {
+            try self.writer_mutex.lock(self.io);
+            defer self.writer_mutex.unlock(self.io);
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
+
+            if (assign) |entries| {
+                const id = std.math.add(u64, self.shard.writer.last_batch_id, 1) catch return error.BatchOrder;
+                for (entries) |*item| item.header.batch_id = id;
+            }
+            if (self.shard.options.durability == .buffered) return self.writeLocked(batch);
+            self.shard.options.durability = .buffered;
+            defer self.shard.options.durability = .sync;
+            const result = try self.writeLocked(batch);
+            break :blk .{ result, self.nextTicket() };
+        };
+        try self.waitDurable(ticket);
+        result.synced = true;
+        return result;
+    }
+
     pub fn writeGroup(self: *Store, batches: []const WriteBatch) !void {
         try @import("../batch/group.zig").validate(batches);
-        try self.writer_mutex.lock(self.io);
-        defer self.writer_mutex.unlock(self.io);
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.closed) return error.Closed;
-        for (batches) |batch| {
-            const size = try batch.size();
-            if (size > self.shard.options.batch_buffer_size) return error.BufferTooSmall;
-            if (size > self.shard.options.max_segment_size - segment.encoded_len) return error.BatchTooLarge;
+        const ticket = blk: {
+            try self.writer_mutex.lock(self.io);
+            defer self.writer_mutex.unlock(self.io);
+            try self.mutex.lock(self.io);
+            defer self.mutex.unlock(self.io);
+            if (self.closed) return error.Closed;
+            for (batches) |batch| {
+                const size = try batch.size();
+                if (size > self.shard.options.batch_buffer_size) return error.BufferTooSmall;
+                if (size > self.shard.options.max_segment_size - segment.encoded_len) return error.BatchTooLarge;
+            }
+            const durability = self.shard.options.durability;
+            self.shard.options.durability = .buffered;
+            defer self.shard.options.durability = durability;
+            for (batches) |batch| _ = try self.writeLocked(batch);
+            break :blk self.nextTicket();
+        };
+        try self.waitDurable(ticket);
+    }
+
+    fn nextTicket(self: *Store) u64 {
+        self.commit_mutex.lockUncancelable(self.io);
+        defer self.commit_mutex.unlock(self.io);
+        self.appended_ticket += 1;
+        return self.appended_ticket;
+    }
+
+    fn waitDurable(self: *Store, ticket: u64) !void {
+        self.commit_mutex.lockUncancelable(self.io);
+        defer self.commit_mutex.unlock(self.io);
+
+        while (self.synced_ticket < ticket) {
+            if (self.commit_error) |err| return err;
+            if (self.syncing) {
+                self.committed.waitUncancelable(self.io, &self.commit_mutex);
+                continue;
+            }
+
+            self.syncing = true;
+            const target = self.appended_ticket;
+            self.commit_mutex.unlock(self.io);
+            const result = self.shard.syncAppended();
+            self.commit_mutex.lockUncancelable(self.io);
+            self.syncing = false;
+            if (result) |_| self.synced_ticket = target else |err| self.commit_error = err;
+            self.committed.broadcast(self.io);
         }
-        const durability = self.shard.options.durability;
-        self.shard.options.durability = .buffered;
-        defer self.shard.options.durability = durability;
-        for (batches) |batch| _ = try self.writeLocked(batch);
-        try self.shard.flush();
+    }
+
+    /// Syncs all appends before devices are swapped or closed.
+    fn commitBarrier(self: *Store) !void {
+        self.commit_mutex.lockUncancelable(self.io);
+        defer self.commit_mutex.unlock(self.io);
+        defer self.committed.broadcast(self.io);
+
+        while (self.syncing) self.committed.waitUncancelable(self.io, &self.commit_mutex);
+        if (self.commit_error) |err| return err;
+        self.shard.syncAppended() catch |err| {
+            self.commit_error = err;
+            return err;
+        };
+        self.synced_ticket = self.appended_ticket;
     }
 
     fn writeLocked(self: *Store, batch: WriteBatch) !writer.AppendResult {
@@ -208,7 +285,6 @@ pub const Store = struct {
         return result;
     }
 
-    /// Installs a compacted generation, then reclaims the old segments.
     pub fn compact(self: *Store) !CompactionResult {
         try self.writer_mutex.lock(self.io);
         defer self.writer_mutex.unlock(self.io);
@@ -220,7 +296,7 @@ pub const Store = struct {
         const generation = std.math.add(u64, self.shard.generation.index.generation, 1) catch return error.GenerationExhausted;
         const options = self.shard.options;
         const compaction_started: ?std.Io.Clock.Timestamp = if (options.stats != null) std.Io.Clock.Timestamp.now(self.io, .awake) else null;
-        try self.shard.flush();
+        try self.commitBarrier();
 
         const scratch = try self.allocator.alloc(u8, options.batch_buffer_size + segment.encoded_len);
         defer self.allocator.free(scratch);
@@ -295,7 +371,6 @@ pub const Store = struct {
         self.mutex.unlock(self.io);
         locked = false;
 
-        // Only the old generation waits here, new reads already see the swap above.
         self.shard.drain(old_generation);
         for (old_devices[0..old_count]) |device| device.handle.close(self.io);
         self.allocator.free(old_devices);
@@ -329,7 +404,6 @@ pub const Store = struct {
         return reclamation.reclaim(&self.directory, self.shard.generation.index.generation, generation, ids);
     }
 
-    /// Only the lookup happens under `mutex`. The disk read runs unlocked.
     pub fn get(self: *Store, key: Key, output: []u8) !?[]const u8 {
         try self.mutex.lock(self.io);
         if (self.closed) {
@@ -355,7 +429,6 @@ pub const Store = struct {
         return self.shard.getSized(key, output, required);
     }
 
-    /// One region's worth of a bulk read. See `World.getMany` for the multi-region entry point.
     pub fn getMany(self: *Store, requests: []const ReadRequest, results: []ReadResult) !void {
         std.debug.assert(requests.len == results.len);
         try self.mutex.lock(self.io);
@@ -401,6 +474,7 @@ pub const Store = struct {
 
         if (self.closed) return;
 
+        self.commitBarrier() catch {};
         const result = self.shard.close();
         self.release();
         try result;

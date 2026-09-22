@@ -133,7 +133,7 @@ pub const Handle = struct {
     maintenance: @import("world/maintenance.zig").Queue(db.World, compactRegion),
     mutex: std.Io.Mutex = .init,
     available: std.Io.Condition = .init,
-    writers: [4]?WriteContext = .{null} ** 4,
+    writers: [16]?WriteContext = .{null} ** 16,
     writer_limit: usize,
     threshold: u32,
     stats: db.Stats = .{},
@@ -246,8 +246,8 @@ fn open(path: ?[*]const u8, length: usize, options: Options) !*Handle {
     handle.maintenance = .{ .io = io, .context = &handle.world };
     handle.mutex = .init;
     handle.available = .init;
-    handle.writers = .{null} ** 4;
-    handle.writer_limit = @min(4, config.max_open_shards);
+    handle.writers = .{null} ** 16;
+    handle.writer_limit = 16;
     handle.threshold = options.compression_threshold;
     return handle;
 }
@@ -266,12 +266,13 @@ pub export fn zg_close(optional: ?*Handle) Status {
 
 pub export fn zg_write(optional: ?*Handle, id: u64, operations: ?[*]const Operation, count: usize) Status {
     const handle = optional orelse return .invalid_argument;
-    if (operations == null or count == 0 or id == 0) return .invalid_argument;
+    if (operations == null or count == 0) return .invalid_argument;
     if (count > db.batch.max_records) return .limit;
     const context = handle.acquireWriter() catch |err| return status(err);
     defer handle.releaseWriter(context);
-    _ = prepare(context, id, operations.?[0..count], 0, 0) catch |err| return status(err);
-    _ = handle.world.write(.{ .entries = context.entries[0..count] }) catch |err| return status(err);
+    _ = prepare(context, if (id == 0) 1 else id, operations.?[0..count], 0, 0) catch |err| return status(err);
+    const entries = context.entries[0..count];
+    _ = (if (id == 0) handle.world.writeNext(entries) else handle.world.write(.{ .entries = entries })) catch |err| return status(err);
     return .ok;
 }
 

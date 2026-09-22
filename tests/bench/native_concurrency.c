@@ -15,6 +15,7 @@ typedef struct {
     atomic_ullong *next_batch_id;
     pthread_mutex_t *submit_lock;
     double *samples;
+    int library_ids;
     int failed;
 } Task;
 
@@ -42,8 +43,11 @@ static void *writeTask(void *arg) {
         zg_operation op = {{0, task->region_x, (int32_t)i, 0, 1}, ZG_PUT, value, sizeof(value)};
         double before, elapsed;
         int status;
-        if (task->submit_lock) {
-            /* Keep batch IDs in submission order. */
+        if (task->library_ids) {
+            before = now();
+            status = zg_write(task->handle, 0, &op, 1);
+            elapsed = now() - before;
+        } else if (task->submit_lock) {
             pthread_mutex_lock(task->submit_lock);
             unsigned long long id = atomic_fetch_add(task->next_batch_id, 1ULL);
             before = now();
@@ -159,8 +163,15 @@ static void crossRegionReads(const char *base, size_t total_iterations, int thre
     check(zg_close(handle));
 }
 
-static void sameRegionWrites(const char *base, size_t total_iterations, int threads) {
-    zg_handle *handle = openScenario(base, "same-region-writes", 4);
+static uint64_t fsyncCount(zg_handle *handle) {
+    zg_stats stats;
+    check(zg_stats_get(handle, &stats));
+    return stats.fsync_count;
+}
+
+static void sameRegionWrites(const char *base, size_t total_iterations, int threads, int library_ids) {
+    const char *label = library_ids ? "concurrent_writes_same_region_next_id" : "concurrent_writes_same_region";
+    zg_handle *handle = openScenario(base, label, 4);
     size_t per_thread = total_iterations / (size_t)threads;
     if (per_thread < 1) per_thread = 1;
 
@@ -170,13 +181,15 @@ static void sameRegionWrites(const char *base, size_t total_iterations, int thre
     for (int t = 0; t < threads; ++t) {
         tasks[t] = (Task){
             .handle = handle, .thread_index = t, .iterations = per_thread,
-            .region_x = 0, .next_batch_id = &next_batch_id, .submit_lock = &submit_lock,
-            .samples = malloc(per_thread * sizeof(double)),
+            .region_x = 0, .next_batch_id = &next_batch_id, .submit_lock = library_ids ? NULL : &submit_lock,
+            .samples = malloc(per_thread * sizeof(double)), .library_ids = library_ids,
         };
         if (!tasks[t].samples) exit(1);
     }
+    uint64_t fsyncs = fsyncCount(handle);
     double elapsed = runThreads(writeTask, tasks, threads);
-    reportMerged("concurrent_writes_same_region", tasks, threads, elapsed);
+    reportMerged(label, tasks, threads, elapsed);
+    printf(",\"%s_fsyncs\":%llu", label, (unsigned long long)(fsyncCount(handle) - fsyncs));
     for (int t = 0; t < threads; ++t) free(tasks[t].samples);
     check(zg_close(handle));
 }
@@ -194,8 +207,10 @@ static void differentRegionWrites(const char *base, size_t total_iterations, int
         };
         if (!tasks[t].samples) exit(1);
     }
+    uint64_t fsyncs = fsyncCount(handle);
     double elapsed = runThreads(writeTask, tasks, threads);
     reportMerged("concurrent_writes_different_regions", tasks, threads, elapsed);
+    printf(",\"concurrent_writes_different_regions_fsyncs\":%llu", (unsigned long long)(fsyncCount(handle) - fsyncs));
     for (int t = 0; t < threads; ++t) free(tasks[t].samples);
     check(zg_close(handle));
 }
@@ -219,7 +234,9 @@ int main(int argc, char **argv) {
     printf(",");
     crossRegionReads(argv[1], (size_t)batches, threads);
     printf(",");
-    sameRegionWrites(argv[1], (size_t)batches, threads);
+    sameRegionWrites(argv[1], (size_t)batches, threads, 0);
+    printf(",");
+    sameRegionWrites(argv[1], (size_t)batches, threads, 1);
     printf(",");
     differentRegionWrites(argv[1], (size_t)batches, threads);
     printf("}\n");

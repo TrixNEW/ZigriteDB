@@ -26,4 +26,5 @@ test {
     _ = @import("reclamation.zig");
     _ = @import("stats.zig");
     _ = @import("cache.zig");
+    _ = @import("group_commit.zig");
 }

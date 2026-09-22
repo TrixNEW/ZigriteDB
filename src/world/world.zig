@@ -2,6 +2,7 @@ const std = @import("std");
 
 const WriteBatch = @import("../batch/write.zig").WriteBatch;
 const Key = @import("../format/key.zig").Key;
+const Entry = @import("../format/entry.zig").Entry;
 const Region = @import("../format/key.zig").Region;
 const segment = @import("../format/segment.zig");
 const store_module = @import("../shard/store.zig");
@@ -66,6 +67,16 @@ pub const World = struct {
         const store = (try self.acquire(batch.entries[0].key.region(), true)).?;
         defer self.unpin(store);
         return store.write(batch);
+    }
+
+    pub fn writeNext(self: *World, entries: []Entry) !AppendResult {
+        const batch: WriteBatch = .{ .entries = entries };
+        const size = try batch.size();
+        if (size > self.options.shard.batch_buffer_size) return error.BufferTooSmall;
+        if (size > self.options.shard.max_segment_size - segment.encoded_len) return error.BatchTooLarge;
+        const store = (try self.acquire(entries[0].key.region(), true)).?;
+        defer self.unpin(store);
+        return store.writeNext(entries);
     }
 
     pub fn writeGroup(self: *World, batches: []const WriteBatch) !void {

@@ -46,7 +46,6 @@ pub fn Shard(comptime Device: type) type {
 
         const Self = @This();
 
-        /// Generation state kept alive while reads are pinned.
         pub const Generation = struct {
             allocator: std.mem.Allocator,
             index: index_module.Index,
@@ -281,7 +280,6 @@ pub fn Shard(comptime Device: type) type {
             return result;
         }
 
-        /// Resolves and pins a generation.
         fn pin(self: *Self, key: Key) !?Pinned {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
@@ -337,7 +335,6 @@ pub fn Shard(comptime Device: type) type {
             return generation;
         }
 
-        /// Uses stack scratch for small records.
         const inline_scratch_len = 8192;
 
         fn readPinned(self: *Self, pinned: Pinned, key: Key, output: []u8) !?[]const u8 {
@@ -361,7 +358,6 @@ pub fn Shard(comptime Device: type) type {
             return self.readPinned(pinned, key, output);
         }
 
-        /// Keeps the size check and read under one pin.
         pub fn getSized(self: *Self, key: Key, output: []u8, required: *usize) !?[]const u8 {
             const pinned = (try self.pin(key)) orelse return null;
             defer self.unpin(pinned.generation);
@@ -440,7 +436,6 @@ pub fn Shard(comptime Device: type) type {
             return a.location.offset < b.location.offset;
         }
 
-        /// Swaps in the new generation and returns the old one.
         pub fn swap(self: *Self, generation: *Generation, next_writer: writer_module.Writer(Device)) *Generation {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
@@ -451,7 +446,6 @@ pub fn Shard(comptime Device: type) type {
             return old;
         }
 
-        /// Waits for all pins on a generation.
         pub fn drain(self: *Self, generation: *Generation) void {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
@@ -466,6 +460,33 @@ pub fn Shard(comptime Device: type) type {
             if (self.closed) return error.Closed;
 
             try self.writer.flush();
+        }
+
+        /// Syncs without holding the shard lock.
+        pub fn syncAppended(self: *Self) !void {
+            const device, const segment_id, const offset = blk: {
+                try self.mutex.lock(self.io);
+                defer self.mutex.unlock(self.io);
+                if (self.closed) return error.Closed;
+                if (self.writer.failed) return error.WriterFailed;
+                if (self.writer.synced_offset == self.writer.offset) return;
+                break :blk .{ self.writer.device, self.writer.header.segment_id, self.writer.offset };
+            };
+
+            const started: ?std.Io.Clock.Timestamp = if (self.options.stats != null) std.Io.Clock.Timestamp.now(self.io, .awake) else null;
+            const result = device.sync();
+            if (self.options.stats) |s| {
+                _ = s.fsync_count.fetchAdd(1, .monotonic);
+                if (started) |t| _ = s.fsync_duration_ns.fetchAdd(@intCast(t.untilNow(self.io).raw.nanoseconds), .monotonic);
+            }
+
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            result catch |err| {
+                self.writer.failed = true;
+                return err;
+            };
+            if (self.writer.header.segment_id == segment_id and offset > self.writer.synced_offset) self.writer.synced_offset = offset;
         }
 
         pub fn close(self: *Self) !void {
@@ -490,7 +511,6 @@ pub fn Shard(comptime Device: type) type {
             }
         }
 
-        /// Waits for pinned readers before freeing.
         fn release(self: *Self) void {
             while (self.generation.readers != 0) self.idle.waitUncancelable(self.io, &self.mutex);
             self.generation.destroy();

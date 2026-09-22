@@ -92,7 +92,8 @@ int zg_options_validate(const zg_options *options);
 int zg_open(const uint8_t *path, size_t path_len, const zg_options *options, zg_handle **out);
 /* Calls may overlap. Wait for them before close, which frees the handle even on error. */
 int zg_close(zg_handle *handle);
-/* Keep each batch in one region. Use a higher batch ID for each write to that region. */
+/* Keep each batch in one region. Use a higher batch ID for each write to that region,
+   or 0 to take the region's next ID, which lets concurrent sync writers share one fsync. */
 int zg_write(zg_handle *handle, uint64_t batch_id, const zg_operation *operations, size_t count);
 /* One region, increasing IDs, at most 4096 records total. Success always syncs.
    Each batch is atomic; an error can leave earlier batches applied. */

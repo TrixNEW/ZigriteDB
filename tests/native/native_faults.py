@@ -330,6 +330,12 @@ def check_stats(library, root):
         assert api.lib.zg_stats_get(handle, c.byref(stats)) == 0
         for name, _ in Stats._fields_:
             assert getattr(stats, name) == 0, name
+
+        assert api.write(handle, 0, [b"next"]) == 0
+        batch_id = c.c_uint64()
+        assert api.lib.zg_last_batch_id(handle, 0, 0, 0, c.byref(batch_id)) == 0
+        assert batch_id.value == 2, batch_id.value
+        assert api.read(handle, 0) == (0, b"next")
     finally:
         assert api.lib.zg_close(handle) == 0
     print("Runtime stats counters moved and reset correctly")
