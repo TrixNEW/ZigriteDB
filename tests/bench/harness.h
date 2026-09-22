@@ -47,7 +47,8 @@ static inline void reportStats(zg_handle *handle) {
            "\"compactions\":%" PRIu64 ",\"compaction_input_bytes\":%" PRIu64 ","
            "\"compaction_output_bytes\":%" PRIu64 ",\"compaction_duration_ns\":%" PRIu64 ","
            "\"recovery_attempts\":%" PRIu64 ",\"recovery_errors\":%" PRIu64 ","
-           "\"cache_hits\":%" PRIu64 ",\"cache_misses\":%" PRIu64 ",\"cache_evictions\":%" PRIu64 "}",
+           "\"cache_hits\":%" PRIu64 ",\"cache_misses\":%" PRIu64 ",\"cache_evictions\":%" PRIu64 ","
+           "\"unchanged_write_skips\":%" PRIu64 "}",
            stats.get_calls, stats.writes, stats.records_written,
            stats.raw_bytes_written, stats.compressed_bytes_written,
            stats.disk_reads, stats.bytes_read,
@@ -56,7 +57,8 @@ static inline void reportStats(zg_handle *handle) {
            stats.compactions, stats.compaction_input_bytes,
            stats.compaction_output_bytes, stats.compaction_duration_ns,
            stats.recovery_attempts, stats.recovery_errors,
-           stats.cache_hits, stats.cache_misses, stats.cache_evictions);
+           stats.cache_hits, stats.cache_misses, stats.cache_evictions,
+           stats.unchanged_write_skips);
 }
 
 #endif

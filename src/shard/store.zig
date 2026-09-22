@@ -262,19 +262,42 @@ pub const Store = struct {
         if (batch.entries[0].header.batch_id <= self.shard.writer.last_batch_id) return error.BatchOrder;
         if (!std.meta.eql(batch.entries[0].key.region(), self.shard.generation.index.region)) return error.RegionMismatch;
 
-        const result = self.shard.write(batch) catch |err| blk: {
+        var kept: []Entry = &.{};
+        defer if (kept.len != 0) self.allocator.free(kept);
+        const batch_to_write = if (self.shard.options.skip_unchanged) blk: {
+            const buffer = try self.allocator.alloc(Entry, batch.entries.len);
+            var count: usize = 0;
+            for (batch.entries, 0..) |item, i| {
+                if (!repeated(batch.entries, i) and try self.shard.unchanged(item)) continue;
+                buffer[count] = item;
+                count += 1;
+            }
+            if (self.shard.options.stats) |s| _ = s.unchanged_write_skips.fetchAdd(batch.entries.len - count, .monotonic);
+            if (count == batch.entries.len) {
+                self.allocator.free(buffer);
+                break :blk batch;
+            }
+            kept = buffer;
+            if (count == 0) {
+                const offset = self.shard.writer.offset;
+                return .{ .batch_id = batch.entries[0].header.batch_id, .start = offset, .end = offset, .synced = false };
+            }
+            break :blk WriteBatch{ .entries = buffer[0..count] };
+        } else batch;
+
+        const result = self.shard.write(batch_to_write) catch |err| blk: {
             if (err != error.SegmentFull) return err;
 
             try self.rotate();
-            break :blk try self.shard.write(batch);
+            break :blk try self.shard.write(batch_to_write);
         };
 
         if (self.shard.options.stats) |s| {
             _ = s.writes.fetchAdd(1, .monotonic);
-            _ = s.records_written.fetchAdd(@intCast(batch.entries.len), .monotonic);
+            _ = s.records_written.fetchAdd(@intCast(batch_to_write.entries.len), .monotonic);
             var raw_bytes: u64 = 0;
             var compressed_bytes: u64 = 0;
-            for (batch.entries) |item| {
+            for (batch_to_write.entries) |item| {
                 raw_bytes += item.header.raw_len;
                 compressed_bytes += item.header.stored_len;
             }
@@ -283,6 +306,13 @@ pub const Store = struct {
         }
 
         return result;
+    }
+
+    fn repeated(entries: []const Entry, index: usize) bool {
+        for (entries, 0..) |other, i| {
+            if (i != index and std.meta.eql(other.key, entries[index].key)) return true;
+        }
+        return false;
     }
 
     pub fn compact(self: *Store) !CompactionResult {

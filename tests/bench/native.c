@@ -88,8 +88,8 @@ static void chunkReadBenchmark(zg_handle *handle, int chunk_x, int n, size_t cou
 }
 
 int main(int argc, char **argv) {
-    if (argc != 4 && argc != 5) {
-        fprintf(stderr, "usage: native_bench EMPTY_DIRECTORY BATCHES sync|group|buffered [CACHE_MB]\n");
+    if (argc < 4 || argc > 6) {
+        fprintf(stderr, "usage: native_bench EMPTY_DIRECTORY BATCHES sync|group|buffered [CACHE_MB [SKIP_UNCHANGED]]\n");
         return 1;
     }
     char *end;
@@ -106,7 +106,8 @@ int main(int argc, char **argv) {
     options.max_open_shards = 8;
     options.max_segment_size = 16 * 1024 * 1024;
     options.buffered = grouped || buffered;
-    options.cache_bytes = argc == 5 ? strtoull(argv[4], NULL, 10) * 1024 * 1024 : 0;
+    options.cache_bytes = argc >= 5 ? strtoull(argv[4], NULL, 10) * 1024 * 1024 : 0;
+    options.skip_unchanged = argc == 6 && strcmp(argv[5], "1") == 0;
     zg_handle *handle;
     check(zg_open((const uint8_t *)argv[1], strlen(argv[1]), &options, &handle));
     uint8_t values[4][1024], output[1024];
@@ -149,6 +150,19 @@ int main(int argc, char **argv) {
     }
     printf(",");
     report("single_component_writes", samples, count, now() - started);
+
+    started = now();
+    for (size_t i = 0; i < count; ++i) {
+        int x = (int)((i / 16 % 8) * 32 + i % 16);
+        for (size_t c = 0; c < 4; ++c) {
+            operations[c] = (zg_operation){{0, x, 0, 0, (uint32_t)c + 1}, ZG_PUT, values[c], sizeof(values[c])};
+        }
+        double before = now();
+        check(zg_write(handle, 2 * count + i + 1, operations, 4));
+        samples[i] = now() - before;
+    }
+    printf(",");
+    report("unchanged_rewrites", samples, count, now() - started);
 
     started = now();
     check(zg_flush(handle));

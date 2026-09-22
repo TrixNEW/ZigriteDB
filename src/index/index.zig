@@ -3,6 +3,7 @@ const std = @import("std");
 const commit = @import("../batch/commit.zig");
 const lz4 = @import("../compression/lz4.zig");
 const entry = @import("../format/entry.zig");
+const record = @import("../format/record.zig");
 const Key = @import("../format/key.zig").Key;
 const Region = @import("../format/key.zig").Region;
 const manifest = @import("../format/manifest.zig");
@@ -29,7 +30,13 @@ pub const Location = struct {
     batch_id: u64,
     stored_len: u32,
     raw_len: u32,
+    /// Hint for skipping unchanged writes.
+    fingerprint: u32,
 };
+
+pub fn fingerprint(compression: record.Compression, stored: []const u8) u32 {
+    return @truncate(std.hash.Wyhash.hash(@intFromEnum(compression), stored));
+}
 
 pub const Prepared = struct {
     allocator: std.mem.Allocator,
@@ -124,7 +131,7 @@ pub const Index = struct {
         }
     }
 
-    fn readRecordAt(self: *const Index, location: Location, key: Key, device: anytype, scratch: []u8) !entry.Entry {
+    pub fn readRecordAt(self: *const Index, location: Location, key: Key, device: anytype, scratch: []u8) !entry.Entry {
         const len = std.math.add(usize, entry.overhead, location.stored_len) catch return error.InvalidLength;
 
         if (scratch.len < len) return error.BufferTooSmall;
@@ -198,6 +205,7 @@ pub const Index = struct {
                 .batch_id = batch.id,
                 .stored_len = item.header.stored_len,
                 .raw_len = item.header.raw_len,
+                .fingerprint = fingerprint(item.header.compression, item.value),
             };
 
             try pending.put(self.allocator, key, location);

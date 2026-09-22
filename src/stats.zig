@@ -21,6 +21,7 @@ pub const Stats = struct {
     cache_hits: std.atomic.Value(u64) = .init(0),
     cache_misses: std.atomic.Value(u64) = .init(0),
     cache_evictions: std.atomic.Value(u64) = .init(0),
+    unchanged_write_skips: std.atomic.Value(u64) = .init(0),
 
     /// Call only when the handle is idle.
     pub fn reset(self: *Stats) void {

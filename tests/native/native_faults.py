@@ -17,7 +17,7 @@ class Options(c.Structure):
     _fields_ = [(name, c.c_uint32) for name in (
         "version", "struct_size", "max_open_shards", "max_keys", "max_segments", "batch_buffer_size"
     )] + [("max_segment_size", c.c_uint64), ("buffered", c.c_uint32), ("compression_threshold", c.c_uint32),
-          ("cache_bytes", c.c_uint64), ("cache_shards", c.c_uint32), ("reserved", c.c_uint32)]
+          ("cache_bytes", c.c_uint64), ("cache_shards", c.c_uint32), ("skip_unchanged", c.c_uint32)]
 
 
 class Key(c.Structure):
@@ -38,6 +38,7 @@ class Stats(c.Structure):
         "disk_reads", "bytes_read", "fsync_count", "fsync_duration_ns", "segment_rotations",
         "compactions", "compaction_input_bytes", "compaction_output_bytes", "compaction_duration_ns",
         "recovery_attempts", "recovery_errors", "cache_hits", "cache_misses", "cache_evictions",
+        "unchanged_write_skips",
     )]
 
 

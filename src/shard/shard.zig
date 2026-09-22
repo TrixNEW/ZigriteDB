@@ -19,6 +19,8 @@ pub const Options = struct {
     durability: writer_module.Durability = .sync,
     stats: ?*Stats = null,
     cache: ?*Cache = null,
+    /// Skip writes that would not change a key.
+    skip_unchanged: bool = false,
 
     pub fn validate(self: Options) !void {
         if (self.max_segments == 0 or self.max_segments > manifest.max_segments) return error.InvalidSegmentCount;
@@ -349,6 +351,25 @@ pub fn Shard(comptime Device: type) type {
             const value = (try pinned.generation.index.readInto(key, pinned.device, scratch, output)) orelse return null;
             if (self.options.cache) |cache| cache.put(self.io, key, batch_id, value);
             return value;
+        }
+
+        /// Checks whether a write would leave the key unchanged.
+        pub fn unchanged(self: *Self, item: entry.Entry) !bool {
+            const pinned = (try self.pin(item.key)) orelse return item.header.kind == .delete;
+            defer self.unpin(pinned.generation);
+            if (item.header.kind == .delete) return false;
+
+            const location = pinned.location;
+            if (location.stored_len != item.header.stored_len or location.raw_len != item.header.raw_len or
+                location.fingerprint != index_module.fingerprint(item.header.compression, item.value)) return false;
+
+            const len = std.math.add(usize, entry.overhead, location.stored_len) catch return error.InvalidLength;
+            var stack_scratch: [inline_scratch_len]u8 = undefined;
+            const scratch = if (len <= stack_scratch.len) stack_scratch[0..len] else try self.allocator.alloc(u8, len);
+            defer if (len > stack_scratch.len) self.allocator.free(scratch);
+
+            const stored = try pinned.generation.index.readRecordAt(location, item.key, pinned.device, scratch);
+            return stored.header.compression == item.header.compression and std.mem.eql(u8, stored.value, item.value);
         }
 
         pub fn get(self: *Self, key: Key, output: []u8) !?[]const u8 {

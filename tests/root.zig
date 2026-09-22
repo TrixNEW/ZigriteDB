@@ -27,4 +27,5 @@ test {
     _ = @import("stats.zig");
     _ = @import("cache.zig");
     _ = @import("group_commit.zig");
+    _ = @import("unchanged.zig");
 }

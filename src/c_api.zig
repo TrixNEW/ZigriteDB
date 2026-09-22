@@ -66,10 +66,10 @@ pub const Options = extern struct {
     compression_threshold: u32 = 256,
     cache_bytes: u64 = 0,
     cache_shards: u32 = 16,
-    reserved: u32 = 0,
+    skip_unchanged: u32 = 0,
 
     fn native(self: Options) !db.WorldOptions {
-        if (self.version != abi_version or self.struct_size != @sizeOf(Options) or self.buffered > 1) return error.InvalidArgument;
+        if (self.version != abi_version or self.struct_size != @sizeOf(Options) or self.buffered > 1 or self.skip_unchanged > 1) return error.InvalidArgument;
         if (self.compression_threshold > db.record.max_value_len) return error.InvalidArgument;
         const result: db.WorldOptions = .{
             .max_open_shards = self.max_open_shards,
@@ -79,13 +79,13 @@ pub const Options = extern struct {
                 .batch_buffer_size = self.batch_buffer_size,
                 .max_segment_size = self.max_segment_size,
                 .durability = if (self.buffered == 1) .buffered else .sync,
+                .skip_unchanged = self.skip_unchanged == 1,
             },
             .cache = .{
                 .bytes = std.math.cast(usize, self.cache_bytes) orelse return error.InvalidArgument,
                 .shards = self.cache_shards,
             },
         };
-        if (self.reserved != 0) return error.InvalidArgument;
         if (result.cache.shards == 0 or result.cache.shards > 1024) return error.InvalidArgument;
         if (result.max_open_shards == 0 or result.max_open_shards > 1024) return error.InvalidArgument;
         result.shard.validate() catch return error.InvalidArgument;
@@ -418,6 +418,7 @@ pub const StatsSnapshot = extern struct {
     cache_hits: u64 = 0,
     cache_misses: u64 = 0,
     cache_evictions: u64 = 0,
+    unchanged_write_skips: u64 = 0,
 };
 
 pub export fn zg_stats_get(optional: ?*Handle, out: ?*StatsSnapshot) Status {

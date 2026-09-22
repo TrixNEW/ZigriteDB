@@ -35,7 +35,9 @@ typedef struct {
     uint32_t buffered, compression_threshold;
     /* Shared decoded-value cache. */
     uint64_t cache_bytes;
-    uint32_t cache_shards, reserved;
+    uint32_t cache_shards;
+    /* 1 skips writes that would not change stored state. */
+    uint32_t skip_unchanged;
 } zg_options;
 typedef struct {
     int32_t dimension, chunk_x, chunk_z, subchunk_y;
@@ -74,6 +76,7 @@ typedef struct {
     uint64_t compactions, compaction_input_bytes, compaction_output_bytes, compaction_duration_ns;
     uint64_t recovery_attempts, recovery_errors;
     uint64_t cache_hits, cache_misses, cache_evictions;
+    uint64_t unchanged_write_skips;
 } zg_stats;
 
 /* The message belongs to the library. Do not free it. */
@@ -93,7 +96,9 @@ int zg_open(const uint8_t *path, size_t path_len, const zg_options *options, zg_
 /* Calls may overlap. Wait for them before close, which frees the handle even on error. */
 int zg_close(zg_handle *handle);
 /* Keep each batch in one region. Use a higher batch ID for each write to that region,
-   or 0 to take the region's next ID, which lets concurrent sync writers share one fsync. */
+   or 0 to take the region's next ID, which lets concurrent sync writers share one fsync.
+   Every component is its own record, so only send the ones that changed. A block change
+   is one subchunk put, it doesn't need entities, block entities, biomes or metadata. */
 int zg_write(zg_handle *handle, uint64_t batch_id, const zg_operation *operations, size_t count);
 /* One region, increasing IDs, at most 4096 records total. Success always syncs.
    Each batch is atomic; an error can leave earlier batches applied. */
