@@ -62,7 +62,7 @@ pub const Key = struct {
         return key;
     }
 
-    fn validate(self: Key) error{InvalidSubchunkY}!void {
+    pub fn validate(self: Key) error{InvalidSubchunkY}!void {
         const invalid_subchunk_y = self.component != .subchunk and self.subchunk_y != 0;
         if (invalid_subchunk_y) return error.InvalidSubchunkY;
     }

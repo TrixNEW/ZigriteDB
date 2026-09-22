@@ -11,9 +11,17 @@ const file_scan = @import("../recovery/file_scan.zig");
 const recovery = @import("../recovery/scan.zig");
 const Stats = @import("../stats.zig").Stats;
 
-const EncodedKey = [Key.encoded_len]u8;
-const Map = std.AutoHashMapUnmanaged(EncodedKey, Location);
-const Pending = std.AutoHashMapUnmanaged(EncodedKey, ?Location);
+/// Local coords within the region instead of the full key, since one Index only ever holds one region's keys.
+const PackedKey = packed struct(u64) {
+    local_x: u5,
+    local_z: u5,
+    component: u3,
+    subchunk_y: i32,
+    reserved: u19 = 0,
+};
+
+const Map = std.AutoHashMapUnmanaged(u64, Location);
+const Pending = std.AutoHashMapUnmanaged(u64, ?Location);
 
 pub const Location = struct {
     segment_id: u64,
@@ -55,7 +63,19 @@ pub const Index = struct {
     }
 
     pub fn get(self: *const Index, key: Key) !?Location {
-        return self.entries.get(try key.encode());
+        return self.entries.get(try packKey(key));
+    }
+
+    /// Callers already reject cross-region keys before they get here, so this never needs to tell regions apart.
+    fn packKey(key: Key) !u64 {
+        try key.validate();
+        const packed_key: PackedKey = .{
+            .local_x = @intCast(@mod(key.chunk_x, 32)),
+            .local_z = @intCast(@mod(key.chunk_z, 32)),
+            .component = @intCast(@intFromEnum(key.component)),
+            .subchunk_y = key.subchunk_y,
+        };
+        return @bitCast(packed_key);
     }
 
     /// The returned value uses scratch.
@@ -171,7 +191,7 @@ pub const Index = struct {
             if (!same_region) return error.RegionMismatch;
 
             record_count += 1;
-            const key = try item.key.encode();
+            const key = try packKey(item.key);
             const location: ?Location = if (item.header.kind == .delete) null else .{
                 .segment_id = segment_id,
                 .offset = try std.math.add(u64, start, offset),
