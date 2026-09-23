@@ -314,3 +314,47 @@ test "getMany across two regions returns correctly-ordered results" {
     try testing.expectEqualStrings("region0", out0[0..results[1].value.len]);
     try testing.expectEqual(db.ReadStatus.not_found, results[2].status);
 }
+
+test "getMany spans as many regions as it has requests, in the caller's order" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .max_open_shards = 4 });
+    defer world.deinit();
+
+    const region_count = db.World.max_read_batch;
+    for (0..region_count / 2) |half| {
+        const r = half * 2;
+        var value: [2]u8 = undefined;
+        std.mem.writeInt(u16, &value, @intCast(r), .little);
+        var entry = item(1, 0, &value);
+        entry.key.chunk_x = (@as(i32, @intCast(r)) - 128) * 32;
+        _ = try world.write(.{ .entries = &.{entry} });
+    }
+
+    const count = region_count + 44;
+    var outputs: [count][2]u8 = undefined;
+    var requests: [count]db.ReadRequest = undefined;
+    var results: [count]db.ReadResult = undefined;
+    for (&requests, &outputs, 0..) |*request, *output, i| {
+        const r = (i * 37) % region_count;
+        var key = item(0, 0, "").key;
+        key.chunk_x = (@as(i32, @intCast(r)) - 128) * 32;
+        request.* = .{ .key = key, .output = if (i == 6) output[0..1] else output };
+    }
+    try world.getMany(&requests, &results);
+
+    for (results, 0..) |result, i| {
+        const r = (i * 37) % region_count;
+        if (r % 2 == 1) {
+            try testing.expectEqual(db.ReadStatus.not_found, result.status);
+        } else if (i == 6) {
+            try testing.expectEqual(db.ReadStatus.buffer_too_small, result.status);
+            try testing.expectEqual(@as(usize, 2), result.required);
+        } else {
+            try testing.expectEqual(db.ReadStatus.ok, result.status);
+            try testing.expectEqual(@as(u16, @intCast(r)), std.mem.readInt(u16, result.value[0..2], .little));
+        }
+    }
+    try world.close();
+}

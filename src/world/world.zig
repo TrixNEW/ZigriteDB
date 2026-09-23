@@ -23,7 +23,6 @@ pub const Options = struct {
 pub const ReadRequest = store_module.ReadRequest;
 pub const ReadStatus = store_module.ReadStatus;
 pub const ReadResult = store_module.ReadResult;
-pub const max_distinct_regions = 8;
 
 pub const World = struct {
     allocator: std.mem.Allocator,
@@ -132,41 +131,45 @@ pub const World = struct {
         @memset(results, .{});
         if (requests.len == 0) return;
 
-        var distinct: [max_distinct_regions]Region = undefined;
-        var region_count: usize = 0;
-        for (requests) |request| {
-            const found = request.key.region();
-            const seen = for (distinct[0..region_count]) |existing| {
-                if (std.meta.eql(existing, found)) break true;
-            } else false;
-            if (seen) continue;
-            if (region_count == distinct.len) return error.TooManyKeys;
-            distinct[region_count] = found;
-            region_count += 1;
+        var start: usize = 0;
+        while (start < requests.len) : (start += max_read_batch) {
+            const end = @min(requests.len, start + max_read_batch);
+            try self.getManyChunk(requests[start..end], results[start..end]);
         }
+    }
+
+    fn getManyChunk(self: *World, requests: []const ReadRequest, results: []ReadResult) !void {
+        var order: [max_read_batch]u16 = undefined;
+        for (order[0..requests.len], 0..) |*value, i| value.* = @intCast(i);
+        std.sort.pdq(u16, order[0..requests.len], requests, requestRegionLessThan);
 
         var sub_requests: [store_module.max_batch_keys]ReadRequest = undefined;
-        var sub_indices: [store_module.max_batch_keys]usize = undefined;
         var sub_results: [store_module.max_batch_keys]ReadResult = undefined;
 
-        for (distinct[0..region_count]) |region| {
+        var run: usize = 0;
+        while (run < requests.len) {
+            const region = requests[order[run]].key.region();
+            var run_end = run + 1;
+            while (run_end < requests.len and std.meta.eql(requests[order[run_end]].key.region(), region)) run_end += 1;
+            defer run = run_end;
+
             const store = (try self.acquire(region, false)) orelse continue;
             defer self.unpin(store);
 
-            var next: usize = 0;
-            while (next < requests.len) {
-                var sub_count: usize = 0;
-                while (next < requests.len and sub_count < sub_requests.len) : (next += 1) {
-                    if (!std.meta.eql(requests[next].key.region(), region)) continue;
-                    sub_requests[sub_count] = requests[next];
-                    sub_indices[sub_count] = next;
-                    sub_count += 1;
-                }
-                if (sub_count == 0) break;
-                try store.getMany(sub_requests[0..sub_count], sub_results[0..sub_count]);
-                for (sub_indices[0..sub_count], sub_results[0..sub_count]) |i, result| results[i] = result;
+            var next = run;
+            while (next < run_end) {
+                const count = @min(run_end - next, sub_requests.len);
+                const indices = order[next..][0..count];
+                for (indices, sub_requests[0..count]) |i, *request| request.* = requests[i];
+                try store.getMany(sub_requests[0..count], sub_results[0..count]);
+                for (indices, sub_results[0..count]) |i, result| results[i] = result;
+                next += count;
             }
         }
+    }
+
+    fn requestRegionLessThan(requests: []const ReadRequest, a: u16, b: u16) bool {
+        return regionLessThan({}, requests[a].key.region(), requests[b].key.region());
     }
 
     pub fn regions(self: *World, allocator: std.mem.Allocator) ![]Region {
@@ -196,6 +199,7 @@ pub const World = struct {
     }
 
     pub const max_range_regions = 1024;
+    pub const max_read_batch = 256;
 
     pub fn keysInRange(self: *World, allocator: std.mem.Allocator, dimension: i32, filter: KeyFilter) ![]Key {
         const min_x = @divFloor(filter.min_chunk_x, 32);

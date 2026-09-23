@@ -363,9 +363,8 @@ pub const ReadResult = extern struct {
     required: usize = 0,
 };
 
-const max_c_batch = 256;
+const max_c_batch = db.World.max_read_batch;
 
-/// Batch reads isolate per-key failures.
 pub export fn zg_get_many(optional: ?*Handle, requests: ?[*]const ReadRequest, results: ?[*]ReadResult, count: usize) Status {
     const handle = optional orelse return .invalid_argument;
     if (requests == null or results == null or count == 0) return .invalid_argument;

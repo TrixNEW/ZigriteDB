@@ -74,6 +74,7 @@ pub const Index = struct {
     }
 
     pub fn get(self: *const Index, key: Key) !?Location {
+        if (!std.meta.eql(key.region(), self.region)) return error.RegionMismatch;
         return self.entries.get(try packKey(key));
     }
 
@@ -114,13 +115,11 @@ pub const Index = struct {
         return try lz4.decompress(item.value, scratch[used..], item.header.raw_len);
     }
 
-    /// Reads a pinned location without touching the index.
     pub fn readLocationInto(self: *const Index, location: Location, key: Key, device: anytype, scratch: []u8, output: []u8) ![]const u8 {
         try self.verifySegmentHeader(device, self.segment_ids[location.segment]);
         return self.readAtInto(location, key, device, scratch, output);
     }
 
-    /// Skips the header check. Only use once the segment was verified.
     pub fn readAtInto(self: *const Index, location: Location, key: Key, device: anytype, scratch: []u8, output: []u8) ![]const u8 {
         return decodeInto(try self.readRecordAt(location, key, device, scratch), output);
     }

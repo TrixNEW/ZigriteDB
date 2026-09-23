@@ -179,3 +179,23 @@ test "getMany releases its pin even when the oversized-record heap fallback fail
 
     try testing.checkAllAllocationFailures(testing.allocator, getManyOversizedAllocationFailure, .{});
 }
+
+test "a store rejects keys from other regions instead of aliasing its own" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, try options());
+    defer store.deinit();
+    _ = try store.write(.{ .entries = &.{item(1, 0, "mine")} });
+
+    var alias = item(1, 0, "").key;
+    alias.chunk_x = 32;
+    var output: [16]u8 = undefined;
+    try testing.expectError(error.RegionMismatch, store.valueSize(alias));
+    try testing.expectError(error.RegionMismatch, store.get(alias, &output));
+    const requests = [_]db.ReadRequest{.{ .key = alias, .output = &output }};
+    var results: [1]db.ReadResult = undefined;
+    try testing.expectError(error.RegionMismatch, store.getMany(&requests, &results));
+    try testing.expectEqual(@as(?u32, 4), try store.valueSize(item(1, 0, "").key));
+    try store.close();
+}

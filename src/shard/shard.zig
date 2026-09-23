@@ -487,7 +487,6 @@ pub fn Shard(comptime Device: type) type {
             try self.writer.flush();
         }
 
-        /// Syncs without the shard lock.
         pub fn syncAppended(self: *Self) !void {
             const device, const segment_id, const offset = blk: {
                 try self.mutex.lock(self.io);

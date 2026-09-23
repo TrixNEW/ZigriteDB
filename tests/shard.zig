@@ -346,7 +346,6 @@ test "getMany runs alongside a plain get on the same shard" {
     try testing.expectEqual(@as(usize, 0), shard.generation.readers);
 }
 
-/// Pauses the first segment-header read so the test can mutate the shard mid-read.
 const Gated = struct {
     inner: Device = .{},
     armed: std.atomic.Value(bool) = .init(false),
@@ -393,7 +392,6 @@ fn gatedGetMany(shard: *GatedShard, requests: []const GatedShard.ReadRequest, re
     };
 }
 
-/// Rewrites a key, grows the index, then deletes it.
 fn churn(shard: *GatedShard, first_id: u64) !void {
     _ = try shard.write(.{ .entries = &.{item(first_id, 0, "a much longer replacement value")} });
     for (0..2) |round| {
@@ -504,7 +502,6 @@ test "close waits for a pinned reader to finish its physical read" {
     var closed: std.atomic.Value(bool) = .init(false);
     var close_result: ?anyerror = null;
     const closer = try std.Thread.spawn(.{}, gatedClose, .{ &shard, &closed, &close_result });
-    // Close waits for the pinned read to finish.
     var probe: [16]u8 = undefined;
     while (true) {
         _ = shard.get(item(1, 0, "").key, &probe) catch |err| {
@@ -521,4 +518,48 @@ test "close waits for a pinned reader to finish its physical read" {
     try testing.expectEqual(null, result.err);
     try testing.expectEqualStrings("old", output[0..result.len.?]);
     try testing.expectEqual(null, close_result);
+}
+
+const aliases = [_]db.Key{
+    .{ .dimension = 0, .chunk_x = 32, .chunk_z = 0, .component = .metadata },
+    .{ .dimension = 0, .chunk_x = -32, .chunk_z = 0, .component = .metadata },
+    .{ .dimension = 1, .chunk_x = 0, .chunk_z = 0, .component = .metadata },
+    .{ .dimension = 0, .chunk_x = 0, .chunk_z = 32, .component = .metadata },
+    .{ .dimension = 0, .chunk_x = 0, .chunk_z = -32, .component = .metadata },
+    .{ .dimension = 0, .chunk_x = 32, .chunk_z = 32, .component = .metadata },
+};
+
+test "keys from another region never alias this region's packed index entries" {
+    var cache = try db.cache.Cache.init(testing.allocator, .{ .bytes = 4096, .shards = 1 });
+    defer cache.deinit();
+    var cached = options;
+    cached.cache = &cache;
+    var device: Device = .{};
+    var shard = try Shard.create(testing.allocator, testing.io, &device, header, cached);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "mine")} });
+
+    var output: [16]u8 = undefined;
+    try testing.expectEqualStrings("mine", (try shard.get(item(1, 0, "").key, &output)).?);
+
+    for (aliases) |alias| {
+        cache.put(testing.io, alias, 1, "theirs");
+        try testing.expectError(error.RegionMismatch, shard.generation.index.get(alias));
+        try testing.expectError(error.RegionMismatch, shard.get(alias, &output));
+        var required: usize = 0;
+        try testing.expectError(error.RegionMismatch, shard.getSized(alias, &output, &required));
+        try testing.expectEqual(@as(usize, 0), required);
+
+        const requests = [_]Shard.ReadRequest{
+            .{ .key = item(1, 0, "").key, .output = &output },
+            .{ .key = alias, .output = &output },
+        };
+        var results: [2]Shard.ReadResult = undefined;
+        try testing.expectError(error.RegionMismatch, shard.getMany(&requests, &results));
+
+        var entry = item(2, 0, "mine");
+        entry.key = alias;
+        try testing.expectError(error.RegionMismatch, shard.unchanged(entry));
+    }
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
 }
