@@ -4,7 +4,11 @@
 #endif
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+_Static_assert(ZG_ABI_VERSION == 2u, "zg_options grew in ABI 2");
+_Static_assert(sizeof(zg_options) == 56, "zg_options layout changed; bump ZG_ABI_VERSION");
 
 int main(int argc, char **argv) {
     assert(argc == 2);
@@ -49,6 +53,18 @@ int main(int argc, char **argv) {
     assert(zg_open((uint8_t *)argv[1], strlen(argv[1]), &options, &handle) == ZG_INVALID_ARGUMENT);
     assert(handle == NULL);
     options.version = ZG_ABI_VERSION;
+    uint32_t *legacy = malloc(40);
+    assert(legacy != NULL);
+    memcpy(legacy, &options, 40);
+    legacy[0] = 1;
+    legacy[1] = 40;
+    assert(zg_options_validate((const zg_options *)legacy) == ZG_INVALID_ARGUMENT);
+    assert(zg_open((uint8_t *)argv[1], strlen(argv[1]), (const zg_options *)legacy, &handle) == ZG_INVALID_ARGUMENT);
+    legacy[0] = ZG_ABI_VERSION;
+    assert(zg_open((uint8_t *)argv[1], strlen(argv[1]), (const zg_options *)legacy, &handle) == ZG_INVALID_ARGUMENT);
+    assert(zg_recover_region((uint8_t *)argv[1], strlen(argv[1]), (uint8_t *)argv[1], strlen(argv[1]), (const zg_options *)legacy) == ZG_INVALID_ARGUMENT);
+    assert(handle == NULL);
+    free(legacy);
     assert(zg_open((uint8_t *)argv[1], strlen(argv[1]), &options, &handle) == ZG_OK);
     assert(zg_write(handle, 1, NULL, 1) == ZG_INVALID_ARGUMENT);
     uint8_t value[1024], output[1024];

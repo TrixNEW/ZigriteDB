@@ -40,7 +40,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const native = b.addLibrary(.{ .name = "zigritedb_native", .linkage = .dynamic, .root_module = native_module });
+    const native = b.addLibrary(.{
+        .name = "zigritedb_native",
+        .linkage = .dynamic,
+        .root_module = native_module,
+        .version = .{ .major = 2, .minor = 0, .patch = 0 },
+    });
     b.installArtifact(native);
     b.installFile("include/zigritedb.h", "include/zigritedb.h");
 
@@ -78,7 +83,6 @@ pub fn build(b: *std.Build) void {
 
     const fuzz_module = b.createModule(.{
         .root_source_file = b.path("tests/fuzz.zig"),
-        // Zig 0.16 fuzz error traces use an incompatible stack-trace type.
         .error_tracing = false,
         .target = target,
         .optimize = optimize,

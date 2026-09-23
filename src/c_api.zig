@@ -3,7 +3,7 @@ const allocator = std.heap.page_allocator;
 
 const db = @import("root.zig");
 
-const abi_version: u32 = 1;
+const abi_version: u32 = 2;
 const max_path_length: usize = 4096;
 
 pub export fn zg_abi_version() u32 {
@@ -68,6 +68,12 @@ pub const Options = extern struct {
     cache_shards: u32 = 16,
     skip_unchanged: u32 = 0,
 
+    fn read(options: *const Options) !Options {
+        const prefix: *const [2]u32 = @ptrCast(options);
+        if (prefix[0] != abi_version or prefix[1] != @sizeOf(Options)) return error.InvalidArgument;
+        return options.*;
+    }
+
     fn native(self: Options) !db.WorldOptions {
         if (self.version != abi_version or self.struct_size != @sizeOf(Options) or self.buffered > 1 or self.skip_unchanged > 1) return error.InvalidArgument;
         if (self.compression_threshold > db.record.max_value_len) return error.InvalidArgument;
@@ -92,6 +98,14 @@ pub const Options = extern struct {
         return result;
     }
 };
+
+comptime {
+    std.debug.assert(@sizeOf(Options) == 56);
+    std.debug.assert(@offsetOf(Options, "struct_size") == 4);
+    std.debug.assert(@offsetOf(Options, "compression_threshold") == 36);
+    std.debug.assert(@offsetOf(Options, "cache_bytes") == 40);
+    std.debug.assert(@offsetOf(Options, "skip_unchanged") == 52);
+}
 
 pub const Key = extern struct {
     dimension: i32,
@@ -220,13 +234,14 @@ pub export fn zg_options_init(out: ?*Options) Status {
 
 pub export fn zg_options_validate(options: ?*const Options) Status {
     const value = options orelse return .invalid_argument;
-    _ = value.native() catch |err| return status(err);
+    _ = (Options.read(value) catch |err| return status(err)).native() catch |err| return status(err);
     return .ok;
 }
 pub export fn zg_open(path: ?[*]const u8, length: usize, options: ?*const Options, out: ?*?*Handle) Status {
     const target = out orelse return .invalid_argument;
     target.* = null;
-    target.* = open(path, length, if (options) |value| value.* else .{}) catch |err| return status(err);
+    const config = if (options) |value| Options.read(value) catch |err| return status(err) else Options{};
+    target.* = open(path, length, config) catch |err| return status(err);
     return .ok;
 }
 
@@ -464,7 +479,6 @@ pub export fn zg_maintenance_wait(optional: ?*Handle) Status {
     return .ok;
 }
 
-/// Queues keys for background cache loading.
 pub export fn zg_prefetch(optional: ?*Handle, keys: ?[*]const Key, count: usize) Status {
     const handle = optional orelse return .invalid_argument;
     if (count == 0) return .ok;
@@ -521,7 +535,8 @@ fn compactRegion(world: *db.World, region: db.Region) !void {
 }
 
 pub export fn zg_recover_region(source: ?[*]const u8, source_len: usize, destination: ?[*]const u8, destination_len: usize, options: ?*const Options) Status {
-    recover(source, source_len, destination, destination_len, if (options) |value| value.* else .{}) catch |err| return status(err);
+    const config = if (options) |value| Options.read(value) catch |err| return status(err) else Options{};
+    recover(source, source_len, destination, destination_len, config) catch |err| return status(err);
     return .ok;
 }
 
