@@ -37,11 +37,15 @@ pub const World = struct {
     closing: bool = false,
     changed: std.Io.Condition = .init,
     missing: [256]?Region = .{null} ** 256,
+    clock: u64 = 0,
 
     const Slot = struct {
         region: Region,
         store: *Store,
         users: usize = 0,
+        last_used: u64 = 0,
+        loading: bool = false,
+        evicting: ?Region = null,
     };
 
     pub fn open(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: Options) !World {
@@ -256,10 +260,12 @@ pub const World = struct {
             self.mutex.unlock(self.io);
             return error.Closed;
         }
-        const count = self.count;
-        for (self.slots[0..count], 0..) |*slot, i| {
+        var count: usize = 0;
+        for (self.slots[0..self.count]) |*slot| {
+            if (slot.loading) continue;
             slot.users += 1;
-            stores[i] = slot.store;
+            stores[count] = slot.store;
+            count += 1;
         }
         self.mutex.unlock(self.io);
         defer for (stores[0..count]) |store| self.unpin(store);
@@ -308,28 +314,43 @@ pub const World = struct {
         defer self.mutex.unlock(self.io);
         while (true) {
             if (self.closed or self.closing) return error.Closed;
-            for (self.slots[0..self.count], 0..) |slot, i| {
-                if (!std.meta.eql(slot.region, region)) continue;
-                std.mem.copyBackwards(Slot, self.slots[1 .. i + 1], self.slots[0..i]);
-                self.slots[0] = slot;
-                self.slots[0].users += 1;
-                return slot.store;
+            if (self.busy(region)) {
+                try self.changed.wait(self.io, &self.mutex);
+                continue;
+            }
+            if (self.find(region)) |i| {
+                self.clock += 1;
+                self.slots[i].last_used = self.clock;
+                self.slots[i].users += 1;
+                return self.slots[i].store;
             }
             if (!create and self.knownMissing(region)) return null;
-            if (self.count < self.slots.len or self.hasIdle()) {
-                const store = (try self.load(region, create)) orelse return null;
-                self.slots[0].users = 1;
-                return store;
-            }
+            if (self.count < self.slots.len or self.hasIdle()) return self.load(region, create);
             try self.changed.wait(self.io, &self.mutex);
         }
+    }
+
+    fn find(self: *World, region: Region) ?usize {
+        for (self.slots[0..self.count], 0..) |slot, i| {
+            if (std.meta.eql(slot.region, region)) return i;
+        }
+        return null;
+    }
+
+    fn busy(self: *World, region: Region) bool {
+        for (self.slots[0..self.count]) |slot| {
+            if (!slot.loading) continue;
+            if (std.meta.eql(slot.region, region)) return true;
+            if (slot.evicting) |evicting| if (std.meta.eql(evicting, region)) return true;
+        }
+        return false;
     }
 
     fn unpin(self: *World, store: *Store) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         for (self.slots[0..self.count]) |*slot| {
-            if (slot.store != store) continue;
+            if (slot.loading or slot.store != store) continue;
             std.debug.assert(slot.users != 0);
             slot.users -= 1;
             self.changed.broadcast(self.io);
@@ -364,22 +385,70 @@ pub const World = struct {
     }
 
     fn load(self: *World, region: Region, create: bool) !?*Store {
+        if (create and self.knownMissing(region)) self.missing[missingSlot(region)] = null;
+
+        var victim: ?*Store = null;
+        var evicting: ?Region = null;
+        if (self.count == self.slots.len) {
+            const i = self.idleIndex().?;
+            victim = self.slots[i].store;
+            evicting = self.slots[i].region;
+            self.removeAt(i);
+        }
+        self.clock += 1;
+        self.slots[self.count] = .{ .region = region, .store = undefined, .users = 1, .last_used = self.clock, .loading = true, .evicting = evicting };
+        self.count += 1;
+
+        self.mutex.unlock(self.io);
+        const opened = self.openRegion(region, create, victim);
+        self.mutex.lockUncancelable(self.io);
+        defer self.changed.broadcast(self.io);
+
+        const i = self.find(region).?;
+        const store = (opened catch |err| {
+            self.removeAt(i);
+            return err;
+        }) orelse {
+            self.removeAt(i);
+            self.missing[missingSlot(region)] = region;
+            return null;
+        };
+        self.slots[i].store = store;
+        self.slots[i].loading = false;
+        self.slots[i].evicting = null;
+        return store;
+    }
+
+    fn removeAt(self: *World, i: usize) void {
+        self.count -= 1;
+        self.slots[i] = self.slots[self.count];
+    }
+
+    fn idleIndex(self: *World) ?usize {
+        var oldest: ?usize = null;
+        for (self.slots[0..self.count], 0..) |slot, i| {
+            if (slot.users != 0) continue;
+            if (oldest == null or slot.last_used < self.slots[oldest.?].last_used) oldest = i;
+        }
+        return oldest;
+    }
+
+    fn openRegion(self: *World, region: Region, create: bool, victim: ?*Store) !?*Store {
+        if (victim) |store| {
+            defer self.allocator.destroy(store);
+            try store.close();
+        }
+
         var name_buffer: [40]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buffer, "{x:0>8}-{x:0>8}-{x:0>8}.region", .{
             @as(u32, @bitCast(region.dimension)),
             @as(u32, @bitCast(region.x)),
             @as(u32, @bitCast(region.z)),
         });
-        const missing = &self.missing[missingSlot(region)];
-        if (create and self.knownMissing(region)) missing.* = null;
-
         var created = false;
         const dir = self.directory.dir.openDir(self.io, name, .{ .follow_symlinks = false }) catch |err| blk: {
             if (err != error.FileNotFound) return err;
-            if (!create) {
-                missing.* = region;
-                return null;
-            }
+            if (!create) return null;
             try self.directory.dir.createDir(self.io, name, .default_dir);
             created = true;
             break :blk try self.directory.dir.openDir(self.io, name, .{ .follow_symlinks = false });
@@ -387,7 +456,6 @@ pub const World = struct {
         defer dir.close(self.io);
         const store = try self.allocator.create(Store);
         errdefer self.allocator.destroy(store);
-        if (self.count == self.slots.len) try self.evict();
         store.* = if (created)
             try Store.create(self.allocator, self.io, dir, region, self.options.shard)
         else
@@ -400,23 +468,14 @@ pub const World = struct {
             };
         errdefer store.deinit();
         if (!std.meta.eql(store.shard.generation.index.region, region)) return error.RegionMismatch;
-        try self.directory.syncEntries();
-        std.mem.copyBackwards(Slot, self.slots[1 .. self.count + 1], self.slots[0..self.count]);
-        self.slots[0] = .{ .region = region, .store = store };
-        self.count += 1;
+        if (created) try self.directory.syncEntries();
         return store;
     }
 
     fn evict(self: *World) !void {
-        var i = self.count;
-        while (i != 0) {
-            i -= 1;
-            if (self.slots[i].users == 0) break;
-        }
-        std.debug.assert(self.slots[i].users == 0);
+        const i = self.idleIndex().?;
         const store = self.slots[i].store;
-        std.mem.copyForwards(Slot, self.slots[i .. self.count - 1], self.slots[i + 1 .. self.count]);
-        self.count -= 1;
+        self.removeAt(i);
         defer self.allocator.destroy(store);
         try store.close();
     }
