@@ -340,7 +340,7 @@ pub fn Shard(comptime Device: type) type {
             const scratch = if (len <= stack_scratch.len) stack_scratch[0..len] else try self.allocator.alloc(u8, len);
             defer if (len > stack_scratch.len) self.allocator.free(scratch);
 
-            const value = (try pinned.generation.index.readInto(key, pinned.device, scratch, output)) orelse return null;
+            const value = try pinned.generation.index.readLocationInto(pinned.location, key, pinned.device, scratch, output);
             if (self.options.cache) |cache| cache.put(self.io, key, batch_id, value);
             return value;
         }
@@ -438,8 +438,7 @@ pub fn Shard(comptime Device: type) type {
                 const scratch = if (len <= stack_scratch.len) stack_scratch[0..len] else try self.allocator.alloc(u8, len);
                 defer if (len > stack_scratch.len) self.allocator.free(scratch);
 
-                const value = (try generation.index.readIntoUnverified(key, device, scratch, requests[idx].output)) orelse
-                    return error.IndexMismatch;
+                const value = try generation.index.readAtInto(slot.location, key, device, scratch, requests[idx].output);
                 if (self.options.cache) |cache| cache.put(self.io, key, batch_id, value);
                 results[idx] = .{ .status = .ok, .required = required, .value = value };
             }
@@ -488,7 +487,7 @@ pub fn Shard(comptime Device: type) type {
             try self.writer.flush();
         }
 
-        /// Syncs without holding the shard lock.
+        /// Syncs without the shard lock.
         pub fn syncAppended(self: *Self) !void {
             const device, const segment_id, const offset = blk: {
                 try self.mutex.lock(self.io);

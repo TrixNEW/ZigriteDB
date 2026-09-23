@@ -345,3 +345,180 @@ test "getMany runs alongside a plain get on the same shard" {
     try testing.expectEqual(null, single_result.err);
     try testing.expectEqual(@as(usize, 0), shard.generation.readers);
 }
+
+/// Pauses the first segment-header read so the test can mutate the shard mid-read.
+const Gated = struct {
+    inner: Device = .{},
+    armed: std.atomic.Value(bool) = .init(false),
+    paused: std.atomic.Value(bool) = .init(false),
+    released: std.atomic.Value(bool) = .init(false),
+
+    pub fn length(self: *Gated) !u64 {
+        return self.inner.length();
+    }
+
+    pub fn readExact(self: *Gated, output: []u8, offset: u64) !void {
+        if (offset == 0 and self.armed.swap(false, .acq_rel)) {
+            self.paused.store(true, .release);
+            while (!self.released.load(.acquire)) std.Thread.yield() catch {};
+        }
+        return self.inner.readExact(output, offset);
+    }
+
+    pub fn writeAll(self: *Gated, bytes: []const u8, offset: u64) !void {
+        return self.inner.writeAll(bytes, offset);
+    }
+
+    pub fn sync(self: *Gated) !void {
+        return self.inner.sync();
+    }
+
+    fn waitPaused(self: *Gated) void {
+        while (!self.paused.load(.acquire)) std.Thread.yield() catch {};
+    }
+};
+const GatedShard = db.shard.Shard(*Gated);
+
+fn gatedGet(shard: *GatedShard, key: db.Key, buffer: []u8, result: *ReadResult) void {
+    if (shard.get(key, buffer)) |value| {
+        result.len = if (value) |v| v.len else null;
+    } else |err| {
+        result.err = err;
+    }
+}
+
+fn gatedGetMany(shard: *GatedShard, requests: []const GatedShard.ReadRequest, results: []GatedShard.ReadResult, err: *?anyerror) void {
+    shard.getMany(requests, results) catch |e| {
+        err.* = e;
+    };
+}
+
+/// Rewrites a key, grows the index, then deletes it.
+fn churn(shard: *GatedShard, first_id: u64) !void {
+    _ = try shard.write(.{ .entries = &.{item(first_id, 0, "a much longer replacement value")} });
+    for (0..2) |round| {
+        var entries: [12]db.entry.Entry = undefined;
+        for (&entries, 0..) |*value, i| value.* = item(first_id + 1 + round, @intCast(1 + round * 12 + i), "grow");
+        _ = try shard.write(.{ .entries = &entries });
+    }
+    _ = try shard.write(.{ .entries = &.{item(first_id + 3, 0, null)} });
+}
+
+test "a pinned get reads its captured location while writers overwrite, rehash and delete" {
+    var device: Gated = .{};
+    var shard = try GatedShard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "old")} });
+
+    device.armed.store(true, .release);
+    var output: [3]u8 = undefined;
+    var result: ReadResult = .{};
+    const reader = try std.Thread.spawn(.{}, gatedGet, .{ &shard, item(1, 0, "").key, &output, &result });
+    device.waitPaused();
+    try churn(&shard, 2);
+    device.released.store(true, .release);
+    reader.join();
+
+    try testing.expectEqual(null, result.err);
+    try testing.expectEqualStrings("old", output[0..result.len.?]);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+    var fresh: [3]u8 = undefined;
+    try testing.expectEqual(null, try shard.get(item(1, 0, "").key, &fresh));
+}
+
+test "a pinned getMany reads its captured locations while writers overwrite, rehash and delete" {
+    var device: Gated = .{};
+    var shard = try GatedShard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{ item(1, 0, "old"), item(1, 30, "kept") } });
+
+    device.armed.store(true, .release);
+    var out0: [3]u8 = undefined;
+    var out1: [4]u8 = undefined;
+    const requests = [_]GatedShard.ReadRequest{
+        .{ .key = item(1, 0, "").key, .output = &out0 },
+        .{ .key = item(1, 30, "").key, .output = &out1 },
+    };
+    var results: [2]GatedShard.ReadResult = undefined;
+    var err: ?anyerror = null;
+    const reader = try std.Thread.spawn(.{}, gatedGetMany, .{ &shard, &requests, &results, &err });
+    device.waitPaused();
+    try churn(&shard, 2);
+    device.released.store(true, .release);
+    reader.join();
+
+    try testing.expectEqual(null, err);
+    try testing.expectEqual(GatedShard.ReadStatus.ok, results[0].status);
+    try testing.expectEqualStrings("old", results[0].value);
+    try testing.expectEqual(GatedShard.ReadStatus.ok, results[1].status);
+    try testing.expectEqualStrings("kept", results[1].value);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+}
+
+const NullPublisher = struct {
+    pub fn publish(_: NullPublisher, _: []const u8) !void {}
+};
+
+test "a pinned get survives segment rotation and a newer write to the new segment" {
+    var device: Gated = .{};
+    var next: Gated = .{};
+    var shard = try GatedShard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "old")} });
+
+    device.armed.store(true, .release);
+    var output: [16]u8 = undefined;
+    var result: ReadResult = .{};
+    const reader = try std.Thread.spawn(.{}, gatedGet, .{ &shard, item(1, 0, "").key, &output, &result });
+    device.waitPaused();
+    try shard.rotate(&next, 2, NullPublisher{});
+    _ = try shard.write(.{ .entries = &.{item(2, 0, "rotated")} });
+    device.released.store(true, .release);
+    reader.join();
+
+    try testing.expectEqual(null, result.err);
+    try testing.expectEqualStrings("old", output[0..result.len.?]);
+    var fresh: [16]u8 = undefined;
+    try testing.expectEqualStrings("rotated", (try shard.get(item(1, 0, "").key, &fresh)).?);
+}
+
+fn gatedClose(shard: *GatedShard, done: *std.atomic.Value(bool), result: *?anyerror) void {
+    shard.close() catch |err| {
+        result.* = err;
+    };
+    done.store(true, .release);
+}
+
+test "close waits for a pinned reader to finish its physical read" {
+    var device: Gated = .{};
+    var shard = try GatedShard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "old")} });
+
+    device.armed.store(true, .release);
+    var output: [16]u8 = undefined;
+    var result: ReadResult = .{};
+    const reader = try std.Thread.spawn(.{}, gatedGet, .{ &shard, item(1, 0, "").key, &output, &result });
+    device.waitPaused();
+
+    var closed: std.atomic.Value(bool) = .init(false);
+    var close_result: ?anyerror = null;
+    const closer = try std.Thread.spawn(.{}, gatedClose, .{ &shard, &closed, &close_result });
+    // Close waits for the pinned read to finish.
+    var probe: [16]u8 = undefined;
+    while (true) {
+        _ = shard.get(item(1, 0, "").key, &probe) catch |err| {
+            try testing.expectEqual(error.Closed, err);
+            break;
+        };
+        std.Thread.yield() catch {};
+    }
+    try testing.expect(!closed.load(.acquire));
+
+    device.released.store(true, .release);
+    reader.join();
+    closer.join();
+    try testing.expectEqual(null, result.err);
+    try testing.expectEqualStrings("old", output[0..result.len.?]);
+    try testing.expectEqual(null, close_result);
+}
