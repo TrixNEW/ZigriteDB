@@ -41,6 +41,7 @@ pub const Store = struct {
     shard: Shard,
     devices: []File,
     file_count: usize,
+    region: Region,
     mutex: std.Io.Mutex = .init,
     writer_mutex: std.Io.Mutex = .init,
     closed: bool = false,
@@ -97,6 +98,7 @@ pub const Store = struct {
             .shard = shard,
             .devices = devices,
             .file_count = 1,
+            .region = region,
         };
     }
 
@@ -152,6 +154,7 @@ pub const Store = struct {
             .shard = shard,
             .devices = devices,
             .file_count = count,
+            .region = metadata.region,
         };
     }
 
@@ -363,7 +366,7 @@ pub const Store = struct {
             }, if (position == self.file_count - 1) .active else .sealed, previous, options.max_segment_size) catch |err| return self.sourceFailure(err);
             source_bytes = try std.math.add(u64, source_bytes, scanner.length);
             while (scanner.next(scratch) catch |err| return self.sourceFailure(err)) |batch| {
-                try output.append(try compactBatch(&self.shard.generation.index, id, batch, filtered));
+                try output.append(try compactBatch(&self.shard.generation.index, position, batch, filtered));
             }
             if (scanner.has_tail) return self.sourceFailure(error.NeedsRecovery);
             previous = scanner.last_batch_id;
@@ -445,40 +448,19 @@ pub const Store = struct {
     }
 
     pub fn get(self: *Store, key: Key, output: []u8) !?[]const u8 {
-        try self.mutex.lock(self.io);
-        if (self.closed) {
-            self.mutex.unlock(self.io);
-            return error.Closed;
-        }
         if (self.shard.options.stats) |s| _ = s.get_calls.fetchAdd(1, .monotonic);
-        self.mutex.unlock(self.io);
-
         return self.shard.get(key, output);
     }
 
     pub fn getSized(self: *Store, key: Key, output: []u8, required: *usize) !?[]const u8 {
         required.* = 0;
-        try self.mutex.lock(self.io);
-        if (self.closed) {
-            self.mutex.unlock(self.io);
-            return error.Closed;
-        }
         if (self.shard.options.stats) |s| _ = s.get_calls.fetchAdd(1, .monotonic);
-        self.mutex.unlock(self.io);
-
         return self.shard.getSized(key, output, required);
     }
 
     pub fn getMany(self: *Store, requests: []const ReadRequest, results: []ReadResult) !void {
         std.debug.assert(requests.len == results.len);
-        try self.mutex.lock(self.io);
-        if (self.closed) {
-            self.mutex.unlock(self.io);
-            return error.Closed;
-        }
         if (self.shard.options.stats) |s| _ = s.get_calls.fetchAdd(requests.len, .monotonic);
-        self.mutex.unlock(self.io);
-
         return self.shard.getMany(requests, results);
     }
 

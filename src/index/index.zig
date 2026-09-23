@@ -13,7 +13,6 @@ const file_scan = @import("../recovery/file_scan.zig");
 const recovery = @import("../recovery/scan.zig");
 const Stats = @import("../stats.zig").Stats;
 
-/// Local coordinates packed into one key.
 const PackedKey = packed struct(u64) {
     local_x: u5,
     local_z: u5,
@@ -26,14 +25,17 @@ const Map = std.AutoHashMapUnmanaged(u64, Location);
 const Pending = std.AutoHashMapUnmanaged(u64, ?Location);
 
 pub const Location = struct {
-    segment_id: u64,
     offset: u64,
     batch_id: u64,
     stored_len: u32,
     raw_len: u32,
-    /// Hint for skipping unchanged writes.
     fingerprint: u32,
+    segment: u16,
 };
+
+comptime {
+    std.debug.assert(@sizeOf(Location) == 32);
+}
 
 pub fn fingerprint(compression: record.Compression, stored: []const u8) u32 {
     return @truncate(std.hash.Wyhash.hash(@intFromEnum(compression), stored));
@@ -60,6 +62,7 @@ pub const Index = struct {
     active_offset: usize = segment.encoded_len,
     has_tail: bool = false,
     stats: ?*Stats = null,
+    segment_ids: []const u64 = &.{},
 
     pub fn deinit(self: *Index) void {
         self.entries.deinit(self.allocator);
@@ -173,19 +176,20 @@ pub const Index = struct {
 
     fn readRecord(self: *const Index, key: Key, device: anytype, scratch: []u8) !?entry.Entry {
         const location = (try self.get(key)) orelse return null;
-        try self.verifySegmentHeader(device, location.segment_id);
+        try self.verifySegmentHeader(device, self.segment_ids[location.segment]);
         return try self.readRecordAt(location, key, device, scratch);
     }
 
-    fn apply(self: *Index, batch: recovery.Batch, segment_id: u64) !void {
-        var prepared = try self.prepare(batch, segment_id);
+    fn apply(self: *Index, batch: recovery.Batch, position: usize) !void {
+        var prepared = try self.prepare(batch, position);
         defer prepared.deinit();
 
         self.publish(&prepared);
     }
 
-    pub fn prepare(self: *Index, batch: recovery.Batch, segment_id: u64) !Prepared {
-        if (segment_id == 0) return error.InvalidSegmentId;
+    /// `position` is the segment's index in `segment_ids`.
+    pub fn prepare(self: *Index, batch: recovery.Batch, position: usize) !Prepared {
+        if (position >= self.segment_ids.len) return error.InvalidSegmentId;
         if (batch.id <= self.last_batch_id) return error.BatchOrder;
         if (batch.records.len == 0) return error.EmptyBatch;
         if (batch.records.len > commit.max_bytes) return error.BatchTooLarge;
@@ -215,7 +219,7 @@ pub const Index = struct {
             record_count += 1;
             const key = try packKey(item.key);
             const location: ?Location = if (item.header.kind == .delete) null else .{
-                .segment_id = segment_id,
+                .segment = @intCast(position),
                 .offset = try std.math.add(u64, start, offset),
                 .batch_id = batch.id,
                 .stored_len = item.header.stored_len,
@@ -304,6 +308,7 @@ fn rebuildSource(
         .region = metadata.region,
         .generation = metadata.generation,
         .max_keys = max_keys,
+        .segment_ids = metadata.segments,
     };
     errdefer index.deinit();
 
@@ -326,7 +331,7 @@ fn rebuildSource(
             try recovery.Scanner.init(source, expected, mode, index.last_batch_id);
 
         while (if (files) try scanner.next(scratch) else try scanner.next()) |batch| {
-            try index.apply(batch, id);
+            try index.apply(batch, position);
         }
 
         if (active) {

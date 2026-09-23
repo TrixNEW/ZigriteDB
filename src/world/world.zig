@@ -38,6 +38,8 @@ pub const World = struct {
     changed: std.Io.Condition = .init,
     missing: [256]?Region = .{null} ** 256,
     clock: u64 = 0,
+    positions: std.AutoHashMapUnmanaged(Region, u32) = .empty,
+    loads: usize = 0,
 
     const Slot = struct {
         region: Region,
@@ -57,6 +59,8 @@ pub const World = struct {
         errdefer allocator.free(slots);
 
         var result: World = .{ .allocator = allocator, .io = io, .directory = directory, .options = options, .slots = slots };
+        try result.positions.ensureTotalCapacity(allocator, @intCast(options.max_open_shards));
+        errdefer result.positions.deinit(allocator);
         if (options.cache.bytes > 0) {
             const cache = try allocator.create(cache_module.Cache);
             errdefer allocator.destroy(cache);
@@ -331,13 +335,12 @@ pub const World = struct {
     }
 
     fn find(self: *World, region: Region) ?usize {
-        for (self.slots[0..self.count], 0..) |slot, i| {
-            if (std.meta.eql(slot.region, region)) return i;
-        }
-        return null;
+        const i = self.positions.get(region) orelse return null;
+        return i;
     }
 
     fn busy(self: *World, region: Region) bool {
+        if (self.loads == 0) return false;
         for (self.slots[0..self.count]) |slot| {
             if (!slot.loading) continue;
             if (std.meta.eql(slot.region, region)) return true;
@@ -349,14 +352,10 @@ pub const World = struct {
     fn unpin(self: *World, store: *Store) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        for (self.slots[0..self.count]) |*slot| {
-            if (slot.loading or slot.store != store) continue;
-            std.debug.assert(slot.users != 0);
-            slot.users -= 1;
-            self.changed.broadcast(self.io);
-            return;
-        }
-        unreachable;
+        const slot = &self.slots[self.find(store.region).?];
+        std.debug.assert(!slot.loading and slot.store == store and slot.users != 0);
+        slot.users -= 1;
+        self.changed.broadcast(self.io);
     }
 
     fn hasIdle(self: *World) bool {
@@ -397,12 +396,15 @@ pub const World = struct {
         }
         self.clock += 1;
         self.slots[self.count] = .{ .region = region, .store = undefined, .users = 1, .last_used = self.clock, .loading = true, .evicting = evicting };
+        self.positions.putAssumeCapacity(region, @intCast(self.count));
         self.count += 1;
+        self.loads += 1;
 
         self.mutex.unlock(self.io);
         const opened = self.openRegion(region, create, victim);
         self.mutex.lockUncancelable(self.io);
         defer self.changed.broadcast(self.io);
+        self.loads -= 1;
 
         const i = self.find(region).?;
         const store = (opened catch |err| {
@@ -420,8 +422,11 @@ pub const World = struct {
     }
 
     fn removeAt(self: *World, i: usize) void {
+        _ = self.positions.remove(self.slots[i].region);
         self.count -= 1;
+        if (i == self.count) return;
         self.slots[i] = self.slots[self.count];
+        self.positions.getPtr(self.slots[i].region).?.* = @intCast(i);
     }
 
     fn idleIndex(self: *World) ?usize {
@@ -487,6 +492,7 @@ pub const World = struct {
             self.options.shard.cache = null;
         }
         self.allocator.free(self.slots);
+        self.positions.deinit(self.allocator);
         self.directory.deinit();
         self.count = 0;
         self.closed = true;

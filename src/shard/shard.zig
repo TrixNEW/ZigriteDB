@@ -21,7 +21,6 @@ pub const Options = struct {
     durability: writer_module.Durability = .sync,
     stats: ?*Stats = null,
     cache: ?*Cache = null,
-    /// Skip writes that would not change a key.
     skip_unchanged: bool = false,
 
     pub fn validate(self: Options) !void {
@@ -116,6 +115,7 @@ pub fn Shard(comptime Device: type) type {
                     .generation = header.generation,
                     .max_keys = options.max_keys,
                     .stats = options.stats,
+                    .segment_ids = ids,
                 },
                 .devices = devices,
                 .segment_ids = ids,
@@ -176,6 +176,7 @@ pub fn Shard(comptime Device: type) type {
             );
             errdefer index.deinit();
             index.stats = options.stats;
+            index.segment_ids = ids;
 
             if (index.has_tail) return error.NeedsRecovery;
 
@@ -274,13 +275,12 @@ pub fn Shard(comptime Device: type) type {
                 .id = batch.entries[0].header.batch_id,
                 .records = bytes[0 .. bytes.len - commit.commit_len],
                 .end_offset = std.math.cast(usize, end) orelse return error.InvalidLength,
-            }, self.writer.header.segment_id);
+            }, self.generation.segment_count - 1);
             defer prepared.deinit();
 
             const result = try self.writer.appendEncoded(bytes, self.options.durability);
             self.generation.index.publish(&prepared);
             self.generation.index.active_offset = @intCast(result.end);
-
             return result;
         }
 
@@ -292,14 +292,10 @@ pub fn Shard(comptime Device: type) type {
 
             const generation = self.generation;
             const location = (try generation.index.get(key)) orelse return null;
+            if (location.segment >= generation.segment_count) return error.IndexMismatch;
 
-            for (generation.segment_ids[0..generation.segment_count], generation.devices[0..generation.segment_count]) |id, device| {
-                if (id != location.segment_id) continue;
-                generation.readers += 1;
-                return .{ .generation = generation, .device = device, .location = location };
-            }
-
-            return error.IndexMismatch;
+            generation.readers += 1;
+            return .{ .generation = generation, .device = generation.devices[location.segment], .location = location };
         }
 
         fn unpin(self: *Self, generation: *Generation) void {
@@ -323,14 +319,8 @@ pub fn Shard(comptime Device: type) type {
                     slot.* = null;
                     continue;
                 };
-                var position: ?u16 = null;
-                for (generation.segment_ids[0..generation.segment_count], 0..) |id, i| {
-                    if (id == location.segment_id) {
-                        position = @intCast(i);
-                        break;
-                    }
-                }
-                slot.* = .{ .segment_position = position orelse return error.IndexMismatch, .location = location };
+                if (location.segment >= generation.segment_count) return error.IndexMismatch;
+                slot.* = .{ .segment_position = location.segment, .location = location };
                 hits += 1;
             }
 
@@ -355,7 +345,6 @@ pub fn Shard(comptime Device: type) type {
             return value;
         }
 
-        /// Checks whether a write would leave the key unchanged.
         pub fn unchanged(self: *Self, item: entry.Entry) !bool {
             const pinned = (try self.pin(item.key)) orelse return item.header.kind == .delete;
             defer self.unpin(pinned.generation);
@@ -374,7 +363,6 @@ pub fn Shard(comptime Device: type) type {
             return stored.header.compression == item.header.compression and std.mem.eql(u8, stored.value, item.value);
         }
 
-        /// Returns a sorted key snapshot.
         pub fn keys(self: *Self, allocator: std.mem.Allocator, filter: KeyFilter) ![]Key {
             var list: std.ArrayListUnmanaged(Key) = .empty;
             errdefer list.deinit(allocator);
@@ -422,7 +410,7 @@ pub fn Shard(comptime Device: type) type {
             sortByLocation(order[0..n], slots[0..n]);
 
             var stack_scratch: [inline_scratch_len]u8 = undefined;
-            var verified_segment: ?u64 = null;
+            var verified_segment: ?u16 = null;
 
             for (order[0..n]) |idx| {
                 const slot = slots[idx] orelse continue;
@@ -435,9 +423,9 @@ pub fn Shard(comptime Device: type) type {
                     continue;
                 };
 
-                if (verified_segment == null or verified_segment.? != slot.location.segment_id) {
-                    try generation.index.verifySegmentHeader(device, slot.location.segment_id);
-                    verified_segment = slot.location.segment_id;
+                if (verified_segment == null or verified_segment.? != slot.segment_position) {
+                    try generation.index.verifySegmentHeader(device, generation.segment_ids[slot.segment_position]);
+                    verified_segment = slot.segment_position;
                 }
 
                 const required = slot.location.raw_len;
@@ -470,7 +458,7 @@ pub fn Shard(comptime Device: type) type {
         fn locationLessThan(slots: []const ?BatchSlot, a_idx: u8, b_idx: u8) bool {
             const a = slots[a_idx] orelse return false;
             const b = slots[b_idx] orelse return true;
-            if (a.location.segment_id != b.location.segment_id) return a.location.segment_id < b.location.segment_id;
+            if (a.location.segment != b.location.segment) return a.location.segment < b.location.segment;
             return a.location.offset < b.location.offset;
         }
 

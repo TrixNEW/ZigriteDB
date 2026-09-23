@@ -33,12 +33,10 @@ pub const Result = struct {
     output_bytes: u64 = 0,
 };
 
-/// Copies committed data into an empty directory and preserves the source.
 pub fn recoverTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, destination: std.Io.Dir, options: Options) !Result {
     return copyTo(false, allocator, io, source, destination, options);
 }
 
-/// Removes obsolete records while preserving the source and batch sequence.
 pub fn compactTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, destination: std.Io.Dir, options: Options) !Result {
     return copyTo(true, allocator, io, source, destination, options);
 }
@@ -120,7 +118,7 @@ fn copyTo(comptime compact: bool, allocator: std.mem.Allocator, io: std.Io, sour
         while (try scanner.next(scratch)) |batch| {
             const size = batch.records.len + commit.commit_len;
             const data = if (compact)
-                try compactBatch(&live.?, id, batch, filtered)
+                try compactBatch(&live.?, position, batch, filtered)
             else
                 scratch[segment.encoded_len..][0..size];
             if (compact) try merged.append(data) else try target.?.writeAll(data, offset);

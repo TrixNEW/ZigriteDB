@@ -106,7 +106,7 @@ test "rebuild follows the manifest across segments" {
     var index = try db.index.rebuild(testing.allocator, manifest, &.{ first[0..first_end], second[0..second_end] }, 1);
     defer index.deinit();
 
-    try testing.expectEqual(@as(u64, 2), (try index.get(item(1, 0, "").key)).?.segment_id);
+    try testing.expectEqual(@as(u16, 1), (try index.get(item(1, 0, "").key)).?.segment);
     try testing.expectError(error.IncompleteBatch, db.index.rebuild(
         testing.allocator,
         manifest,
@@ -239,7 +239,7 @@ test "replacement batches reuse index capacity without early publication" {
         .id = 2,
         .records = bytes[end .. next - db.batch.commit_len],
         .end_offset = next,
-    }, 1);
+    }, 0);
     defer prepared.deinit();
     try testing.expectEqual(capacity, index.entries.capacity());
     try testing.expect((try index.get(initial[0].key)) != null);
@@ -294,7 +294,6 @@ test "negative regions still pack local coordinates within 0..31" {
     const encoded = try (db.segment.Header{ .segment_id = 1, .generation = 1, .region = region }).encode();
     @memcpy(bytes[0..encoded.len], &encoded);
 
-    // these two sit at opposite corners of region (-1,-1), which spans -32..-1
     const corner_min = db.entry.Entry{
         .header = .{ .kind = .put, .batch_id = 1, .stored_len = 3, .raw_len = 3 },
         .key = .{ .dimension = 0, .chunk_x = -32, .chunk_z = -32, .component = .metadata },

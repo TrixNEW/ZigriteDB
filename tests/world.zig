@@ -159,15 +159,15 @@ test "busy shards stay pinned while other regions write and close waits" {
     const first = world.slots[0].store;
     _ = try world.write(.{ .entries = &.{item(1, 32, "second")} });
 
-    first.mutex.lockUncancelable(io);
+    first.shard.mutex.lockUncancelable(io);
     var locked = true;
-    defer if (locked) first.mutex.unlock(io);
+    defer if (locked) first.shard.mutex.unlock(io);
     var read_result: anyerror!void = error.Unexpected;
     const reader = try std.Thread.spawn(.{}, readPinned, .{ &world, &read_result });
     var joined = false;
     defer if (!joined) reader.join();
     defer if (locked) {
-        first.mutex.unlock(io);
+        first.shard.mutex.unlock(io);
         locked = false;
     };
     while (true) {
@@ -195,7 +195,7 @@ test "busy shards stay pinned while other regions write and close waits" {
         std.Thread.yield() catch {};
     }
     const rejected = world.get(item(1, 64, "").key, &output);
-    first.mutex.unlock(io);
+    first.shard.mutex.unlock(io);
     locked = false;
     closer.join();
     try testing.expectError(error.Closed, rejected);

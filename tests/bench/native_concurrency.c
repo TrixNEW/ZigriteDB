@@ -16,6 +16,7 @@ typedef struct {
     pthread_mutex_t *submit_lock;
     double *samples;
     int library_ids;
+    size_t value_len;
     int failed;
 } Task;
 
@@ -37,10 +38,15 @@ static void *readTask(void *arg) {
 
 static void *writeTask(void *arg) {
     Task *task = arg;
-    uint8_t value[64];
-    memset(value, (unsigned char)task->thread_index, sizeof(value));
+    static _Thread_local uint8_t value[65536];
+    size_t len = task->value_len ? task->value_len : 64;
+    uint32_t random = (uint32_t)task->thread_index + 1;
+    for (size_t b = 0; b < len; ++b) {
+        random = random * 1664525u + 1013904223u;
+        value[b] = (uint8_t)(random >> 24);
+    }
     for (size_t i = 0; i < task->iterations; ++i) {
-        zg_operation op = {{0, task->region_x, (int32_t)i, 0, 1}, ZG_PUT, value, sizeof(value)};
+        zg_operation op = {{0, task->region_x, (int32_t)i, 0, 1}, ZG_PUT, value, len};
         double before, elapsed;
         int status;
         if (task->library_ids) {
@@ -163,6 +169,41 @@ static void crossRegionReads(const char *base, size_t total_iterations, int thre
     check(zg_close(handle));
 }
 
+static void readsDuringWrites(const char *base, size_t total_iterations, int threads) {
+    if (threads < 2) return;
+    zg_handle *handle = openScenario(base, "reads-during-writes", 4);
+    uint8_t value[64];
+    memset(value, 7, sizeof(value));
+    zg_operation seed = {{0, 0, 0, 0, 2}, ZG_PUT, value, sizeof(value)};
+    check(zg_write(handle, 1, &seed, 1));
+
+    size_t per_thread = total_iterations / (size_t)threads;
+    if (per_thread < 1) per_thread = 1;
+    Task tasks[MAX_THREADS];
+    for (int t = 0; t < threads; ++t) {
+        tasks[t] = (Task){
+            .handle = handle, .thread_index = t, .iterations = t == 0 ? per_thread : per_thread * 64,
+            .key = {0, 0, 0, 0, 2}, .library_ids = 1, .value_len = t == 0 ? 16384 : 0,
+        };
+        tasks[t].samples = malloc(tasks[t].iterations * sizeof(double));
+        if (!tasks[t].samples) exit(1);
+    }
+    pthread_t handles[MAX_THREADS];
+    double started = now();
+    for (int t = 0; t < threads; ++t) {
+        if (pthread_create(&handles[t], NULL, t == 0 ? writeTask : readTask, &tasks[t])) exit(1);
+    }
+    for (int t = 0; t < threads; ++t) pthread_join(handles[t], NULL);
+    double elapsed = now() - started;
+    for (int t = 0; t < threads; ++t) {
+        if (tasks[t].failed) exit(1);
+    }
+    reportMerged("reads_during_writes_same_region", tasks + 1, threads - 1, elapsed);
+    printf(",");
+    for (int t = 0; t < threads; ++t) free(tasks[t].samples);
+    check(zg_close(handle));
+}
+
 static uint64_t fsyncCount(zg_handle *handle) {
     zg_stats stats;
     check(zg_stats_get(handle, &stats));
@@ -234,6 +275,7 @@ int main(int argc, char **argv) {
     printf(",");
     crossRegionReads(argv[1], (size_t)batches, threads);
     printf(",");
+    readsDuringWrites(argv[1], (size_t)batches, threads);
     sameRegionWrites(argv[1], (size_t)batches, threads, 0);
     printf(",");
     sameRegionWrites(argv[1], (size_t)batches, threads, 1);
