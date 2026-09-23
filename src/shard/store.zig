@@ -45,7 +45,6 @@ pub const Store = struct {
     mutex: std.Io.Mutex = .init,
     writer_mutex: std.Io.Mutex = .init,
     closed: bool = false,
-    // Group commit shares one fsync among waiting writers.
     commit_mutex: std.Io.Mutex = .init,
     committed: std.Io.Condition = .init,
     appended_ticket: u64 = 0,
@@ -59,6 +58,7 @@ pub const Store = struct {
         var directory = try Directory.init(dir, io);
         errdefer directory.deinit();
 
+        try discardUnpublished(&directory);
         var iterator = directory.dir.iterate();
         if (try iterator.next(io) != null) return error.DirectoryNotEmpty;
 
@@ -100,6 +100,28 @@ pub const Store = struct {
             .file_count = 1,
             .region = region,
         };
+    }
+
+    fn discardUnpublished(directory: *Directory) !void {
+        const io = directory.io;
+        const first = "0000000000000001-0000000000000001.segment";
+        var has_segment = false;
+        var has_temporary = false;
+        var iterator = directory.dir.iterate();
+        while (try iterator.next(io)) |item| {
+            if (item.kind == .file and std.mem.eql(u8, item.name, first)) {
+                has_segment = true;
+            } else if (item.kind == .file and std.mem.eql(u8, item.name, "MANIFEST.tmp")) {
+                has_temporary = true;
+            } else return;
+        }
+        if (has_segment) {
+            const stat = try directory.dir.statFile(io, first, .{ .follow_symlinks = false });
+            if (stat.size > segment.encoded_len) return;
+            try directory.dir.deleteFile(io, first);
+        }
+        if (has_temporary) try directory.dir.deleteFile(io, "MANIFEST.tmp");
+        if (has_segment or has_temporary) try directory.syncEntries();
     }
 
     pub fn open(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: Options) !Store {
@@ -158,12 +180,10 @@ pub const Store = struct {
         };
     }
 
-    /// Sync writes share one fsync among concurrent callers.
     pub fn write(self: *Store, batch: WriteBatch) !writer.AppendResult {
         return self.commitWrite(batch, null);
     }
 
-    /// Writes with the next batch ID for this region.
     pub fn writeNext(self: *Store, entries: []Entry) !writer.AppendResult {
         return self.commitWrite(.{ .entries = entries }, entries);
     }
@@ -241,7 +261,6 @@ pub const Store = struct {
         }
     }
 
-    /// Syncs all appends before devices are swapped or closed.
     fn commitBarrier(self: *Store) !void {
         self.commit_mutex.lockUncancelable(self.io);
         defer self.commit_mutex.unlock(self.io);

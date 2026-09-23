@@ -358,3 +358,49 @@ test "getMany spans as many regions as it has requests, in the caller's order" {
     }
     try world.close();
 }
+
+test "a region whose creation crashed before its manifest was published is rebuilt by the next write" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    const name = "00000000-00000000-00000000.region";
+    for ([_]usize{ 0, db.segment.encoded_len }) |segment_len| {
+        for ([_]bool{ false, true }) |temporary| {
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            try tmp.dir.createDir(io, name, .default_dir);
+            const region_dir = try tmp.dir.openDir(io, name, .{});
+            defer region_dir.close(io);
+            const segment_file = try region_dir.createFile(io, "0000000000000001-0000000000000001.segment", .{});
+            var zeros = [_]u8{0} ** db.segment.encoded_len;
+            try segment_file.writePositionalAll(io, zeros[0..segment_len], 0);
+            segment_file.close(io);
+            if (temporary) (try region_dir.createFile(io, "MANIFEST.tmp", .{})).close(io);
+
+            var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+            defer world.deinit();
+            var output: [8]u8 = undefined;
+            _ = try world.write(.{ .entries = &.{item(1, 0, "healed")} });
+            try testing.expectEqualStrings("healed", (try world.get(item(1, 0, "").key, &output)).?);
+            try world.close();
+        }
+    }
+}
+
+test "a region with records but no manifest is never discarded" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    const name = "00000000-00000000-00000000.region";
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, name, .default_dir);
+    const region_dir = try tmp.dir.openDir(io, name, .{});
+    defer region_dir.close(io);
+    const segment_file = try region_dir.createFile(io, "0000000000000001-0000000000000001.segment", .{});
+    var bytes = [_]u8{1} ** (db.segment.encoded_len + 1);
+    try segment_file.writePositionalAll(io, &bytes, 0);
+    segment_file.close(io);
+
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+    defer world.deinit();
+    try testing.expectError(error.MissingManifest, world.write(.{ .entries = &.{item(1, 0, "no")} }));
+    const stat = try region_dir.statFile(io, "0000000000000001-0000000000000001.segment", .{});
+    try testing.expectEqual(@as(u64, bytes.len), stat.size);
+}

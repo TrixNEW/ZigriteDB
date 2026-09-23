@@ -31,6 +31,7 @@ typedef struct {
     uint32_t max_segments, batch_buffer_size;
     uint64_t max_segment_size;
     uint32_t buffered, compression_threshold;
+    /* Budget for cached values only; cache bookkeeping and allocator overhead are extra. */
     uint64_t cache_bytes;
     uint32_t cache_shards;
     uint32_t skip_unchanged;

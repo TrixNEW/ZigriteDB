@@ -1,4 +1,3 @@
-"""Run isolated synthetic workloads on the filesystem chosen with --directory."""
 import argparse
 import json
 import os
@@ -17,6 +16,7 @@ def main():
     parser.add_argument("--batches", type=int, default=2048)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--cache-mb", type=int, nargs="*", default=[1, 16])
     args = parser.parse_args()
     if args.batches < 128 or args.batches > 1000000 or args.batches % 16 or args.repeats < 1:
         parser.error("use 128..1000000 batches in multiples of 16 and at least one repeat")
@@ -37,14 +37,30 @@ def main():
                 if stats and stats.get("compressed_bytes_written"):
                     result["compression_ratio"] = stats["raw_bytes_written"] / stats["compressed_bytes_written"]
                 results.append(result)
-    for repeat in range(args.repeats):
-        with tempfile.TemporaryDirectory(prefix="zigritedb-bench-concurrency-", dir=args.directory) as path:
-            run = subprocess.run([str(args.concurrency_binary.resolve()), path, str(args.batches), str(args.threads)],
-                                 env=env, check=True, capture_output=True, text=True, timeout=600)
-            result = json.loads(run.stdout)
-            result["binary"] = "native_bench_concurrency"
-            result["repeat"] = repeat
-            results.append(result)
+    for cache_mb in [0] + args.cache_mb:
+        for repeat in range(args.repeats):
+            with tempfile.TemporaryDirectory(prefix="zigritedb-bench-concurrency-", dir=args.directory) as path:
+                run = subprocess.run([str(args.concurrency_binary.resolve()), path, str(args.batches), str(args.threads)]
+                                     + ([str(cache_mb)] if cache_mb else []),
+                                     env=env, check=True, capture_output=True, text=True, timeout=600)
+                result = json.loads(run.stdout)
+                result["binary"] = "native_bench_concurrency"
+                result["cache_mb"] = cache_mb
+                result["repeat"] = repeat
+                results.append(result)
+    for cache_mb in args.cache_mb:
+        for repeat in range(args.repeats):
+            with tempfile.TemporaryDirectory(prefix="zigritedb-bench-cache-", dir=args.directory) as path:
+                run = subprocess.run([str(args.binary.resolve()), path, str(args.batches), "sync", str(cache_mb)],
+                                     env=env, check=True, capture_output=True, text=True, timeout=600)
+                result = json.loads(run.stdout)
+                result["binary"] = "native_bench"
+                result["cache_mb"] = cache_mb
+                result["repeat"] = repeat
+                stats = result["stats"]
+                lookups = stats["cache_hits"] + stats["cache_misses"]
+                result["cache_hit_rate"] = stats["cache_hits"] / lookups if lookups else 0.0
+                results.append(result)
     print(json.dumps({"platform": platform.platform(), "synthetic": True,
                       "group_batches_per_call": 16, "results": results}, indent=2))
 
