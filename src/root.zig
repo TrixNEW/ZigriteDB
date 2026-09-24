@@ -1,12 +1,14 @@
 const std = @import("std");
 
 pub const batch = @import("batch/commit.zig");
+pub const cache = @import("cache/value.zig");
 pub const WriteBatch = @import("batch/write.zig").WriteBatch;
 pub const lz4 = @import("compression/lz4.zig");
 pub const entry = @import("format/entry.zig");
 pub const Key = @import("format/key.zig").Key;
 pub const Component = @import("format/key.zig").Component;
 pub const Region = @import("format/key.zig").Region;
+pub const KeyFilter = @import("format/key.zig").KeyFilter;
 pub const manifest = @import("format/manifest.zig");
 pub const record = @import("format/record.zig");
 pub const segment = @import("format/segment.zig");
@@ -19,6 +21,10 @@ pub const inspection = @import("recovery/inspect.zig");
 pub const recovery = @import("recovery/scan.zig");
 pub const shard = @import("shard/shard.zig");
 pub const Store = @import("shard/store.zig").Store;
+pub const ReadRequest = @import("shard/store.zig").ReadRequest;
+pub const ReadStatus = @import("shard/store.zig").ReadStatus;
+pub const ReadResult = @import("shard/store.zig").ReadResult;
+pub const Stats = @import("stats.zig").Stats;
 pub const directory = @import("storage/directory.zig");
 pub const publication = @import("storage/publication.zig");
 pub const reclamation = @import("storage/reclamation.zig");
@@ -26,6 +32,9 @@ pub const segment_writer = @import("storage/writer.zig");
 pub const maintenance = @import("world/maintenance.zig");
 pub const World = @import("world/world.zig").World;
 pub const WorldOptions = @import("world/world.zig").Options;
+pub const OverlayWorld = @import("world/overlay.zig").OverlayWorld;
+pub const getChunkComponents = @import("world/chunk.zig").getChunkComponents;
+pub const ChunkComponent = @import("world/chunk.zig").ChunkComponent;
 
 test {
     std.testing.refAllDecls(@This());

@@ -195,6 +195,371 @@ test "losing unsynced writes preserves the last flushed batch" {
         try testing.expectEqualStrings(if (flush) "new" else "saved", (try reopened.get(item(1, 0, "").key, &value)).?);
         const extra = try reopened.get(item(2, 1, "").key, &value);
         if (flush) try testing.expectEqualStrings("extra", extra.?) else try testing.expectEqual(null, extra);
-        try testing.expectEqual(@as(u64, if (flush) 2 else 1), reopened.index.last_batch_id);
+        try testing.expectEqual(@as(u64, if (flush) 2 else 1), reopened.generation.index.last_batch_id);
     }
+}
+
+const ReadResult = struct { len: ?usize = null, err: ?anyerror = null };
+
+fn concurrentRead(shard: *Shard, key: db.Key, buffer: []u8, result: *ReadResult) void {
+    if (shard.get(key, buffer)) |value| {
+        result.len = if (value) |v| v.len else null;
+    } else |err| {
+        result.err = err;
+    }
+}
+
+test "concurrent same-key reads all see the correct value" {
+    var device: Device = .{};
+    var shard = try Shard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "shared")} });
+    const key = item(1, 0, "").key;
+
+    var buffers: [8][128]u8 = undefined;
+    var results: [8]ReadResult = undefined;
+    for (&results) |*r| r.* = .{};
+    var threads: [8]std.Thread = undefined;
+    for (0..8) |i| threads[i] = try std.Thread.spawn(.{}, concurrentRead, .{ &shard, key, &buffers[i], &results[i] });
+    for (threads) |t| t.join();
+
+    for (0..8) |i| {
+        try testing.expectEqual(null, results[i].err);
+        try testing.expectEqualStrings("shared", buffers[i][0 .. results[i].len orelse 0]);
+    }
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+}
+
+test "a corrupted read releases its pin so close does not hang" {
+    var device: Device = .{};
+    var shard = try Shard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "old")} });
+
+    device.bytes[db.segment.encoded_len + 10] ^= 1;
+
+    var output: [128]u8 = undefined;
+    try testing.expectError(error.ChecksumMismatch, shard.get(item(1, 0, "").key, &output));
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+
+    try shard.close();
+}
+
+test "getMany resolves multiple keys in one region with one pin" {
+    var device: Device = .{};
+    var shard = try Shard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "aaa")} });
+    _ = try shard.write(.{ .entries = &.{item(2, 1, "bb")} });
+    _ = try shard.write(.{ .entries = &.{item(3, 2, "c")} });
+
+    var out0: [16]u8 = undefined;
+    var out1: [16]u8 = undefined;
+    var out2: [16]u8 = undefined;
+    const requests = [_]Shard.ReadRequest{
+        .{ .key = item(1, 0, "").key, .output = &out0 },
+        .{ .key = item(1, 1, "").key, .output = &out1 },
+        .{ .key = item(1, 2, "").key, .output = &out2 },
+    };
+    var results: [3]Shard.ReadResult = undefined;
+    try shard.getMany(&requests, &results);
+
+    try testing.expectEqual(Shard.ReadStatus.ok, results[0].status);
+    try testing.expectEqualStrings("aaa", out0[0..results[0].value.len]);
+    try testing.expectEqual(Shard.ReadStatus.ok, results[1].status);
+    try testing.expectEqualStrings("bb", out1[0..results[1].value.len]);
+    try testing.expectEqual(Shard.ReadStatus.ok, results[2].status);
+    try testing.expectEqualStrings("c", out2[0..results[2].value.len]);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+}
+
+test "getMany reports independent status per key" {
+    var device: Device = .{};
+    var shard = try Shard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "hello")} });
+
+    var big: [16]u8 = undefined;
+    var small: [2]u8 = undefined;
+    var miss_out: [16]u8 = undefined;
+    const requests = [_]Shard.ReadRequest{
+        .{ .key = item(1, 0, "").key, .output = &big },
+        .{ .key = item(1, 0, "").key, .output = &small },
+        .{ .key = item(1, 5, "").key, .output = &miss_out },
+    };
+    var results: [3]Shard.ReadResult = undefined;
+    try shard.getMany(&requests, &results);
+
+    try testing.expectEqual(Shard.ReadStatus.ok, results[0].status);
+    try testing.expectEqualStrings("hello", big[0..results[0].value.len]);
+    try testing.expectEqual(Shard.ReadStatus.buffer_too_small, results[1].status);
+    try testing.expectEqual(@as(usize, 5), results[1].required);
+    try testing.expectEqual(Shard.ReadStatus.not_found, results[2].status);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+}
+
+test "getMany rejects a batch over the key limit" {
+    var device: Device = .{};
+    var shard = try Shard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+
+    var requests: [Shard.max_batch_keys + 1]Shard.ReadRequest = undefined;
+    var results: [Shard.max_batch_keys + 1]Shard.ReadResult = undefined;
+    var out: [1]u8 = undefined;
+    for (&requests) |*r| r.* = .{ .key = item(1, 0, "").key, .output = &out };
+    try testing.expectError(error.TooManyKeys, shard.getMany(&requests, &results));
+}
+
+fn concurrentGetMany(shard: *Shard, requests: []const Shard.ReadRequest, results: []Shard.ReadResult, err: *?anyerror) void {
+    shard.getMany(requests, results) catch |e| {
+        err.* = e;
+        return;
+    };
+}
+
+test "getMany runs alongside a plain get on the same shard" {
+    var device: Device = .{};
+    var shard = try Shard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "shared")} });
+    _ = try shard.write(.{ .entries = &.{item(2, 1, "other")} });
+
+    var many_out: [2][16]u8 = undefined;
+    const requests = [_]Shard.ReadRequest{
+        .{ .key = item(1, 0, "").key, .output = &many_out[0] },
+        .{ .key = item(1, 1, "").key, .output = &many_out[1] },
+    };
+    var many_results: [2]Shard.ReadResult = undefined;
+    var many_err: ?anyerror = null;
+
+    var single_result: ReadResult = .{};
+    var single_out: [16]u8 = undefined;
+
+    const many_thread = try std.Thread.spawn(.{}, concurrentGetMany, .{ &shard, &requests, &many_results, &many_err });
+    concurrentRead(&shard, item(1, 0, "").key, &single_out, &single_result);
+    many_thread.join();
+
+    try testing.expectEqual(null, many_err);
+    try testing.expectEqual(Shard.ReadStatus.ok, many_results[0].status);
+    try testing.expectEqual(Shard.ReadStatus.ok, many_results[1].status);
+    try testing.expectEqual(null, single_result.err);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+}
+
+const Gated = struct {
+    inner: Device = .{},
+    armed: std.atomic.Value(bool) = .init(false),
+    paused: std.atomic.Value(bool) = .init(false),
+    released: std.atomic.Value(bool) = .init(false),
+
+    pub fn length(self: *Gated) !u64 {
+        return self.inner.length();
+    }
+
+    pub fn readExact(self: *Gated, output: []u8, offset: u64) !void {
+        if (offset == 0 and self.armed.swap(false, .acq_rel)) {
+            self.paused.store(true, .release);
+            while (!self.released.load(.acquire)) std.Thread.yield() catch {};
+        }
+        return self.inner.readExact(output, offset);
+    }
+
+    pub fn writeAll(self: *Gated, bytes: []const u8, offset: u64) !void {
+        return self.inner.writeAll(bytes, offset);
+    }
+
+    pub fn sync(self: *Gated) !void {
+        return self.inner.sync();
+    }
+
+    fn waitPaused(self: *Gated) void {
+        while (!self.paused.load(.acquire)) std.Thread.yield() catch {};
+    }
+};
+const GatedShard = db.shard.Shard(*Gated);
+
+fn gatedGet(shard: *GatedShard, key: db.Key, buffer: []u8, result: *ReadResult) void {
+    if (shard.get(key, buffer)) |value| {
+        result.len = if (value) |v| v.len else null;
+    } else |err| {
+        result.err = err;
+    }
+}
+
+fn gatedGetMany(shard: *GatedShard, requests: []const GatedShard.ReadRequest, results: []GatedShard.ReadResult, err: *?anyerror) void {
+    shard.getMany(requests, results) catch |e| {
+        err.* = e;
+    };
+}
+
+fn churn(shard: *GatedShard, first_id: u64) !void {
+    _ = try shard.write(.{ .entries = &.{item(first_id, 0, "a much longer replacement value")} });
+    for (0..2) |round| {
+        var entries: [12]db.entry.Entry = undefined;
+        for (&entries, 0..) |*value, i| value.* = item(first_id + 1 + round, @intCast(1 + round * 12 + i), "grow");
+        _ = try shard.write(.{ .entries = &entries });
+    }
+    _ = try shard.write(.{ .entries = &.{item(first_id + 3, 0, null)} });
+}
+
+test "a pinned get reads its captured location while writers overwrite, rehash and delete" {
+    var device: Gated = .{};
+    var shard = try GatedShard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "old")} });
+
+    device.armed.store(true, .release);
+    var output: [3]u8 = undefined;
+    var result: ReadResult = .{};
+    const reader = try std.Thread.spawn(.{}, gatedGet, .{ &shard, item(1, 0, "").key, &output, &result });
+    device.waitPaused();
+    try churn(&shard, 2);
+    device.released.store(true, .release);
+    reader.join();
+
+    try testing.expectEqual(null, result.err);
+    try testing.expectEqualStrings("old", output[0..result.len.?]);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+    var fresh: [3]u8 = undefined;
+    try testing.expectEqual(null, try shard.get(item(1, 0, "").key, &fresh));
+}
+
+test "a pinned getMany reads its captured locations while writers overwrite, rehash and delete" {
+    var device: Gated = .{};
+    var shard = try GatedShard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{ item(1, 0, "old"), item(1, 30, "kept") } });
+
+    device.armed.store(true, .release);
+    var out0: [3]u8 = undefined;
+    var out1: [4]u8 = undefined;
+    const requests = [_]GatedShard.ReadRequest{
+        .{ .key = item(1, 0, "").key, .output = &out0 },
+        .{ .key = item(1, 30, "").key, .output = &out1 },
+    };
+    var results: [2]GatedShard.ReadResult = undefined;
+    var err: ?anyerror = null;
+    const reader = try std.Thread.spawn(.{}, gatedGetMany, .{ &shard, &requests, &results, &err });
+    device.waitPaused();
+    try churn(&shard, 2);
+    device.released.store(true, .release);
+    reader.join();
+
+    try testing.expectEqual(null, err);
+    try testing.expectEqual(GatedShard.ReadStatus.ok, results[0].status);
+    try testing.expectEqualStrings("old", results[0].value);
+    try testing.expectEqual(GatedShard.ReadStatus.ok, results[1].status);
+    try testing.expectEqualStrings("kept", results[1].value);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+}
+
+const NullPublisher = struct {
+    pub fn publish(_: NullPublisher, _: []const u8) !void {}
+};
+
+test "a pinned get survives segment rotation and a newer write to the new segment" {
+    var device: Gated = .{};
+    var next: Gated = .{};
+    var shard = try GatedShard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "old")} });
+
+    device.armed.store(true, .release);
+    var output: [16]u8 = undefined;
+    var result: ReadResult = .{};
+    const reader = try std.Thread.spawn(.{}, gatedGet, .{ &shard, item(1, 0, "").key, &output, &result });
+    device.waitPaused();
+    try shard.rotate(&next, 2, NullPublisher{});
+    _ = try shard.write(.{ .entries = &.{item(2, 0, "rotated")} });
+    device.released.store(true, .release);
+    reader.join();
+
+    try testing.expectEqual(null, result.err);
+    try testing.expectEqualStrings("old", output[0..result.len.?]);
+    var fresh: [16]u8 = undefined;
+    try testing.expectEqualStrings("rotated", (try shard.get(item(1, 0, "").key, &fresh)).?);
+}
+
+fn gatedClose(shard: *GatedShard, done: *std.atomic.Value(bool), result: *?anyerror) void {
+    shard.close() catch |err| {
+        result.* = err;
+    };
+    done.store(true, .release);
+}
+
+test "close waits for a pinned reader to finish its physical read" {
+    var device: Gated = .{};
+    var shard = try GatedShard.create(testing.allocator, testing.io, &device, header, options);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "old")} });
+
+    device.armed.store(true, .release);
+    var output: [16]u8 = undefined;
+    var result: ReadResult = .{};
+    const reader = try std.Thread.spawn(.{}, gatedGet, .{ &shard, item(1, 0, "").key, &output, &result });
+    device.waitPaused();
+
+    var closed: std.atomic.Value(bool) = .init(false);
+    var close_result: ?anyerror = null;
+    const closer = try std.Thread.spawn(.{}, gatedClose, .{ &shard, &closed, &close_result });
+    var probe: [16]u8 = undefined;
+    while (true) {
+        _ = shard.get(item(1, 0, "").key, &probe) catch |err| {
+            try testing.expectEqual(error.Closed, err);
+            break;
+        };
+        std.Thread.yield() catch {};
+    }
+    try testing.expect(!closed.load(.acquire));
+
+    device.released.store(true, .release);
+    reader.join();
+    closer.join();
+    try testing.expectEqual(null, result.err);
+    try testing.expectEqualStrings("old", output[0..result.len.?]);
+    try testing.expectEqual(null, close_result);
+}
+
+const aliases = [_]db.Key{
+    .{ .dimension = 0, .chunk_x = 32, .chunk_z = 0, .component = .metadata },
+    .{ .dimension = 0, .chunk_x = -32, .chunk_z = 0, .component = .metadata },
+    .{ .dimension = 1, .chunk_x = 0, .chunk_z = 0, .component = .metadata },
+    .{ .dimension = 0, .chunk_x = 0, .chunk_z = 32, .component = .metadata },
+    .{ .dimension = 0, .chunk_x = 0, .chunk_z = -32, .component = .metadata },
+    .{ .dimension = 0, .chunk_x = 32, .chunk_z = 32, .component = .metadata },
+};
+
+test "keys from another region never alias this region's packed index entries" {
+    var cache = try db.cache.Cache.init(testing.allocator, .{ .bytes = 4096, .shards = 1 });
+    defer cache.deinit();
+    var cached = options;
+    cached.cache = &cache;
+    var device: Device = .{};
+    var shard = try Shard.create(testing.allocator, testing.io, &device, header, cached);
+    defer shard.deinit();
+    _ = try shard.write(.{ .entries = &.{item(1, 0, "mine")} });
+
+    var output: [16]u8 = undefined;
+    try testing.expectEqualStrings("mine", (try shard.get(item(1, 0, "").key, &output)).?);
+
+    for (aliases) |alias| {
+        cache.put(testing.io, alias, 1, "theirs");
+        try testing.expectError(error.RegionMismatch, shard.generation.index.get(alias));
+        try testing.expectError(error.RegionMismatch, shard.get(alias, &output));
+        var required: usize = 0;
+        try testing.expectError(error.RegionMismatch, shard.getSized(alias, &output, &required));
+        try testing.expectEqual(@as(usize, 0), required);
+
+        const requests = [_]Shard.ReadRequest{
+            .{ .key = item(1, 0, "").key, .output = &output },
+            .{ .key = alias, .output = &output },
+        };
+        var results: [2]Shard.ReadResult = undefined;
+        try testing.expectError(error.RegionMismatch, shard.getMany(&requests, &results));
+
+        var entry = item(2, 0, "mine");
+        entry.key = alias;
+        try testing.expectError(error.RegionMismatch, shard.unchanged(entry));
+    }
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
 }

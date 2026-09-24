@@ -6,7 +6,7 @@ import signal
 import sys
 import tempfile
 
-from native_faults import API, Key, Operation
+from native_faults import API, Key, Operation, Stats
 
 
 def check(library, path):
@@ -16,9 +16,16 @@ def check(library, path):
     api.options.max_segment_size = 8192
     api.options.batch_buffer_size = 4096
     api.options.compression_threshold = 128
+    api.options.cache_bytes = 64 * 1024
     rng = random.Random(20260915)
     expected = {}
     handle = api.open(path)
+    last_stats = Stats()
+
+    def stats_snapshot():
+        current = Stats()
+        assert api.lib.zg_stats_get(handle, c.byref(current)) == 0
+        return current
 
     def verify():
         for x in range(96):
@@ -51,12 +58,17 @@ def check(library, path):
             if batch % 37 == 0:
                 assert api.lib.zg_compact_async(handle, 0, region, 0) == 0
                 assert api.lib.zg_maintenance_wait(handle) == 0
+            current = stats_snapshot()
+            assert current.get_calls >= last_stats.get_calls
+            assert current.writes >= last_stats.writes and current.writes > 0
+            last_stats = current
             if batch % 100 == 0:
                 verify()
                 result = api.lib.zg_close(handle)
                 handle = None
                 assert result == 0
                 handle = api.open(path)
+                last_stats = Stats()
                 verify()
         verify()
     finally:

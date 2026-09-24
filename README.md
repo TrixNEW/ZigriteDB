@@ -87,6 +87,11 @@ For other languages, link against `libzigritedb_native` and use
 [zigritedb.h](include/zigritedb.h). Libraries and headers are installed under
 `zig-out/lib` and `zig-out/include`.
 
+The C ABI is versioned by `ZG_ABI_VERSION`, which must equal `zg_abi_version()`.
+v0.3.0 is ABI 2: `zg_options` grew, so programs built against an ABI 1 header must be
+rebuilt. On Linux the soname is `libzigritedb_native.so.2`, so ABI 1 binaries will not
+load it, and `zg_open` rejects a mismatched `version`/`struct_size` before reading the rest.
+
 ## Benchmarks
 
 ```sh

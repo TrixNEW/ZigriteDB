@@ -1,4 +1,3 @@
-"""Linux x86-64 C ABI and syscall-boundary crash tests; all data lives in temporary directories."""
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import ctypes as c
@@ -16,11 +15,16 @@ import tempfile
 class Options(c.Structure):
     _fields_ = [(name, c.c_uint32) for name in (
         "version", "struct_size", "max_open_shards", "max_keys", "max_segments", "batch_buffer_size"
-    )] + [("max_segment_size", c.c_uint64), ("buffered", c.c_uint32), ("compression_threshold", c.c_uint32)]
+    )] + [("max_segment_size", c.c_uint64), ("buffered", c.c_uint32), ("compression_threshold", c.c_uint32),
+          ("cache_bytes", c.c_uint64), ("cache_shards", c.c_uint32), ("skip_unchanged", c.c_uint32)]
 
 
 class Key(c.Structure):
     _fields_ = [(name, c.c_int32) for name in ("dimension", "x", "z", "y")] + [("component", c.c_uint32)]
+
+
+class Region(c.Structure):
+    _fields_ = [(name, c.c_int32) for name in ("dimension", "x", "z")]
 
 
 class Operation(c.Structure):
@@ -29,6 +33,16 @@ class Operation(c.Structure):
 
 class Batch(c.Structure):
     _fields_ = [("id", c.c_uint64), ("operations", c.POINTER(Operation)), ("count", c.c_size_t)]
+
+
+class Stats(c.Structure):
+    _fields_ = [(name, c.c_uint64) for name in (
+        "get_calls", "writes", "records_written", "raw_bytes_written", "compressed_bytes_written",
+        "disk_reads", "bytes_read", "fsync_count", "fsync_duration_ns", "segment_rotations",
+        "compactions", "compaction_input_bytes", "compaction_output_bytes", "compaction_duration_ns",
+        "recovery_attempts", "recovery_errors", "cache_hits", "cache_misses", "cache_evictions",
+        "unchanged_write_skips",
+    )]
 
 
 class API:
@@ -47,6 +61,12 @@ class API:
             "zg_last_batch_id": [c.c_void_p, c.c_int32, c.c_int32, c.c_int32, c.POINTER(c.c_uint64)],
             "zg_compact": [c.c_void_p, c.c_int32, c.c_int32, c.c_int32],
             "zg_recover_region": [c.c_char_p, c.c_size_t, c.c_char_p, c.c_size_t, c.POINTER(Options)],
+            "zg_stats_get": [c.c_void_p, c.POINTER(Stats)],
+            "zg_stats_reset": [c.c_void_p],
+            "zg_prefetch": [c.c_void_p, c.POINTER(Key), c.c_size_t],
+            "zg_list_regions": [c.c_void_p, c.POINTER(Region), c.c_size_t, c.POINTER(c.c_size_t)],
+            "zg_list_keys": [c.c_void_p, c.c_int32, c.c_int32, c.c_int32, c.c_uint32, c.POINTER(Key), c.c_size_t,
+                             c.POINTER(c.c_size_t)],
         }
         for name, arguments in signatures.items():
             fn = getattr(self.lib, name)
@@ -126,7 +146,17 @@ def workload(api, path, ack):
     assert api.lib.zg_close(handle) in (0, 7, 14, 15)
 
 
-def trace(api, path, target=0, mode="baseline"):
+WALL = 0x40000000
+
+
+def reap(pid):
+    while True:
+        tid, state = os.waitpid(-1, WALL)
+        if tid == pid and (os.WIFEXITED(state) or os.WIFSIGNALED(state)):
+            return
+
+
+def trace(api, path, target=0, mode="baseline", work=workload, exact=True):
     ack_read, ack_write = os.pipe()
     pid = os.fork()
     if pid == 0:
@@ -134,54 +164,64 @@ def trace(api, path, target=0, mode="baseline"):
         try:
             ptrace(0, 0)
             os.kill(os.getpid(), signal.SIGSTOP)
-            workload(api, path, ack_write)
+            work(api, path, ack_write)
             os._exit(0)
         except BaseException:
             import traceback
             traceback.print_exc()
             os._exit(1)
     os.close(ack_write)
-    events, entering, injecting = [], True, False
+    events, entering, injecting = [], {}, set()
     try:
         _, state = os.waitpid(pid, 0)
         assert os.WIFSTOPPED(state)
-        ptrace(0x4200, pid, c.c_void_p(1 | 0x100000))
+        ptrace(0x4200, pid, c.c_void_p(1 | 0x8 | 0x100000))
+        tid, deliver = pid, 0
         while True:
-            ptrace(24, pid)
-            _, state = os.waitpid(pid, 0)
-            if os.WIFEXITED(state):
+            if tid:
+                ptrace(24, tid, c.c_void_p(deliver))
+            tid, state = os.waitpid(-1, WALL)
+            deliver = 0
+            if os.WIFEXITED(state) or os.WIFSIGNALED(state):
+                if tid != pid:
+                    tid = 0
+                    continue
+                if os.WIFSIGNALED(state):
+                    raise AssertionError(("unexpected termination", os.WTERMSIG(state)))
                 assert os.WEXITSTATUS(state) == 0
                 break
-            if os.WIFSIGNALED(state):
-                raise AssertionError(("unexpected termination", os.WTERMSIG(state)))
             stopped = os.WSTOPSIG(state)
             if stopped != signal.SIGTRAP | 0x80:
-                assert stopped in (signal.SIGTRAP, signal.SIGSTOP), stopped
+                if stopped not in (signal.SIGTRAP, signal.SIGSTOP):
+                    deliver = stopped
                 continue
             registers = REGS()
-            ptrace(12, pid, c.byref(registers))
-            if entering and registers[15] in EVENTS:
+            ptrace(12, tid, c.byref(registers))
+            if entering.get(tid, True) and registers[15] in EVENTS:
                 events.append(EVENTS[registers[15]])
                 if len(events) == target:
                     if mode == "kill":
                         os.kill(pid, signal.SIGKILL)
-                        os.waitpid(pid, 0)
+                        reap(pid)
                         break
                     registers[15] = (1 << 64) - 1
-                    ptrace(13, pid, c.byref(registers))
-                    injecting = True
-            elif not entering and injecting:
+                    ptrace(13, tid, c.byref(registers))
+                    injecting.add(tid)
+            elif not entering.get(tid, True) and tid in injecting:
                 registers[10] = (1 << 64) - {"enospc": errno.ENOSPC, "eio": errno.EIO, "readonly": errno.EROFS}[mode]
-                ptrace(13, pid, c.byref(registers))
-                injecting = False
-            entering = not entering
-        assert not target or len(events) >= target, ("fault was not reached", target, events)
-        return events, os.read(ack_read, 1) == b"W"
+                ptrace(13, tid, c.byref(registers))
+                injecting.discard(tid)
+            entering[tid] = not entering.get(tid, True)
+        assert not exact or not target or len(events) >= target, ("fault was not reached", target, events)
+        acks = b""
+        while chunk := os.read(ack_read, 4096):
+            acks += chunk
+        return events, acks
     except BaseException:
         try:
             os.kill(pid, signal.SIGKILL)
-            os.waitpid(pid, 0)
-        except ProcessLookupError:
+            reap(pid)
+        except (ProcessLookupError, ChildProcessError):
             pass
         raise
     finally:
@@ -189,6 +229,102 @@ def trace(api, path, target=0, mode="baseline"):
 
 
 REGION = "00000000-00000000-00000000.region"
+GROUP_WRITERS, GROUP_ROUNDS = 4, 4
+
+
+def group_value(x, sequence):
+    return bytes([x, sequence]) * 4
+
+
+def group_workload(api, path, ack):
+    name = os.fsencode(path)
+    handle = c.c_void_p()
+    opened = api.lib.zg_open(name, len(name), c.byref(api.options), c.byref(handle))
+    if opened in (7, 14, 15):
+        assert not handle.value
+        return
+    assert opened == 0, opened
+    start, failures, opened = threading.Barrier(GROUP_WRITERS), [], threading.Event()
+
+    def writer(x):
+        try:
+            start.wait()
+            failed = False
+            for sequence in range(1, GROUP_ROUNDS + 1):
+                value = group_value(x, sequence)
+                buffer = c.create_string_buffer(value)
+                operation = Operation(Key(0, x, 0, 0, 5), 0, c.cast(buffer, c.c_void_p), len(value))
+                result = api.lib.zg_write(handle, 0, c.byref(operation), 1)
+                assert result in (0, 7, 8, 12, 14, 15), ("unexpected injected result", result)
+                if result == 0:
+                    assert not failed, ("write succeeded after a failure", failed)
+                    opened.set()
+                    os.write(ack, bytes([x, sequence]))
+                elif opened.is_set():
+                    failed = failed or result
+        except BaseException as error:
+            failures.append(error)
+
+    threads = [threading.Thread(target=writer, args=(x,)) for x in range(GROUP_WRITERS)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not failures, failures
+    assert api.lib.zg_close(handle) in (0, 7, 14, 15)
+
+
+def verify_group(api, path, recovered, acks):
+    acknowledged = [0] * GROUP_WRITERS
+    for x, sequence in zip(acks[::2], acks[1::2]):
+        assert sequence > acknowledged[x], ("acknowledged out of order", x, sequence)
+        acknowledged[x] = sequence
+    handle = api.open(path)
+    reads = [api.read(handle, x) for x in range(GROUP_WRITERS)]
+    if any(status == 8 for status, _ in reads) and not (path / REGION / "MANIFEST").exists():
+        assert not any(acknowledged), ("acknowledged writes without a manifest", acknowledged)
+        assert api.write(handle, 0, [b"heal"]) == 0
+        assert api.read(handle, 0) == (0, b"heal")
+        assert api.lib.zg_close(handle) == 0
+        return
+    if any(status == 8 for status, _ in reads):
+        assert api.lib.zg_close(handle) == 0
+        target = recovered / REGION
+        target.mkdir(parents=True)
+        source_name, target_name = os.fsencode(path / REGION), os.fsencode(target)
+        status = api.lib.zg_recover_region(source_name, len(source_name), target_name, len(target_name), c.byref(api.options))
+        assert status == 0, ("recovery", status)
+        handle = api.open(recovered)
+        reads = [api.read(handle, x) for x in range(GROUP_WRITERS)]
+    for x, (status, value) in enumerate(reads):
+        if status == 1:
+            assert acknowledged[x] == 0, ("acknowledged write lost", x, acknowledged[x])
+            continue
+        assert status == 0, (x, status)
+        allowed = [group_value(x, s) for s in range(max(acknowledged[x], 1), GROUP_ROUNDS + 1)]
+        assert value in allowed, ("stale or foreign value", x, value, acknowledged[x])
+    assert api.lib.zg_close(handle) == 0
+
+
+def check_group_commit(library, root):
+    api = API(library)
+    api.options.max_segment_size = 512
+    api.options.batch_buffer_size = 256
+    baseline = root / "group-baseline"
+    baseline.mkdir()
+    events, acks = trace(api, baseline, work=group_workload)
+    assert "fsync" in events and "renameat" in events, events
+    assert len(acks) == 2 * GROUP_WRITERS * GROUP_ROUNDS
+    verify_group(api, baseline, root / "group-baseline-recovered", acks)
+    cases = 0
+    for mode in ("kill", "enospc", "eio", "readonly"):
+        for point in range(1, len(events) + 1):
+            case = root / f"group-{mode}-{point}"
+            case.mkdir()
+            _, acks = trace(api, case, point, mode, work=group_workload, exact=False)
+            verify_group(api, case, root / f"group-recovered-{mode}-{point}", acks)
+            cases += 1
+    print(f"{cases} group-commit crash and I/O fault cases passed with {GROUP_WRITERS} concurrent writers")
 
 
 def verify(api, path, recovered, acknowledged):
@@ -236,6 +372,7 @@ def check_concurrency(library, root, shard_limit=16):
     api.options.max_segment_size = 1024 * 1024
     api.options.max_open_shards = shard_limit
     api.options.compression_threshold = 32
+    api.options.cache_bytes = 16 * 1024
     path = root / f"concurrent-{shard_limit}"
     path.mkdir()
     handle = api.open(path)
@@ -287,14 +424,70 @@ def check_concurrency(library, root, shard_limit=16):
     print(f"Concurrent C API reads, writes and maintenance passed with {shard_limit} cached shards")
 
 
+def check_stats(library, root):
+    api = API(library)
+    path = root / "stats"
+    path.mkdir()
+    handle = api.open(path)
+    try:
+        assert api.write(handle, 1, [b"first", b"second"]) == 0
+        assert api.read(handle, 0)[0] == 0
+        assert api.read(handle, 5)[0] == 1
+        assert api.lib.zg_compact(handle, 0, 0, 0) == 0
+
+        stats = Stats()
+        assert api.lib.zg_stats_get(handle, c.byref(stats)) == 0
+        assert stats.get_calls == 3, stats.get_calls
+        assert stats.writes == 1, stats.writes
+        assert stats.records_written >= stats.writes
+        assert stats.raw_bytes_written == stats.compressed_bytes_written == len(b"first") + len(b"second")
+        assert stats.disk_reads > 0 and stats.bytes_read > 0
+        assert stats.fsync_count > 0
+        assert stats.compactions == 1
+
+        assert api.lib.zg_stats_get(None, c.byref(stats)) == 2
+        assert api.lib.zg_stats_get(handle, None) == 2
+
+        assert api.lib.zg_stats_reset(handle) == 0
+        assert api.lib.zg_stats_get(handle, c.byref(stats)) == 0
+        for name, _ in Stats._fields_:
+            assert getattr(stats, name) == 0, name
+
+        assert api.write(handle, 0, [b"next"]) == 0
+        batch_id = c.c_uint64()
+        assert api.lib.zg_last_batch_id(handle, 0, 0, 0, c.byref(batch_id)) == 0
+        assert batch_id.value == 2, batch_id.value
+        assert api.read(handle, 0) == (0, b"next")
+
+        keys = (Key * 3)(Key(0, 0, 0, 0, 5), Key(0, 0, 0, 0, 5), Key(0, 1, 0, 0, 5))
+        assert api.lib.zg_prefetch(handle, keys, 3) == 0
+        assert api.lib.zg_prefetch(handle, None, 0) == 0
+        assert api.lib.zg_prefetch(handle, None, 1) == 2
+
+        count = c.c_size_t()
+        assert api.lib.zg_list_regions(handle, None, 0, c.byref(count)) == 3 and count.value == 1
+        regions = (Region * 1)()
+        assert api.lib.zg_list_regions(handle, regions, 1, c.byref(count)) == 0
+        assert (regions[0].dimension, regions[0].x, regions[0].z) == (0, 0, 0)
+        keys = (Key * 2)()
+        assert api.lib.zg_list_keys(handle, 0, 0, 0, 0x3f, keys, 2, c.byref(count)) == 0 and count.value == 2
+        assert [(k.x, k.component) for k in keys] == [(0, 5), (1, 5)]
+        assert api.lib.zg_list_keys(handle, 0, 0, 0, 0x1f, keys, 2, c.byref(count)) == 0 and count.value == 0
+        assert api.read(handle, 0) == (0, b"next")
+    finally:
+        assert api.lib.zg_close(handle) == 0
+    print("Runtime stats counters moved and reset correctly")
+
+
 def main():
     assert sys.platform == "linux" and platform.machine() == "x86_64"
     library, smoke = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
     api = API(library)
-    signal.alarm(240)
+    signal.alarm(480)
     with tempfile.TemporaryDirectory(prefix="zigritedb-native-") as temporary:
         root = Path(temporary)
         check_permissions(api, root)
+        check_stats(library, root)
         c_root = root / "c-smoke"
         c_root.mkdir()
         env = dict(os.environ, LD_LIBRARY_PATH=str(library.parent))
@@ -308,7 +501,8 @@ def main():
             api.grouped = grouped
             baseline = root / f"baseline-{grouped}"
             shutil.copytree(template, baseline)
-            events, acknowledged = trace(api, baseline)
+            events, acks = trace(api, baseline)
+            acknowledged = acks == b"W"
             assert any("write" in event for event in events)
             assert any("sync" in event for event in events)
             assert any("rename" in event for event in events)
@@ -318,9 +512,10 @@ def main():
                 for point in range(1, len(events) + 1):
                     case = root / f"{grouped}-{mode}-{point}"
                     shutil.copytree(template, case)
-                    _, acknowledged = trace(api, case, point, mode)
-                    verify(api, case, root / f"recovered-{grouped}-{mode}-{point}", acknowledged)
+                    _, acks = trace(api, case, point, mode)
+                    verify(api, case, root / f"recovered-{grouped}-{mode}-{point}", acks == b"W")
             print(f"{len(events) * 4} syscall-boundary crash and I/O fault cases passed: {sorted(set(events))}")
+        check_group_commit(library, root)
         for shard_limit in (1, 2, 16):
             check_concurrency(library, root, shard_limit)
     signal.alarm(0)

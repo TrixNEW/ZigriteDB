@@ -3,7 +3,7 @@ const allocator = std.heap.page_allocator;
 
 const db = @import("root.zig");
 
-const abi_version: u32 = 1;
+const abi_version: u32 = 2;
 const max_path_length: usize = 4096;
 
 pub export fn zg_abi_version() u32 {
@@ -64,9 +64,18 @@ pub const Options = extern struct {
     max_segment_size: u64 = 256 * 1024 * 1024,
     buffered: u32 = 0,
     compression_threshold: u32 = 256,
+    cache_bytes: u64 = 0,
+    cache_shards: u32 = 16,
+    skip_unchanged: u32 = 0,
+
+    fn read(options: *const Options) !Options {
+        const prefix: *const [2]u32 = @ptrCast(options);
+        if (prefix[0] != abi_version or prefix[1] != @sizeOf(Options)) return error.InvalidArgument;
+        return options.*;
+    }
 
     fn native(self: Options) !db.WorldOptions {
-        if (self.version != abi_version or self.struct_size != @sizeOf(Options) or self.buffered > 1) return error.InvalidArgument;
+        if (self.version != abi_version or self.struct_size != @sizeOf(Options) or self.buffered > 1 or self.skip_unchanged > 1) return error.InvalidArgument;
         if (self.compression_threshold > db.record.max_value_len) return error.InvalidArgument;
         const result: db.WorldOptions = .{
             .max_open_shards = self.max_open_shards,
@@ -76,13 +85,27 @@ pub const Options = extern struct {
                 .batch_buffer_size = self.batch_buffer_size,
                 .max_segment_size = self.max_segment_size,
                 .durability = if (self.buffered == 1) .buffered else .sync,
+                .skip_unchanged = self.skip_unchanged == 1,
+            },
+            .cache = .{
+                .bytes = std.math.cast(usize, self.cache_bytes) orelse return error.InvalidArgument,
+                .shards = self.cache_shards,
             },
         };
+        if (result.cache.shards == 0 or result.cache.shards > 1024) return error.InvalidArgument;
         if (result.max_open_shards == 0 or result.max_open_shards > 1024) return error.InvalidArgument;
         result.shard.validate() catch return error.InvalidArgument;
         return result;
     }
 };
+
+comptime {
+    std.debug.assert(@sizeOf(Options) == 56);
+    std.debug.assert(@offsetOf(Options, "struct_size") == 4);
+    std.debug.assert(@offsetOf(Options, "compression_threshold") == 36);
+    std.debug.assert(@offsetOf(Options, "cache_bytes") == 40);
+    std.debug.assert(@offsetOf(Options, "skip_unchanged") == 52);
+}
 
 pub const Key = extern struct {
     dimension: i32,
@@ -122,11 +145,13 @@ pub const Handle = struct {
     threaded: std.Io.Threaded,
     world: db.World,
     maintenance: @import("world/maintenance.zig").Queue(db.World, compactRegion),
+    prefetch: @import("world/maintenance.zig").WorkQueue(db.World, db.Key, 256, false, warmKey),
     mutex: std.Io.Mutex = .init,
     available: std.Io.Condition = .init,
-    writers: [4]?WriteContext = .{null} ** 4,
+    writers: [16]?WriteContext = .{null} ** 16,
     writer_limit: usize,
     threshold: u32,
+    stats: db.Stats = .{},
 
     fn acquireWriter(self: *Handle) !*WriteContext {
         const io = self.threaded.io();
@@ -209,21 +234,24 @@ pub export fn zg_options_init(out: ?*Options) Status {
 
 pub export fn zg_options_validate(options: ?*const Options) Status {
     const value = options orelse return .invalid_argument;
-    _ = value.native() catch |err| return status(err);
+    _ = (Options.read(value) catch |err| return status(err)).native() catch |err| return status(err);
     return .ok;
 }
 pub export fn zg_open(path: ?[*]const u8, length: usize, options: ?*const Options, out: ?*?*Handle) Status {
     const target = out orelse return .invalid_argument;
     target.* = null;
-    target.* = open(path, length, if (options) |value| value.* else .{}) catch |err| return status(err);
+    const config = if (options) |value| Options.read(value) catch |err| return status(err) else Options{};
+    target.* = open(path, length, config) catch |err| return status(err);
     return .ok;
 }
 
 fn open(path: ?[*]const u8, length: usize, options: Options) !*Handle {
     const name = try pathSlice(path, length);
-    const config = try options.native();
+    var config = try options.native();
     const handle = try allocator.create(Handle);
     errdefer allocator.destroy(handle);
+    handle.stats = .{};
+    config.shard.stats = &handle.stats;
     handle.threaded = std.Io.Threaded.init(allocator, .{});
     errdefer handle.threaded.deinit();
     const io = handle.threaded.io();
@@ -232,16 +260,18 @@ fn open(path: ?[*]const u8, length: usize, options: Options) !*Handle {
     handle.world = try db.World.open(allocator, io, dir, config);
     errdefer handle.world.deinit();
     handle.maintenance = .{ .io = io, .context = &handle.world };
+    handle.prefetch = .{ .io = io, .context = &handle.world };
     handle.mutex = .init;
     handle.available = .init;
-    handle.writers = .{null} ** 4;
-    handle.writer_limit = @min(4, config.max_open_shards);
+    handle.writers = .{null} ** 16;
+    handle.writer_limit = 16;
     handle.threshold = options.compression_threshold;
     return handle;
 }
 
 pub export fn zg_close(optional: ?*Handle) Status {
     const handle = optional orelse return .invalid_argument;
+    handle.prefetch.close() catch {};
     const maintenance_result = handle.maintenance.close();
     const result = handle.world.close();
     for (&handle.writers) |*slot| if (slot.*) |*context| context.deinit();
@@ -254,12 +284,13 @@ pub export fn zg_close(optional: ?*Handle) Status {
 
 pub export fn zg_write(optional: ?*Handle, id: u64, operations: ?[*]const Operation, count: usize) Status {
     const handle = optional orelse return .invalid_argument;
-    if (operations == null or count == 0 or id == 0) return .invalid_argument;
+    if (operations == null or count == 0) return .invalid_argument;
     if (count > db.batch.max_records) return .limit;
     const context = handle.acquireWriter() catch |err| return status(err);
     defer handle.releaseWriter(context);
-    _ = prepare(context, id, operations.?[0..count], 0, 0) catch |err| return status(err);
-    _ = handle.world.write(.{ .entries = context.entries[0..count] }) catch |err| return status(err);
+    _ = prepare(context, if (id == 0) 1 else id, operations.?[0..count], 0, 0) catch |err| return status(err);
+    const entries = context.entries[0..count];
+    _ = (if (id == 0) handle.world.writeNext(entries) else handle.world.write(.{ .entries = entries })) catch |err| return status(err);
     return .ok;
 }
 
@@ -336,9 +367,89 @@ pub export fn zg_get(optional: ?*Handle, key: ?*const Key, output: ?[*]u8, capac
     return .ok;
 }
 
+pub const ReadRequest = extern struct {
+    key: Key,
+    output: ?[*]u8,
+    capacity: usize,
+};
+
+pub const ReadResult = extern struct {
+    status: Status = .not_found,
+    required: usize = 0,
+};
+
+const max_c_batch = db.World.max_read_batch;
+
+pub export fn zg_get_many(optional: ?*Handle, requests: ?[*]const ReadRequest, results: ?[*]ReadResult, count: usize) Status {
+    const handle = optional orelse return .invalid_argument;
+    if (requests == null or results == null or count == 0) return .invalid_argument;
+    if (count > max_c_batch) return .limit;
+
+    var native_requests: [max_c_batch]db.ReadRequest = undefined;
+    var native_results: [max_c_batch]db.ReadResult = undefined;
+    for (requests.?[0..count], 0..) |request, i| {
+        const key = request.key.native() catch |err| return status(err);
+        if (request.output == null and request.capacity != 0) return .invalid_argument;
+        const bytes: []u8 = if (request.output) |ptr| ptr[0..request.capacity] else &.{};
+        native_requests[i] = .{ .key = key, .output = bytes };
+    }
+
+    handle.world.getMany(native_requests[0..count], native_results[0..count]) catch |err| return status(err);
+
+    for (native_results[0..count], 0..) |result, i| {
+        results.?[i] = .{
+            .status = switch (result.status) {
+                .ok => .ok,
+                .not_found => .not_found,
+                .buffer_too_small => .buffer_too_small,
+            },
+            .required = result.required,
+        };
+    }
+    return .ok;
+}
+
 pub export fn zg_flush(optional: ?*Handle) Status {
     const handle = optional orelse return .invalid_argument;
     handle.world.flush() catch |err| return status(err);
+    return .ok;
+}
+
+pub const StatsSnapshot = extern struct {
+    get_calls: u64 = 0,
+    writes: u64 = 0,
+    records_written: u64 = 0,
+    raw_bytes_written: u64 = 0,
+    compressed_bytes_written: u64 = 0,
+    disk_reads: u64 = 0,
+    bytes_read: u64 = 0,
+    fsync_count: u64 = 0,
+    fsync_duration_ns: u64 = 0,
+    segment_rotations: u64 = 0,
+    compactions: u64 = 0,
+    compaction_input_bytes: u64 = 0,
+    compaction_output_bytes: u64 = 0,
+    compaction_duration_ns: u64 = 0,
+    recovery_attempts: u64 = 0,
+    recovery_errors: u64 = 0,
+    cache_hits: u64 = 0,
+    cache_misses: u64 = 0,
+    cache_evictions: u64 = 0,
+    unchanged_write_skips: u64 = 0,
+};
+
+pub export fn zg_stats_get(optional: ?*Handle, out: ?*StatsSnapshot) Status {
+    const handle = optional orelse return .invalid_argument;
+    const target = out orelse return .invalid_argument;
+    inline for (std.meta.fields(StatsSnapshot)) |field| {
+        @field(target, field.name) = @field(handle.stats, field.name).load(.monotonic);
+    }
+    return .ok;
+}
+
+pub export fn zg_stats_reset(optional: ?*Handle) Status {
+    const handle = optional orelse return .invalid_argument;
+    handle.stats.reset();
     return .ok;
 }
 
@@ -368,13 +479,64 @@ pub export fn zg_maintenance_wait(optional: ?*Handle) Status {
     return .ok;
 }
 
+pub export fn zg_prefetch(optional: ?*Handle, keys: ?[*]const Key, count: usize) Status {
+    const handle = optional orelse return .invalid_argument;
+    if (count == 0) return .ok;
+    for ((keys orelse return .invalid_argument)[0..count]) |key| {
+        const native = key.native() catch |err| return status(err);
+        handle.prefetch.submit(native) catch |err| switch (err) {
+            error.QueueFull, error.AlreadyQueued => {},
+            else => return status(err),
+        };
+    }
+    return .ok;
+}
+
+pub export fn zg_list_regions(optional: ?*Handle, out: ?[*]Region, capacity: usize, count: ?*usize) Status {
+    const handle = optional orelse return .invalid_argument;
+    const total = count orelse return .invalid_argument;
+    if (capacity != 0 and out == null) return .invalid_argument;
+    const found = handle.world.regions(allocator) catch |err| return status(err);
+    defer allocator.free(found);
+    total.* = found.len;
+    for (found[0..@min(found.len, capacity)], 0..) |region, i| {
+        out.?[i] = .{ .dimension = region.dimension, .x = region.x, .z = region.z };
+    }
+    return if (found.len > capacity) .buffer_too_small else .ok;
+}
+
+pub export fn zg_list_keys(optional: ?*Handle, dimension: i32, x: i32, z: i32, components: u32, out: ?[*]Key, capacity: usize, count: ?*usize) Status {
+    const handle = optional orelse return .invalid_argument;
+    const total = count orelse return .invalid_argument;
+    if (capacity != 0 and out == null) return .invalid_argument;
+    const region: db.Region = .{ .dimension = dimension, .x = x, .z = z };
+    const found = handle.world.keys(region, allocator, .{ .components = @truncate(components) }) catch |err| return status(err);
+    defer allocator.free(found);
+    total.* = found.len;
+    for (found[0..@min(found.len, capacity)], 0..) |key, i| {
+        out.?[i] = .{
+            .dimension = key.dimension,
+            .chunk_x = key.chunk_x,
+            .chunk_z = key.chunk_z,
+            .subchunk_y = key.subchunk_y,
+            .component = @intFromEnum(key.component),
+        };
+    }
+    return if (found.len > capacity) .buffer_too_small else .ok;
+}
+
+fn warmKey(world: *db.World, key: db.Key) !void {
+    world.warm(key) catch {};
+}
+
 fn compactRegion(world: *db.World, region: db.Region) !void {
     const result = (try world.compact(region)) orelse return error.FileNotFound;
     if (result.cleanup.failure != null or !result.cleanup.synced) return error.CleanupPending;
 }
 
 pub export fn zg_recover_region(source: ?[*]const u8, source_len: usize, destination: ?[*]const u8, destination_len: usize, options: ?*const Options) Status {
-    recover(source, source_len, destination, destination_len, if (options) |value| value.* else .{}) catch |err| return status(err);
+    const config = if (options) |value| Options.read(value) catch |err| return status(err) else Options{};
+    recover(source, source_len, destination, destination_len, config) catch |err| return status(err);
     return .ok;
 }
 
@@ -416,7 +578,7 @@ fn status(err: anyerror) Status {
         error.CleanupPending => .cleanup_pending,
         error.NeedsRecovery, error.MissingManifest => .needs_recovery,
         error.BatchOrder => .batch_order,
-        error.BatchTooLarge, error.IndexFull, error.TooManySegments, error.SegmentFull, error.GenerationExhausted, error.SegmentIdExhausted => .limit,
+        error.BatchTooLarge, error.IndexFull, error.TooManySegments, error.SegmentFull, error.GenerationExhausted, error.SegmentIdExhausted, error.TooManyKeys => .limit,
         error.InvalidArgument, error.InvalidSubchunkY, error.RegionMismatch, error.InvalidBufferSize, error.InvalidShardLimit => .invalid_argument,
         error.InvalidMagic, error.ChecksumMismatch, error.InvalidCompressedData, error.TruncatedHeader, error.TruncatedRecord, error.TruncatedManifest, error.InvalidLength, error.InvalidCommit, error.BatchMismatch, error.IdentityMismatch, error.IncompleteBatch, error.InvalidGeneration, error.InvalidSegmentCount, error.InvalidSegmentId, error.InvalidSegmentOrder, error.InvalidActiveSegment, error.InvalidBatchId, error.InvalidCommitCount, error.IndexMismatch, error.MissingSegment => .corruption,
         error.UnsupportedVersion, error.UnsupportedCompression, error.InvalidFlags, error.UnknownKind => .unsupported,

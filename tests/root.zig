@@ -24,4 +24,11 @@ test {
     _ = @import("store.zig");
     _ = @import("store_compaction.zig");
     _ = @import("reclamation.zig");
+    _ = @import("stats.zig");
+    _ = @import("cache.zig");
+    _ = @import("group_commit.zig");
+    _ = @import("unchanged.zig");
+    _ = @import("iterate.zig");
+    _ = @import("overlay.zig");
+    _ = @import("stress.zig");
 }

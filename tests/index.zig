@@ -106,7 +106,7 @@ test "rebuild follows the manifest across segments" {
     var index = try db.index.rebuild(testing.allocator, manifest, &.{ first[0..first_end], second[0..second_end] }, 1);
     defer index.deinit();
 
-    try testing.expectEqual(@as(u64, 2), (try index.get(item(1, 0, "").key)).?.segment_id);
+    try testing.expectEqual(@as(u16, 1), (try index.get(item(1, 0, "").key)).?.segment);
     try testing.expectError(error.IncompleteBatch, db.index.rebuild(
         testing.allocator,
         manifest,
@@ -239,7 +239,7 @@ test "replacement batches reuse index capacity without early publication" {
         .id = 2,
         .records = bytes[end .. next - db.batch.commit_len],
         .end_offset = next,
-    }, 1);
+    }, 0);
     defer prepared.deinit();
     try testing.expectEqual(capacity, index.entries.capacity());
     try testing.expect((try index.get(initial[0].key)) != null);
@@ -250,4 +250,67 @@ test "replacement batches reuse index capacity without early publication" {
         try testing.expectEqual(null, try index.get(initial[i].key));
         try testing.expectEqual(@as(u64, 2), (try index.get(replacement[6 + i].key)).?.batch_id);
     }
+}
+
+fn subchunkItem(id: u64, x: i32, y: i32, value: ?[]const u8) db.entry.Entry {
+    const bytes = value orelse "";
+    return .{
+        .header = .{
+            .kind = if (value == null) .delete else .put,
+            .batch_id = id,
+            .stored_len = @intCast(bytes.len),
+            .raw_len = @intCast(bytes.len),
+        },
+        .key = .{ .dimension = 0, .chunk_x = x, .chunk_z = 0, .component = .subchunk, .subchunk_y = y },
+        .value = bytes,
+    };
+}
+
+test "negative subchunk Y and other components never collide" {
+    var bytes: [1024]u8 = undefined;
+    try header(1, &bytes);
+    const end = try append(&.{
+        subchunkItem(1, 0, -4, "deep"),
+        subchunkItem(1, 0, 0, "surface"),
+        subchunkItem(1, 0, 19, "sky"),
+        item(1, 0, "meta"),
+    }, &bytes, 48);
+    var index = try db.index.rebuild(testing.allocator, metadata, &.{bytes[0..end]}, 4);
+    defer index.deinit();
+
+    var scratch: [128]u8 = undefined;
+    const device = Device{ .bytes = bytes[0..end] };
+    try testing.expectEqualStrings("deep", (try index.read(subchunkItem(1, 0, -4, "").key, device, &scratch)).?);
+    try testing.expectEqualStrings("surface", (try index.read(subchunkItem(1, 0, 0, "").key, device, &scratch)).?);
+    try testing.expectEqualStrings("sky", (try index.read(subchunkItem(1, 0, 19, "").key, device, &scratch)).?);
+    try testing.expectEqualStrings("meta", (try index.read(item(1, 0, "").key, device, &scratch)).?);
+    try testing.expectEqual(@as(usize, 4), index.count());
+}
+
+test "negative regions still pack local coordinates within 0..31" {
+    const region: db.Region = .{ .dimension = 0, .x = -1, .z = -1 };
+    const negative_metadata: db.manifest.Manifest = .{ .generation = 1, .region = region, .segments = &.{1} };
+    var bytes: [1024]u8 = undefined;
+    const encoded = try (db.segment.Header{ .segment_id = 1, .generation = 1, .region = region }).encode();
+    @memcpy(bytes[0..encoded.len], &encoded);
+
+    const corner_min = db.entry.Entry{
+        .header = .{ .kind = .put, .batch_id = 1, .stored_len = 3, .raw_len = 3 },
+        .key = .{ .dimension = 0, .chunk_x = -32, .chunk_z = -32, .component = .metadata },
+        .value = "min",
+    };
+    const corner_max = db.entry.Entry{
+        .header = .{ .kind = .put, .batch_id = 1, .stored_len = 3, .raw_len = 3 },
+        .key = .{ .dimension = 0, .chunk_x = -1, .chunk_z = -1, .component = .metadata },
+        .value = "max",
+    };
+    const end = try append(&.{ corner_min, corner_max }, &bytes, 48);
+    var index = try db.index.rebuild(testing.allocator, negative_metadata, &.{bytes[0..end]}, 2);
+    defer index.deinit();
+
+    var scratch: [128]u8 = undefined;
+    const device = Device{ .bytes = bytes[0..end] };
+    try testing.expectEqualStrings("min", (try index.read(corner_min.key, device, &scratch)).?);
+    try testing.expectEqualStrings("max", (try index.read(corner_max.key, device, &scratch)).?);
+    try testing.expectEqual(@as(usize, 2), index.count());
 }

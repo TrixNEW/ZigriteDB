@@ -19,6 +19,8 @@ pub fn Writer(comptime Device: type) type {
         synced_offset: u64 = segment.encoded_len,
         last_batch_id: u64,
         failed: bool = false,
+        stats: ?*Stats = null,
+        io: ?std.Io = null,
 
         const Self = @This();
 
@@ -95,10 +97,18 @@ pub fn Writer(comptime Device: type) type {
             const should_sync = durability == .sync;
 
             if (should_sync) {
+                const started: ?std.Io.Clock.Timestamp = if (self.stats != null and self.io != null)
+                    std.Io.Clock.Timestamp.now(self.io.?, .awake)
+                else
+                    null;
                 self.device.sync() catch |err| {
                     self.failed = true;
                     return err;
                 };
+                if (self.stats) |s| {
+                    _ = s.fsync_count.fetchAdd(1, .monotonic);
+                    if (started) |t| _ = s.fsync_duration_ns.fetchAdd(@intCast(t.untilNow(self.io.?).raw.nanoseconds), .monotonic);
+                }
             }
 
             const start = self.offset;
@@ -120,10 +130,18 @@ pub fn Writer(comptime Device: type) type {
             if (self.failed) return error.WriterFailed;
             if (self.synced_offset == self.offset) return;
 
+            const started: ?std.Io.Clock.Timestamp = if (self.stats != null and self.io != null)
+                std.Io.Clock.Timestamp.now(self.io.?, .awake)
+            else
+                null;
             self.device.sync() catch |err| {
                 self.failed = true;
                 return err;
             };
+            if (self.stats) |s| {
+                _ = s.fsync_count.fetchAdd(1, .monotonic);
+                if (started) |t| _ = s.fsync_duration_ns.fetchAdd(@intCast(t.untilNow(self.io.?).raw.nanoseconds), .monotonic);
+            }
 
             self.synced_offset = self.offset;
         }
@@ -139,3 +157,4 @@ const test_entry = @import("../format/entry.zig");
 const segment = @import("../format/segment.zig");
 const storage_file = @import("../io/file.zig");
 const file_scan = @import("../recovery/file_scan.zig");
+const Stats = @import("../stats.zig").Stats;

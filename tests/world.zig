@@ -35,6 +35,46 @@ test "world routes regions and dimensions through a bounded cache" {
     try testing.expectError(error.Closed, reopened.get(deleted.key, &output));
 }
 
+test "a region remembered as missing is readable right after a write creates it" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .max_open_shards = 1 });
+    defer world.deinit();
+    var output: [16]u8 = undefined;
+    const saved = item(1, 64, "saved");
+
+    for (0..2) |_| try testing.expectEqual(null, try world.get(saved.key, &output));
+
+    _ = try world.write(.{ .entries = &.{saved} });
+    _ = try world.write(.{ .entries = &.{item(1, 0, "other")} });
+    try testing.expectEqualStrings("saved", (try world.get(saved.key, &output)).?);
+    try world.close();
+}
+
+test "getMany takes more keys in one region than a store batch holds" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+    defer world.deinit();
+    for (0..32) |x| _ = try world.write(.{ .entries = &.{item(x + 1, @intCast(x), "v")} });
+
+    var outputs: [256][4]u8 = undefined;
+    var requests: [256]db.ReadRequest = undefined;
+    var results: [256]db.ReadResult = undefined;
+    for (&requests, &outputs, 0..) |*request, *output, i| {
+        var key = item(0, @intCast(i % 32), "").key;
+        key.chunk_z = @intCast(i / 32);
+        request.* = .{ .key = key, .output = output };
+    }
+    try world.getMany(&requests, &results);
+    for (results, 0..) |result, i| {
+        try testing.expectEqual(if (i < 32) db.ReadStatus.ok else db.ReadStatus.not_found, result.status);
+    }
+    try world.close();
+}
+
 test "missing reads and rejected batches create no region files" {
     if (!db.directory.supported) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
@@ -119,16 +159,15 @@ test "busy shards stay pinned while other regions write and close waits" {
     const first = world.slots[0].store;
     _ = try world.write(.{ .entries = &.{item(1, 32, "second")} });
 
-    first.mutex.lockUncancelable(io);
+    first.shard.mutex.lockUncancelable(io);
     var locked = true;
-    defer if (locked) first.mutex.unlock(io);
+    defer if (locked) first.shard.mutex.unlock(io);
     var read_result: anyerror!void = error.Unexpected;
     const reader = try std.Thread.spawn(.{}, readPinned, .{ &world, &read_result });
     var joined = false;
     defer if (!joined) reader.join();
-    // Release the reader even if an assertion fails.
     defer if (locked) {
-        first.mutex.unlock(io);
+        first.shard.mutex.unlock(io);
         locked = false;
     };
     while (true) {
@@ -156,7 +195,7 @@ test "busy shards stay pinned while other regions write and close waits" {
         std.Thread.yield() catch {};
     }
     const rejected = world.get(item(1, 64, "").key, &output);
-    first.mutex.unlock(io);
+    first.shard.mutex.unlock(io);
     locked = false;
     closer.join();
     try testing.expectError(error.Closed, rejected);
@@ -246,4 +285,122 @@ test "missing manifests never overwrite orphaned region data" {
     var output: [8]u8 = undefined;
     try device.readExact(&output, 0);
     try testing.expectEqualStrings("preserve", &output);
+}
+
+test "getMany across two regions returns correctly-ordered results" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+    defer world.deinit();
+
+    _ = try world.write(.{ .entries = &.{item(1, 0, "region0")} });
+    _ = try world.write(.{ .entries = &.{item(1, 32, "region1")} });
+
+    var out0: [16]u8 = undefined;
+    var out1: [16]u8 = undefined;
+    var miss_out: [16]u8 = undefined;
+    const requests = [_]db.ReadRequest{
+        .{ .key = item(1, 32, "").key, .output = &out1 },
+        .{ .key = item(1, 0, "").key, .output = &out0 },
+        .{ .key = item(1, 99, "").key, .output = &miss_out },
+    };
+    var results: [3]db.ReadResult = undefined;
+    try world.getMany(&requests, &results);
+
+    try testing.expectEqual(db.ReadStatus.ok, results[0].status);
+    try testing.expectEqualStrings("region1", out1[0..results[0].value.len]);
+    try testing.expectEqual(db.ReadStatus.ok, results[1].status);
+    try testing.expectEqualStrings("region0", out0[0..results[1].value.len]);
+    try testing.expectEqual(db.ReadStatus.not_found, results[2].status);
+}
+
+test "getMany spans as many regions as it has requests, in the caller's order" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .max_open_shards = 4 });
+    defer world.deinit();
+
+    const region_count = db.World.max_read_batch;
+    for (0..region_count / 2) |half| {
+        const r = half * 2;
+        var value: [2]u8 = undefined;
+        std.mem.writeInt(u16, &value, @intCast(r), .little);
+        var entry = item(1, 0, &value);
+        entry.key.chunk_x = (@as(i32, @intCast(r)) - 128) * 32;
+        _ = try world.write(.{ .entries = &.{entry} });
+    }
+
+    const count = region_count + 44;
+    var outputs: [count][2]u8 = undefined;
+    var requests: [count]db.ReadRequest = undefined;
+    var results: [count]db.ReadResult = undefined;
+    for (&requests, &outputs, 0..) |*request, *output, i| {
+        const r = (i * 37) % region_count;
+        var key = item(0, 0, "").key;
+        key.chunk_x = (@as(i32, @intCast(r)) - 128) * 32;
+        request.* = .{ .key = key, .output = if (i == 6) output[0..1] else output };
+    }
+    try world.getMany(&requests, &results);
+
+    for (results, 0..) |result, i| {
+        const r = (i * 37) % region_count;
+        if (r % 2 == 1) {
+            try testing.expectEqual(db.ReadStatus.not_found, result.status);
+        } else if (i == 6) {
+            try testing.expectEqual(db.ReadStatus.buffer_too_small, result.status);
+            try testing.expectEqual(@as(usize, 2), result.required);
+        } else {
+            try testing.expectEqual(db.ReadStatus.ok, result.status);
+            try testing.expectEqual(@as(u16, @intCast(r)), std.mem.readInt(u16, result.value[0..2], .little));
+        }
+    }
+    try world.close();
+}
+
+test "a region whose creation crashed before its manifest was published is rebuilt by the next write" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    const name = "00000000-00000000-00000000.region";
+    for ([_]usize{ 0, db.segment.encoded_len }) |segment_len| {
+        for ([_]bool{ false, true }) |temporary| {
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            try tmp.dir.createDir(io, name, .default_dir);
+            const region_dir = try tmp.dir.openDir(io, name, .{});
+            defer region_dir.close(io);
+            const segment_file = try region_dir.createFile(io, "0000000000000001-0000000000000001.segment", .{});
+            var zeros = [_]u8{0} ** db.segment.encoded_len;
+            try segment_file.writePositionalAll(io, zeros[0..segment_len], 0);
+            segment_file.close(io);
+            if (temporary) (try region_dir.createFile(io, "MANIFEST.tmp", .{})).close(io);
+
+            var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+            defer world.deinit();
+            var output: [8]u8 = undefined;
+            _ = try world.write(.{ .entries = &.{item(1, 0, "healed")} });
+            try testing.expectEqualStrings("healed", (try world.get(item(1, 0, "").key, &output)).?);
+            try world.close();
+        }
+    }
+}
+
+test "a region with records but no manifest is never discarded" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    const name = "00000000-00000000-00000000.region";
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, name, .default_dir);
+    const region_dir = try tmp.dir.openDir(io, name, .{});
+    defer region_dir.close(io);
+    const segment_file = try region_dir.createFile(io, "0000000000000001-0000000000000001.segment", .{});
+    var bytes = [_]u8{1} ** (db.segment.encoded_len + 1);
+    try segment_file.writePositionalAll(io, &bytes, 0);
+    segment_file.close(io);
+
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+    defer world.deinit();
+    try testing.expectError(error.MissingManifest, world.write(.{ .entries = &.{item(1, 0, "no")} }));
+    const stat = try region_dir.statFile(io, "0000000000000001-0000000000000001.segment", .{});
+    try testing.expectEqual(@as(u64, bytes.len), stat.size);
 }

@@ -156,3 +156,46 @@ test "failed creates release resources" {
 
     try testing.checkAllAllocationFailures(testing.allocator, createWithAllocator, .{});
 }
+
+fn getManyOversizedAllocationFailure(allocator: std.mem.Allocator) !void {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try db.Store.create(allocator, io, tmp.dir, region, .{ .max_segment_size = 65536, .batch_buffer_size = 16384 });
+    defer store.deinit();
+
+    var big_value: [8200]u8 = undefined;
+    @memset(&big_value, 'z');
+    _ = try store.write(.{ .entries = &.{item(1, 0, &big_value)} });
+
+    var out: [8200]u8 = undefined;
+    const requests = [_]db.ReadRequest{.{ .key = item(1, 0, "").key, .output = &out }};
+    var results: [1]db.ReadResult = undefined;
+    try store.getMany(&requests, &results);
+    try testing.expectEqual(db.ReadStatus.ok, results[0].status);
+}
+
+test "getMany releases its pin even when the oversized-record heap fallback fails" {
+    if (!db.directory.supported) return error.SkipZigTest;
+
+    try testing.checkAllAllocationFailures(testing.allocator, getManyOversizedAllocationFailure, .{});
+}
+
+test "a store rejects keys from other regions instead of aliasing its own" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, try options());
+    defer store.deinit();
+    _ = try store.write(.{ .entries = &.{item(1, 0, "mine")} });
+
+    var alias = item(1, 0, "").key;
+    alias.chunk_x = 32;
+    var output: [16]u8 = undefined;
+    try testing.expectError(error.RegionMismatch, store.valueSize(alias));
+    try testing.expectError(error.RegionMismatch, store.get(alias, &output));
+    const requests = [_]db.ReadRequest{.{ .key = alias, .output = &output }};
+    var results: [1]db.ReadResult = undefined;
+    try testing.expectError(error.RegionMismatch, store.getMany(&requests, &results));
+    try testing.expectEqual(@as(?u32, 4), try store.valueSize(item(1, 0, "").key));
+    try store.close();
+}
