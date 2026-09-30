@@ -132,19 +132,22 @@ pub const World = struct {
         if (requests.len == 0) return;
 
         var start: usize = 0;
-        while (start < requests.len) : (start += max_read_batch) {
-            const end = @min(requests.len, start + max_read_batch);
+        while (start < requests.len) : (start += read_chunk) {
+            const end = @min(requests.len, start + read_chunk);
             try self.getManyChunk(requests[start..end], results[start..end]);
         }
     }
 
+    // Kept small: ReleaseSafe fills undefined stack arrays.
+    const read_chunk = 32;
+
     fn getManyChunk(self: *World, requests: []const ReadRequest, results: []ReadResult) !void {
-        var order: [max_read_batch]u16 = undefined;
+        var order: [read_chunk]u16 = undefined;
         for (order[0..requests.len], 0..) |*value, i| value.* = @intCast(i);
         std.sort.pdq(u16, order[0..requests.len], requests, requestRegionLessThan);
 
-        var sub_requests: [store_module.max_batch_keys]ReadRequest = undefined;
-        var sub_results: [store_module.max_batch_keys]ReadResult = undefined;
+        var sub_requests: [read_chunk]ReadRequest = undefined;
+        var sub_results: [read_chunk]ReadResult = undefined;
 
         var run: usize = 0;
         while (run < requests.len) {

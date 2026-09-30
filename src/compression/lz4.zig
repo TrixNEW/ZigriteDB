@@ -91,7 +91,12 @@ fn decodeBlock(input: []const u8, raw_len: usize, output: ?[]u8) Error!void {
         read += 1;
         const literals = try readLength(input, &read, token >> 4);
         if (literals > input.len - read or literals > raw_len - written) return error.InvalidCompressedData;
-        if (output) |bytes| @memcpy(bytes[written..][0..literals], input[read..][0..literals]);
+        if (output) |bytes| {
+            // Short runs copy a fixed 16 bytes; the overshoot is overwritten later.
+            if (literals <= 16 and input.len - read >= 16 and raw_len - written >= 16) {
+                bytes[written..][0..16].* = input[read..][0..16].*;
+            } else @memcpy(bytes[written..][0..literals], input[read..][0..literals]);
+        }
         read += literals;
         written += literals;
         if (read == input.len) {
@@ -102,7 +107,7 @@ fn decodeBlock(input: []const u8, raw_len: usize, output: ?[]u8) Error!void {
             return;
         }
         if (input.len - read < 2) return error.InvalidCompressedData;
-        const offset = std.mem.readInt(u16, input[read..][0..2], .little);
+        const offset: usize = std.mem.readInt(u16, input[read..][0..2], .little);
         read += 2;
         if (offset == 0 or offset > written) return error.InvalidCompressedData;
         const length = try readLength(input, &read, token & 15) + 4;
@@ -111,7 +116,11 @@ fn decodeBlock(input: []const u8, raw_len: usize, output: ?[]u8) Error!void {
         if (output) |bytes| {
             const source = written - offset;
             var copied: usize = 0;
-            while (copied < length) {
+            if (offset >= 16 and raw_len - written >= length + 16) {
+                while (copied < length) : (copied += 16) {
+                    bytes[written + copied ..][0..16].* = bytes[source + copied ..][0..16].*;
+                }
+            } else while (copied < length) {
                 const n = @min(length - copied, offset + copied);
                 @memcpy(bytes[written + copied ..][0..n], bytes[source..][0..n]);
                 copied += n;

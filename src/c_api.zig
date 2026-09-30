@@ -407,29 +407,39 @@ pub export fn zg_get_many(optional: ?*Handle, requests: ?[*]const ReadRequest, r
     if (requests == null or results == null or count == 0) return .invalid_argument;
     if (count > max_c_batch) return .limit;
 
-    var native_requests: [max_c_batch]db.ReadRequest = undefined;
-    var native_results: [max_c_batch]db.ReadResult = undefined;
-    for (requests.?[0..count], 0..) |request, i| {
-        const key = request.key.native() catch |err| return status(err);
+    for (requests.?[0..count]) |request| {
+        _ = request.key.native() catch |err| return status(err);
         if (request.output == null and request.capacity != 0) return .invalid_argument;
-        const bytes: []u8 = if (request.output) |ptr| ptr[0..request.capacity] else &.{};
-        native_requests[i] = .{ .key = key, .output = bytes };
     }
 
-    handle.world.getMany(native_requests[0..count], native_results[0..count]) catch |err| return status(err);
+    var start: usize = 0;
+    while (start < count) : (start += read_chunk) {
+        const end = @min(count, start + read_chunk);
+        var native_requests: [read_chunk]db.ReadRequest = undefined;
+        var native_results: [read_chunk]db.ReadResult = undefined;
+        for (requests.?[start..end], native_requests[0 .. end - start]) |request, *native| {
+            const bytes: []u8 = if (request.output) |ptr| ptr[0..request.capacity] else &.{};
+            native.* = .{ .key = request.key.native() catch unreachable, .output = bytes };
+        }
 
-    for (native_results[0..count], 0..) |result, i| {
-        results.?[i] = .{
-            .status = switch (result.status) {
-                .ok => .ok,
-                .not_found => .not_found,
-                .buffer_too_small => .buffer_too_small,
-            },
-            .required = result.required,
-        };
+        handle.world.getMany(native_requests[0 .. end - start], native_results[0 .. end - start]) catch |err| return status(err);
+
+        for (native_results[0 .. end - start], results.?[start..end]) |result, *target| {
+            target.* = .{
+                .status = switch (result.status) {
+                    .ok => .ok,
+                    .not_found => .not_found,
+                    .buffer_too_small => .buffer_too_small,
+                },
+                .required = result.required,
+            };
+        }
     }
     return .ok;
 }
+
+// Kept small: ReleaseSafe fills undefined stack arrays.
+const read_chunk = 32;
 
 pub export fn zg_flush(optional: ?*Handle) Status {
     const handle = optional orelse return .invalid_argument;

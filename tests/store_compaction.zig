@@ -225,7 +225,7 @@ test "getSized required always matches the size that produced it" {
     try testing.expectEqual(null, failure);
 }
 
-test "getMany verifies each segment header once instead of once per key" {
+test "getMany reads nearby records in one call per segment" {
     if (!db.directory.supported) return error.SkipZigTest;
     var stats: db.Stats = .{};
     var tmp = testing.tmpDir(.{});
@@ -254,13 +254,11 @@ test "getMany verifies each segment header once instead of once per key" {
     stats.reset();
     try store.getMany(&requests, &results);
     for (results) |r| try testing.expectEqual(db.ReadStatus.ok, r.status);
-    // 2 header checks + 4 records
-    try testing.expectEqual(@as(u64, 6), stats.disk_reads.load(.monotonic));
+    try testing.expectEqual(@as(u64, 2), stats.disk_reads.load(.monotonic));
 
     stats.reset();
     for (requests) |request| _ = try store.get(request.key, request.output);
-    // independent gets re-check the header every time: 4 headers + 4 records
-    try testing.expectEqual(@as(u64, 8), stats.disk_reads.load(.monotonic));
+    try testing.expectEqual(@as(u64, 4), stats.disk_reads.load(.monotonic));
 }
 
 fn getManyLoop(store: *db.Store, requests: []const db.ReadRequest, results: []db.ReadResult, failure: *?anyerror) void {

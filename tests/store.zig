@@ -199,3 +199,80 @@ test "a store rejects keys from other regions instead of aliasing its own" {
     try testing.expectEqual(@as(?u32, 4), try store.valueSize(item(1, 0, "").key));
     try store.close();
 }
+
+test "getMany matches single gets across fragmented saves" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stats: db.Stats = .{};
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{
+        .max_segment_size = 8192,
+        .batch_buffer_size = 4096,
+        .stats = &stats,
+    });
+    defer store.deinit();
+
+    var prng = std.Random.DefaultPrng.init(7);
+    const random = prng.random();
+    var values: [200][4][64]u8 = undefined;
+    for (&values, 1..) |*batch_values, id| {
+        var entries: [4]db.entry.Entry = undefined;
+        const count = random.intRangeAtMost(usize, 1, entries.len);
+        for (entries[0..count], batch_values[0..count]) |*entry, *bytes| {
+            const x = @as(i32, random.uintLessThan(u8, 24));
+            const len = random.uintLessThan(usize, bytes.len);
+            random.bytes(bytes[0..len]);
+            entry.* = item(id, x, if (random.uintLessThan(u8, 8) == 0) null else bytes[0..len]);
+        }
+        _ = try store.write(.{ .entries = entries[0..count] });
+    }
+
+    var outputs: [40][64]u8 = undefined;
+    var requests: [40]db.ReadRequest = undefined;
+    var results: [40]db.ReadResult = undefined;
+    for (&requests, &outputs) |*request, *output| {
+        request.* = .{ .key = item(1, @as(i32, random.uintLessThan(u8, 24)), "").key, .output = output[0..random.uintAtMost(usize, output.len)] };
+    }
+    stats.reset();
+    try store.getMany(&requests, &results);
+    try testing.expect(stats.disk_reads.load(.monotonic) < requests.len);
+
+    for (requests, results) |request, result| {
+        var single: [64]u8 = undefined;
+        var required: usize = 0;
+        const value = store.getSized(request.key, single[0..request.output.len], &required) catch |err| {
+            try testing.expectEqual(error.BufferTooSmall, err);
+            try testing.expectEqual(db.ReadStatus.buffer_too_small, result.status);
+            try testing.expectEqual(required, result.required);
+            continue;
+        };
+        if (value) |bytes| {
+            try testing.expectEqual(db.ReadStatus.ok, result.status);
+            try testing.expectEqualSlices(u8, bytes, result.value);
+        } else try testing.expectEqual(db.ReadStatus.not_found, result.status);
+    }
+    try store.close();
+}
+
+test "getMany still detects a corrupt record inside a combined read" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{});
+    defer store.deinit();
+    _ = try store.write(.{ .entries = &.{ item(1, 0, "aaaa"), item(1, 1, "bbbb"), item(1, 2, "cccc") } });
+
+    const handle = try tmp.dir.openFile(io, segment_name, .{ .mode = .read_write });
+    defer handle.close(io);
+    const file: db.storage.File = .{ .handle = handle, .io = io };
+    try file.writeAll("x", db.segment.encoded_len + (db.entry.overhead + 4) + db.record.encoded_len + db.Key.encoded_len);
+
+    var out: [3][4]u8 = undefined;
+    var results: [3]db.ReadResult = undefined;
+    try testing.expectError(error.ChecksumMismatch, store.getMany(&.{
+        .{ .key = item(1, 0, "").key, .output = &out[0] },
+        .{ .key = item(1, 1, "").key, .output = &out[1] },
+        .{ .key = item(1, 2, "").key, .output = &out[2] },
+    }, &results));
+    try testing.expectEqualStrings("aaaa", (try store.get(item(1, 0, "").key, &out[0])).?);
+}

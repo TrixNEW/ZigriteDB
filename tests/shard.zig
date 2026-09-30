@@ -357,7 +357,7 @@ const Gated = struct {
     }
 
     pub fn readExact(self: *Gated, output: []u8, offset: u64) !void {
-        if (offset == 0 and self.armed.swap(false, .acq_rel)) {
+        if (self.armed.swap(false, .acq_rel)) {
             self.paused.store(true, .release);
             while (!self.released.load(.acquire)) std.Thread.yield() catch {};
         }

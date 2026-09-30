@@ -76,3 +76,22 @@ test "compressed values survive reopen and compaction" {
     try testing.expectEqualSlices(u8, &raw, (try reopened.get(compressed.key, &output)).?);
     try reopened.close();
 }
+
+test "decompression round-trips every match shape and stays inside the value" {
+    var prng = std.Random.DefaultPrng.init(3);
+    const random = prng.random();
+    var encoder: db.lz4.Encoder = .{};
+    var input: [4096]u8 = undefined;
+    var compressed: [4200]u8 = undefined;
+    var output: [4096 + 64]u8 = undefined;
+    for (0..400) |round| {
+        const len = random.uintAtMost(usize, input.len);
+        const period = random.intRangeAtMost(usize, 1, 40);
+        for (input[0..len], 0..) |*b, i| b.* = if (random.uintLessThan(u8, 8) == 0) random.int(u8) else @truncate(i % period + round);
+        const packed_bytes = try encoder.compress(input[0..len], &compressed);
+        @memset(&output, 0xee);
+        const value = try db.lz4.decompress(packed_bytes, &output, len);
+        try std.testing.expectEqualSlices(u8, input[0..len], value);
+        for (output[len..]) |b| try std.testing.expectEqual(@as(u8, 0xee), b);
+    }
+}

@@ -84,6 +84,14 @@ pub const Decoded = struct {
 
 /// The decoded value borrows from `bytes`
 pub fn decode(bytes: []const u8) Error!Decoded {
+    const decoded = try decodeStored(bytes);
+    const item = decoded.entry;
+    if (item.header.compression == .lz4) try lz4.validate(item.value, item.header.raw_len);
+    return decoded;
+}
+
+/// Like `decode`, but leaves the LZ4 stream to be checked by `lz4.decompress`.
+pub fn decodeStored(bytes: []const u8) Error!Decoded {
     const header = try record.Header.decode(bytes);
     try validateHeader(header);
 
@@ -97,9 +105,6 @@ pub fn decode(bytes: []const u8) Error!Decoded {
     if (expected_checksum != actual_checksum) return error.ChecksumMismatch;
 
     const key_end = record.encoded_len + Key.encoded_len;
-
-    if (header.compression == .lz4) try lz4.validate(bytes[key_end..checksum_offset], header.raw_len);
-
     return .{
         .entry = .{
             .header = header,

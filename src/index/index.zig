@@ -55,7 +55,8 @@ pub const Prepared = struct {
 // The sort is stable, so the last change per key wins.
 fn latestPerKey(changes: []Change) []Change {
     if (changes.len < 2) return changes;
-    std.mem.sort(Change, changes, {}, changeLessThan);
+    // std.mem.sort puts a large buffer on the stack; small batches skip it.
+    if (changes.len <= 32) std.sort.insertion(Change, changes, {}, changeLessThan) else std.mem.sort(Change, changes, {}, changeLessThan);
     var kept: usize = 0;
     for (changes, 0..) |change, i| {
         if (i + 1 < changes.len and changes[i + 1].key == change.key) continue;
@@ -136,13 +137,13 @@ pub const Index = struct {
         return try lz4.decompress(item.value, scratch[used..], item.header.raw_len);
     }
 
-    pub fn readLocationInto(self: *const Index, location: Location, key: Key, device: anytype, scratch: []u8, output: []u8) ![]const u8 {
-        try self.verifySegmentHeader(device, self.segment_ids[location.segment]);
-        return self.readAtInto(location, key, device, scratch, output);
-    }
-
     pub fn readAtInto(self: *const Index, location: Location, key: Key, device: anytype, scratch: []u8, output: []u8) ![]const u8 {
         return decodeInto(try self.readRecordAt(location, key, device, scratch), output);
+    }
+
+    /// Decodes a record already read from `location`.
+    pub fn decodeAt(bytes: []const u8, location: Location, key: Key, output: []u8) ![]const u8 {
+        return decodeInto(try checkRecord(bytes, location, key), output);
     }
 
     fn decodeInto(item: entry.Entry, output: []u8) ![]const u8 {
@@ -181,7 +182,13 @@ pub const Index = struct {
             _ = s.bytes_read.fetchAdd(@intCast(len), .monotonic);
         }
 
-        const decoded = try entry.decode(scratch[0..len]);
+        return checkRecord(scratch[0..len], location, key);
+    }
+
+    fn checkRecord(bytes: []const u8, location: Location, key: Key) !entry.Entry {
+        const len = @as(usize, location.stored_len) + entry.overhead;
+        if (bytes.len != len) return error.IndexMismatch;
+        const decoded = try entry.decodeStored(bytes);
         const same_record =
             decoded.entry.header.kind == .put and
             decoded.entry.header.batch_id == location.batch_id and

@@ -60,7 +60,7 @@ test "store stats: disk reads only move on a real read, not an index-only miss" 
     try testing.expectEqual(@as(u64, 0), stats.disk_reads.load(.monotonic));
 
     try testing.expectEqualStrings("saved", (try store.get(item(1, 0, "").key, &output)).?);
-    try testing.expectEqual(@as(u64, 2), stats.disk_reads.load(.monotonic));
+    try testing.expectEqual(@as(u64, 1), stats.disk_reads.load(.monotonic));
     try testing.expect(stats.bytes_read.load(.monotonic) > 0);
 }
 

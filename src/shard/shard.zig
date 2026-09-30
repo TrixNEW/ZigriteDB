@@ -46,6 +46,9 @@ pub fn Shard(comptime Device: type) type {
         idle: std.Io.Condition = .init,
         closed: bool = false,
         closing: bool = false,
+        // Reusable read buffers, guarded by `mutex`.
+        spare: std.ArrayListUnmanaged([]u8) = .empty,
+        lent: usize = 0,
 
         const Self = @This();
 
@@ -69,6 +72,7 @@ pub fn Shard(comptime Device: type) type {
             generation: *Generation,
             device: Device,
             location: index_module.Location,
+            scratch: []u8,
         };
 
         pub const max_batch_keys = 128;
@@ -316,19 +320,48 @@ pub fn Shard(comptime Device: type) type {
             const location = (try generation.index.get(key)) orelse return null;
             if (location.segment >= generation.segment_count) return error.IndexMismatch;
 
+            const scratch = try self.lend();
             generation.readers += 1;
-            return .{ .generation = generation, .device = generation.devices[location.segment], .location = location };
+            return .{
+                .generation = generation,
+                .device = generation.devices[location.segment],
+                .location = location,
+                .scratch = scratch,
+            };
         }
 
-        fn unpin(self: *Self, generation: *Generation) void {
+        // Reserves room up front so unpin can always take the buffer back.
+        fn lend(self: *Self) ![]u8 {
+            try self.spare.ensureTotalCapacity(self.allocator, self.spare.items.len + self.lent + 1);
+            self.lent += 1;
+            return self.spare.pop() orelse &.{};
+        }
+
+        fn unpin(self: *Self, generation: *Generation, scratch: []u8) void {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
 
             generation.readers -= 1;
             if (generation.readers == 0) self.idle.broadcast(self.io);
+            self.lent -= 1;
+            if (scratch.len == 0) return;
+            if (scratch.len > max_spare_len or self.closed) return self.allocator.free(scratch);
+            self.spare.appendAssumeCapacity(scratch);
         }
 
-        fn pinMany(self: *Self, requests: []const ReadRequest, slots: []?BatchSlot) !?*Generation {
+        const min_spare_len = 64 * 1024;
+        const max_spare_len = 1024 * 1024;
+
+        fn fit(self: *Self, scratch: *[]u8, len: usize) ![]u8 {
+            if (scratch.len < len) {
+                self.allocator.free(scratch.*);
+                scratch.* = &.{};
+                scratch.* = try self.allocator.alloc(u8, @max(len, min_spare_len));
+            }
+            return scratch.*[0..len];
+        }
+
+        fn pinMany(self: *Self, requests: []const ReadRequest, slots: []?BatchSlot, scratch: *[]u8) !?*Generation {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
 
@@ -347,40 +380,31 @@ pub fn Shard(comptime Device: type) type {
             }
 
             if (hits == 0) return null;
+            scratch.* = try self.lend();
             generation.readers += 1;
             return generation;
         }
 
-        const inline_scratch_len = 8192;
-
-        fn readPinned(self: *Self, pinned: Pinned, key: Key, output: []u8) !?[]const u8 {
+        fn readPinned(self: *Self, pinned: *Pinned, key: Key, output: []u8) !?[]const u8 {
             const batch_id = pinned.location.batch_id;
             if (self.options.cache) |cache| if (cache.get(self.io, key, batch_id, output)) |value| return value;
 
-            const len = std.math.add(usize, entry.overhead, pinned.location.stored_len) catch return error.InvalidLength;
-            var stack_scratch: [inline_scratch_len]u8 = undefined;
-            const scratch = if (len <= stack_scratch.len) stack_scratch[0..len] else try self.allocator.alloc(u8, len);
-            defer if (len > stack_scratch.len) self.allocator.free(scratch);
-
-            const value = try pinned.generation.index.readLocationInto(pinned.location, key, pinned.device, scratch, output);
+            const scratch = try self.fit(&pinned.scratch, recordLen(pinned.location));
+            const value = try pinned.generation.index.readAtInto(pinned.location, key, pinned.device, scratch, output);
             if (self.options.cache) |cache| cache.put(self.io, key, batch_id, value);
             return value;
         }
 
         pub fn unchanged(self: *Self, item: entry.Entry) !bool {
-            const pinned = (try self.pin(item.key)) orelse return item.header.kind == .delete;
-            defer self.unpin(pinned.generation);
+            var pinned = (try self.pin(item.key)) orelse return item.header.kind == .delete;
+            defer self.unpin(pinned.generation, pinned.scratch);
             if (item.header.kind == .delete) return false;
 
             const location = pinned.location;
             if (location.stored_len != item.header.stored_len or location.raw_len != item.header.raw_len or
                 location.fingerprint != index_module.fingerprint(item.header.compression, item.value)) return false;
 
-            const len = std.math.add(usize, entry.overhead, location.stored_len) catch return error.InvalidLength;
-            var stack_scratch: [inline_scratch_len]u8 = undefined;
-            const scratch = if (len <= stack_scratch.len) stack_scratch[0..len] else try self.allocator.alloc(u8, len);
-            defer if (len > stack_scratch.len) self.allocator.free(scratch);
-
+            const scratch = try self.fit(&pinned.scratch, recordLen(location));
             const stored = try pinned.generation.index.readRecordAt(location, item.key, pinned.device, scratch);
             return stored.header.compression == item.header.compression and std.mem.eql(u8, stored.value, item.value);
         }
@@ -400,70 +424,98 @@ pub fn Shard(comptime Device: type) type {
         }
 
         pub fn get(self: *Self, key: Key, output: []u8) !?[]const u8 {
-            const pinned = (try self.pin(key)) orelse return null;
-            defer self.unpin(pinned.generation);
+            var pinned = (try self.pin(key)) orelse return null;
+            defer self.unpin(pinned.generation, pinned.scratch);
 
-            return self.readPinned(pinned, key, output);
+            return self.readPinned(&pinned, key, output);
         }
 
         pub fn getSized(self: *Self, key: Key, output: []u8, required: *usize) !?[]const u8 {
-            const pinned = (try self.pin(key)) orelse return null;
-            defer self.unpin(pinned.generation);
+            var pinned = (try self.pin(key)) orelse return null;
+            defer self.unpin(pinned.generation, pinned.scratch);
 
             required.* = pinned.location.raw_len;
             if (output.len < pinned.location.raw_len) return error.BufferTooSmall;
 
-            return self.readPinned(pinned, key, output);
+            return self.readPinned(&pinned, key, output);
         }
+
+        // Kept small: ReleaseSafe fills undefined stack arrays.
+        const read_chunk = 32;
+        const max_gap = 4096;
+        const max_span = 256 * 1024;
 
         pub fn getMany(self: *Self, requests: []const ReadRequest, results: []ReadResult) !void {
             std.debug.assert(requests.len == results.len);
+            if (requests.len > max_batch_keys) return error.TooManyKeys;
+            var start: usize = 0;
+            while (start < requests.len) : (start += read_chunk) {
+                const end = @min(requests.len, start + read_chunk);
+                try self.getChunk(requests[start..end], results[start..end]);
+            }
+        }
+
+        fn getChunk(self: *Self, requests: []const ReadRequest, results: []ReadResult) !void {
             @memset(results, .{});
             const n = requests.len;
-            if (n == 0) return;
-            if (n > max_batch_keys) return error.TooManyKeys;
 
-            var slots: [max_batch_keys]?BatchSlot = undefined;
-            const generation = (try self.pinMany(requests, slots[0..n])) orelse return;
-            defer self.unpin(generation);
+            var slots: [read_chunk]?BatchSlot = undefined;
+            var scratch: []u8 = &.{};
+            const generation = (try self.pinMany(requests, slots[0..n], &scratch)) orelse return;
+            defer self.unpin(generation, scratch);
 
-            var order: [max_batch_keys]u8 = undefined;
+            for (requests, slots[0..n], results) |request, *slot, *result| {
+                const location = (slot.* orelse continue).location;
+                if (request.output.len < location.raw_len) {
+                    result.* = .{ .status = .buffer_too_small, .required = location.raw_len };
+                    slot.* = null;
+                    continue;
+                }
+                if (self.options.cache) |cache| if (cache.get(self.io, request.key, location.batch_id, request.output)) |value| {
+                    result.* = .{ .status = .ok, .required = value.len, .value = value };
+                    slot.* = null;
+                };
+            }
+
+            var order: [read_chunk]u8 = undefined;
             for (0..n) |i| order[i] = @intCast(i);
             sortByLocation(order[0..n], slots[0..n]);
 
-            var stack_scratch: [inline_scratch_len]u8 = undefined;
-            var verified_segment: ?u16 = null;
-
-            for (order[0..n]) |idx| {
-                const slot = slots[idx] orelse continue;
-                const device = generation.devices[slot.segment_position];
-                const key = requests[idx].key;
-                const batch_id = slot.location.batch_id;
-
-                if (self.options.cache) |cache| if (cache.get(self.io, key, batch_id, requests[idx].output)) |value| {
-                    results[idx] = .{ .status = .ok, .required = value.len, .value = value };
-                    continue;
-                };
-
-                if (verified_segment == null or verified_segment.? != slot.segment_position) {
-                    try generation.index.verifySegmentHeader(device, generation.segment_ids[slot.segment_position]);
-                    verified_segment = slot.segment_position;
+            // Nearby records are read with one call and decoded from the same buffer.
+            var first: usize = 0;
+            while (first < n) {
+                const head = slots[order[first]] orelse break;
+                const start = head.location.offset;
+                var end = start + recordLen(head.location);
+                var last = first + 1;
+                while (last < n) : (last += 1) {
+                    const next = slots[order[last]] orelse break;
+                    const next_end = next.location.offset + recordLen(next.location);
+                    if (next.segment_position != head.segment_position or next.location.offset > end + max_gap or
+                        next_end - start > max_span) break;
+                    end = @max(end, next_end);
                 }
 
-                const required = slot.location.raw_len;
-                if (requests[idx].output.len < required) {
-                    results[idx] = .{ .status = .buffer_too_small, .required = required };
-                    continue;
+                const bytes = try self.fit(&scratch, @intCast(end - start));
+                try generation.devices[head.segment_position].readExact(bytes, start);
+                if (generation.index.stats) |s| {
+                    _ = s.disk_reads.fetchAdd(1, .monotonic);
+                    _ = s.bytes_read.fetchAdd(bytes.len, .monotonic);
                 }
 
-                const len = std.math.add(usize, entry.overhead, slot.location.stored_len) catch return error.InvalidLength;
-                const scratch = if (len <= stack_scratch.len) stack_scratch[0..len] else try self.allocator.alloc(u8, len);
-                defer if (len > stack_scratch.len) self.allocator.free(scratch);
-
-                const value = try generation.index.readAtInto(slot.location, key, device, scratch, requests[idx].output);
-                if (self.options.cache) |cache| cache.put(self.io, key, batch_id, value);
-                results[idx] = .{ .status = .ok, .required = required, .value = value };
+                for (order[first..last]) |i| {
+                    const location = slots[i].?.location;
+                    const record = bytes[@intCast(location.offset - start)..][0..recordLen(location)];
+                    const value = try index_module.Index.decodeAt(record, location, requests[i].key, requests[i].output);
+                    if (self.options.cache) |cache| cache.put(self.io, requests[i].key, location.batch_id, value);
+                    results[i] = .{ .status = .ok, .required = value.len, .value = value };
+                }
+                first = last;
             }
+        }
+
+        fn recordLen(location: index_module.Location) usize {
+            return @as(usize, location.stored_len) + entry.overhead;
         }
 
         fn sortByLocation(order: []u8, slots: []const ?BatchSlot) void {
@@ -561,6 +613,8 @@ pub fn Shard(comptime Device: type) type {
             while (self.generation.readers != 0) self.idle.waitUncancelable(self.io, &self.mutex);
             self.generation.destroy();
             self.allocator.free(self.scratch);
+            for (self.spare.items) |buffer| self.allocator.free(buffer);
+            self.spare.deinit(self.allocator);
             self.closed = true;
         }
     };
