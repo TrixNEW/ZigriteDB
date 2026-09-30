@@ -62,7 +62,7 @@ pub const Options = extern struct {
     max_segments: u32 = 64,
     batch_buffer_size: u32 = 1024 * 1024,
     max_segment_size: u64 = 256 * 1024 * 1024,
-    buffered: u32 = 0,
+    buffered: u32 = 1,
     compression_threshold: u32 = 256,
     cache_bytes: u64 = 0,
     cache_shards: u32 = 16,
@@ -186,13 +186,19 @@ const WriteContext = struct {
     busy: bool = false,
 
     fn init(threshold: u32, size: usize) !WriteContext {
-        const entries = try allocator.alloc(db.entry.Entry, db.batch.max_records);
+        const entries = try allocator.alloc(db.entry.Entry, 64);
         errdefer allocator.free(entries);
         return .{
             .entries = entries,
-            .compression = try allocator.alloc(u8, if (threshold == 0) 0 else size),
+            .compression = try allocator.alloc(u8, if (threshold == 0) 0 else @min(size, 64 * 1024)),
             .threshold = threshold,
         };
+    }
+
+    fn reserve(self: *WriteContext, count: usize, compression_size: usize, max_size: usize) !void {
+        if (count > self.entries.len) self.entries = try allocator.realloc(self.entries, count);
+        const needed = @min(compression_size, max_size);
+        if (needed > self.compression.len) self.compression = try allocator.realloc(self.compression, needed);
     }
 
     fn deinit(self: *WriteContext) void {
@@ -286,8 +292,14 @@ pub export fn zg_write(optional: ?*Handle, id: u64, operations: ?[*]const Operat
     const handle = optional orelse return .invalid_argument;
     if (operations == null or count == 0) return .invalid_argument;
     if (count > db.batch.max_records) return .limit;
+    var compression_size: usize = 0;
+    for (operations.?[0..count]) |operation| {
+        const bound = compressionBound(handle.threshold, operation) catch |err| return status(err);
+        compression_size = std.math.add(usize, compression_size, bound) catch return .limit;
+    }
     const context = handle.acquireWriter() catch |err| return status(err);
     defer handle.releaseWriter(context);
+    context.reserve(count, compression_size, handle.world.options.shard.batch_buffer_size) catch |err| return status(err);
     _ = prepare(context, if (id == 0) 1 else id, operations.?[0..count], 0, 0) catch |err| return status(err);
     const entries = context.entries[0..count];
     _ = (if (id == 0) handle.world.writeNext(entries) else handle.world.write(.{ .entries = entries })) catch |err| return status(err);
@@ -306,11 +318,14 @@ pub export fn zg_write_group(optional: ?*Handle, input: ?[*]const Batch, count: 
     if (count > @import("batch/group.zig").max_batches) return .limit;
     var total: usize = 0;
     var raw_bytes: usize = 0;
+    var compression_size: usize = 0;
     for (input.?[0..count]) |batch| {
         if (batch.operations == null or batch.count == 0 or batch.id == 0) return .invalid_argument;
         total = std.math.add(usize, total, batch.count) catch return .limit;
         if (total > db.batch.max_records) return .limit;
         for (batch.operations.?[0..batch.count]) |operation| {
+            const bound = compressionBound(handle.threshold, operation) catch |err| return status(err);
+            compression_size = std.math.add(usize, compression_size, bound) catch return .limit;
             raw_bytes = std.math.add(usize, raw_bytes, operation.value_len) catch return .limit;
             raw_bytes = std.math.add(usize, raw_bytes, db.entry.overhead) catch return .limit;
             if (raw_bytes > db.batch.max_bytes) return .limit;
@@ -318,6 +333,7 @@ pub export fn zg_write_group(optional: ?*Handle, input: ?[*]const Batch, count: 
     }
     const context = handle.acquireWriter() catch |err| return status(err);
     defer handle.releaseWriter(context);
+    context.reserve(total, compression_size, handle.world.options.shard.batch_buffer_size) catch |err| return status(err);
     var batches: [@import("batch/group.zig").max_batches]db.WriteBatch = undefined;
     var offset: usize = 0;
     var used: usize = 0;
@@ -328,6 +344,12 @@ pub export fn zg_write_group(optional: ?*Handle, input: ?[*]const Batch, count: 
     }
     handle.world.writeGroup(batches[0..count]) catch |err| return status(err);
     return .ok;
+}
+
+fn compressionBound(threshold: u32, operation: Operation) !usize {
+    if (operation.value_len > db.record.max_value_len) return error.BatchTooLarge;
+    if (threshold == 0 or operation.remove != 0 or operation.value_len < threshold) return 0;
+    return db.lz4.bound(operation.value_len);
 }
 
 fn prepare(context: *WriteContext, id: u64, operations: []const Operation, offset: usize, compression_offset: usize) !usize {

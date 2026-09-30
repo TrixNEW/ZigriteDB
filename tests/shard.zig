@@ -25,7 +25,9 @@ test "writes and deletes become readable together" {
 test "failed writes leave the old index visible" {
     for ([_]bool{ false, true }) |sync_failure| {
         var device: Device = .{};
-        var shard = try Shard.create(testing.allocator, testing.io, &device, header, options);
+        var synchronous = options;
+        synchronous.durability = .sync;
+        var shard = try Shard.create(testing.allocator, testing.io, &device, header, synchronous);
         defer shard.deinit();
         _ = try shard.write(.{ .entries = &.{item(1, 0, "old")} });
 
@@ -105,9 +107,7 @@ test "concurrent writes cannot publish the same batch twice" {
 
 test "close flushes buffered writes and rejects later calls" {
     var device: Device = .{};
-    var buffered = options;
-    buffered.durability = .buffered;
-    var shard = try Shard.create(testing.allocator, testing.io, &device, header, buffered);
+    var shard = try Shard.create(testing.allocator, testing.io, &device, header, options);
     defer shard.deinit();
 
     try testing.expect(!(try shard.write(.{ .entries = &.{item(1, 0, "value")} })).synced);

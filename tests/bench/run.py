@@ -16,7 +16,8 @@ def main():
     parser.add_argument("--batches", type=int, default=2048)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--threads", type=int, default=4)
-    parser.add_argument("--cache-mb", type=int, nargs="*", default=[1, 16])
+    parser.add_argument("--cache-mb", type=int, nargs="*", default=[1, 4, 16])
+    parser.add_argument("--skip-unchanged", action="store_true")
     args = parser.parse_args()
     if args.batches < 128 or args.batches > 1000000 or args.batches % 16 or args.repeats < 1:
         parser.error("use 128..1000000 batches in multiples of 16 and at least one repeat")
@@ -27,11 +28,13 @@ def main():
     for mode in ("sync", "group", "buffered"):
         for repeat in range(args.repeats):
             with tempfile.TemporaryDirectory(prefix="zigritedb-bench-", dir=args.directory) as path:
-                run = subprocess.run([str(args.binary.resolve()), path, str(args.batches), mode],
+                run = subprocess.run([str(args.binary.resolve()), path, str(args.batches), mode,
+                                      "0", "1" if args.skip_unchanged else "0"],
                                      env=env, check=True, capture_output=True, text=True, timeout=600)
                 result = json.loads(run.stdout)
                 result["binary"] = "native_bench"
                 result["repeat"] = repeat
+                result["skip_unchanged"] = args.skip_unchanged
                 result["database_bytes"] = sum(file.stat().st_size for file in Path(path).rglob("*") if file.is_file())
                 stats = result.get("stats")
                 if stats and stats.get("compressed_bytes_written"):
@@ -51,17 +54,19 @@ def main():
     for cache_mb in args.cache_mb:
         for repeat in range(args.repeats):
             with tempfile.TemporaryDirectory(prefix="zigritedb-bench-cache-", dir=args.directory) as path:
-                run = subprocess.run([str(args.binary.resolve()), path, str(args.batches), "sync", str(cache_mb)],
+                run = subprocess.run([str(args.binary.resolve()), path, str(args.batches), "sync", str(cache_mb),
+                                      "1" if args.skip_unchanged else "0"],
                                      env=env, check=True, capture_output=True, text=True, timeout=600)
                 result = json.loads(run.stdout)
                 result["binary"] = "native_bench"
                 result["cache_mb"] = cache_mb
                 result["repeat"] = repeat
+                result["skip_unchanged"] = args.skip_unchanged
                 stats = result["stats"]
                 lookups = stats["cache_hits"] + stats["cache_misses"]
                 result["cache_hit_rate"] = stats["cache_hits"] / lookups if lookups else 0.0
                 results.append(result)
-    print(json.dumps({"platform": platform.platform(), "synthetic": True,
+    print(json.dumps({"platform": platform.platform(), "workloads": ["synthetic", "minecraft-inspired"],
                       "group_batches_per_call": 16, "results": results}, indent=2))
 
 
