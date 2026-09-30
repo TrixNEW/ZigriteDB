@@ -271,15 +271,13 @@ pub fn Shard(comptime Device: type) type {
             const end = std.math.add(u64, self.writer.offset, bytes.len) catch return error.SegmentFull;
             if (end > self.options.max_segment_size) return error.SegmentFull;
 
-            var prepared = try self.generation.index.prepare(.{
+            const prepared = try self.generation.index.prepare(.{
                 .id = batch.entries[0].header.batch_id,
                 .records = bytes[0 .. bytes.len - commit.commit_len],
                 .end_offset = std.math.cast(usize, end) orelse return error.InvalidLength,
             }, self.generation.segment_count - 1);
-            defer prepared.deinit();
-
             const result = try self.writer.appendEncoded(bytes, self.options.durability);
-            self.generation.index.publish(&prepared);
+            self.generation.index.publish(prepared);
             self.generation.index.active_offset = @intCast(result.end);
             return result;
         }

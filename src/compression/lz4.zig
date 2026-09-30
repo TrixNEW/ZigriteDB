@@ -10,11 +10,18 @@ pub fn bound(size: usize) Error!usize {
 
 pub const Encoder = struct {
     table: [4096]u32 = undefined,
+    // Entries below base are from earlier inputs.
+    base: u32 = 0,
 
     /// Input and output must not overlap.
     pub fn compress(self: *Encoder, input: []const u8, output: []u8) Error![]u8 {
         if (output.len < try bound(input.len)) return error.BufferTooSmall;
-        @memset(&self.table, std.math.maxInt(u32));
+        if (self.base == 0 or self.base > std.math.maxInt(u32) - max_size - 1) {
+            @memset(&self.table, 0);
+            self.base = 1;
+        }
+        const base = self.base;
+        defer self.base += @intCast(input.len + 1);
         var anchor: usize = 0;
         var pos: usize = 0;
         var used: usize = 0;
@@ -22,9 +29,10 @@ pub const Encoder = struct {
         while (input.len >= 13 and pos <= input.len - 12) {
             const word = std.mem.readInt(u32, input[pos..][0..4], .little);
             const hash = (word *% 2654435761) >> 20;
-            const previous = self.table[hash];
-            self.table[hash] = @intCast(pos);
-            if (previous >= pos or pos - previous > 65535 or !std.mem.eql(u8, input[previous..][0..4], input[pos..][0..4])) {
+            const stored = self.table[hash];
+            self.table[hash] = base + @as(u32, @intCast(pos));
+            const previous = stored -% base;
+            if (stored < base or previous >= pos or pos - previous > 65535 or !std.mem.eql(u8, input[previous..][0..4], input[pos..][0..4])) {
                 pos += 1 + (misses >> 6);
                 misses += 1;
                 continue;

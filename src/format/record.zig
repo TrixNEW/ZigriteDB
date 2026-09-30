@@ -1,5 +1,5 @@
 const std = @import("std");
-const Crc32c = std.hash.crc.Crc32Iscsi;
+const Crc32c = @import("crc.zig");
 
 pub const encoded_len = 32;
 pub const max_value_len = 16 * 1024 * 1024;

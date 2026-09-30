@@ -220,6 +220,28 @@ test "read indexed data after reopening a file" {
     try testing.expectEqualStrings("saved", (try index.read(item(1, 0, "").key, file, &scratch)).?);
 }
 
+test "repeated keys within one batch keep the last change" {
+    var bytes: [2048]u8 = undefined;
+    try header(1, &bytes);
+    var end = try append(&.{item(1, 3, "seed")}, &bytes, 48);
+    end = try append(&.{
+        item(2, 0, "a"),  item(2, 1, "b"), item(2, 0, null),
+        item(2, 2, null), item(2, 1, "c"), item(2, 2, "d"),
+        item(2, 3, null), item(2, 0, "e"), item(2, 3, "f"),
+        item(2, 3, null),
+    }, &bytes, end);
+    var index = try db.index.rebuild(testing.allocator, metadata, &.{bytes[0..end]}, 3);
+    defer index.deinit();
+
+    var scratch: [128]u8 = undefined;
+    const device: Device = .{ .bytes = bytes[0..end] };
+    try testing.expectEqual(@as(usize, 3), index.count());
+    try testing.expectEqualStrings("e", (try index.read(item(1, 0, "").key, device, &scratch)).?);
+    try testing.expectEqualStrings("c", (try index.read(item(1, 1, "").key, device, &scratch)).?);
+    try testing.expectEqualStrings("d", (try index.read(item(1, 2, "").key, device, &scratch)).?);
+    try testing.expectEqual(null, try index.get(item(1, 3, "").key));
+}
+
 test "replacement batches reuse index capacity without early publication" {
     var bytes: [4096]u8 = undefined;
     try header(1, &bytes);
@@ -235,16 +257,15 @@ test "replacement batches reuse index capacity without early publication" {
     defer index.deinit();
     const capacity = index.entries.capacity();
     const next = try append(&replacement, &bytes, end);
-    var prepared = try index.prepare(.{
+    const prepared = try index.prepare(.{
         .id = 2,
         .records = bytes[end .. next - db.batch.commit_len],
         .end_offset = next,
     }, 0);
-    defer prepared.deinit();
     try testing.expectEqual(capacity, index.entries.capacity());
     try testing.expect((try index.get(initial[0].key)) != null);
     try testing.expectEqual(null, try index.get(replacement[6].key));
-    index.publish(&prepared);
+    index.publish(prepared);
     try testing.expectEqual(@as(usize, 6), index.count());
     for (0..6) |i| {
         try testing.expectEqual(null, try index.get(initial[i].key));

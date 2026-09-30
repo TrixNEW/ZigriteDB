@@ -22,7 +22,6 @@ const PackedKey = packed struct(u64) {
 };
 
 const Map = std.AutoHashMapUnmanaged(u64, Location);
-const Pending = std.AutoHashMapUnmanaged(u64, ?Location);
 
 pub const Location = struct {
     offset: u64,
@@ -41,16 +40,33 @@ pub fn fingerprint(compression: record.Compression, stored: []const u8) u32 {
     return @truncate(std.hash.Wyhash.hash(@intFromEnum(compression), stored));
 }
 
-pub const Prepared = struct {
-    allocator: std.mem.Allocator,
-    changes: Pending,
-    batch_id: u64,
-
-    pub fn deinit(self: *Prepared) void {
-        self.changes.deinit(self.allocator);
-        self.* = undefined;
-    }
+pub const Change = struct {
+    key: u64,
+    location: ?Location,
 };
+
+// Valid until the next prepare().
+pub const Prepared = struct {
+    changes: []const Change,
+    batch_id: u64,
+};
+
+// The sort is stable, so the last change per key wins.
+fn latestPerKey(changes: []Change) []Change {
+    if (changes.len < 2) return changes;
+    std.mem.sort(Change, changes, {}, changeLessThan);
+    var kept: usize = 0;
+    for (changes, 0..) |change, i| {
+        if (i + 1 < changes.len and changes[i + 1].key == change.key) continue;
+        changes[kept] = change;
+        kept += 1;
+    }
+    return changes[0..kept];
+}
+
+fn changeLessThan(_: void, a: Change, b: Change) bool {
+    return a.key < b.key;
+}
 
 pub const Index = struct {
     allocator: std.mem.Allocator,
@@ -63,9 +79,11 @@ pub const Index = struct {
     has_tail: bool = false,
     stats: ?*Stats = null,
     segment_ids: []const u64 = &.{},
+    changes: std.ArrayListUnmanaged(Change) = .empty,
 
     pub fn deinit(self: *Index) void {
         self.entries.deinit(self.allocator);
+        self.changes.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -180,10 +198,7 @@ pub const Index = struct {
     }
 
     fn apply(self: *Index, batch: recovery.Batch, position: usize) !void {
-        var prepared = try self.prepare(batch, position);
-        defer prepared.deinit();
-
-        self.publish(&prepared);
+        self.publish(try self.prepare(batch, position));
     }
 
     pub fn prepare(self: *Index, batch: recovery.Batch, position: usize) !Prepared {
@@ -193,9 +208,7 @@ pub const Index = struct {
         if (batch.records.len > commit.max_bytes) return error.BatchTooLarge;
         if (batch.end_offset < batch.records.len + commit.commit_len) return error.InvalidLength;
 
-        var pending: Pending = .empty;
-        errdefer pending.deinit(self.allocator);
-
+        self.changes.clearRetainingCapacity();
         const start = batch.end_offset - commit.commit_len - batch.records.len;
         var offset: usize = 0;
         var record_count: usize = 0;
@@ -225,19 +238,17 @@ pub const Index = struct {
                 .fingerprint = fingerprint(item.header.compression, item.value),
             };
 
-            try pending.put(self.allocator, key, location);
+            try self.changes.append(self.allocator, .{ .key = key, .location = location });
             offset += decoded.consumed;
         }
 
+        const changes = latestPerKey(self.changes.items);
         var additions: u32 = 0;
         var removals: u32 = 0;
-        var changes = pending.iterator();
-
-        while (changes.next()) |change| {
-            const exists = self.entries.contains(change.key_ptr.*);
-
-            if (change.value_ptr.* != null and !exists) additions += 1;
-            if (change.value_ptr.* == null and exists) removals += 1;
+        for (changes) |change| {
+            const exists = self.entries.contains(change.key);
+            if (change.location != null and !exists) additions += 1;
+            if (change.location == null and exists) removals += 1;
         }
 
         const new_count = @as(u64, self.entries.count()) - removals + additions;
@@ -245,24 +256,16 @@ pub const Index = struct {
 
         try self.entries.ensureTotalCapacity(self.allocator, @intCast(new_count));
 
-        return .{
-            .allocator = self.allocator,
-            .changes = pending,
-            .batch_id = batch.id,
-        };
+        return .{ .changes = changes, .batch_id = batch.id };
     }
 
-    pub fn publish(self: *Index, prepared: *Prepared) void {
-        var changes = prepared.changes.iterator();
-
-        while (changes.next()) |change| {
-            if (change.value_ptr.* == null) _ = self.entries.remove(change.key_ptr.*);
+    pub fn publish(self: *Index, prepared: Prepared) void {
+        for (prepared.changes) |change| {
+            if (change.location == null) _ = self.entries.remove(change.key);
         }
-        changes = prepared.changes.iterator();
-        while (changes.next()) |change| {
-            if (change.value_ptr.*) |location| self.entries.putAssumeCapacity(change.key_ptr.*, location);
+        for (prepared.changes) |change| {
+            if (change.location) |location| self.entries.putAssumeCapacity(change.key, location);
         }
-
         self.last_batch_id = prepared.batch_id;
     }
 };

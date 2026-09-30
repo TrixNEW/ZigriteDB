@@ -1,5 +1,5 @@
 const std = @import("std");
-const Crc32c = std.hash.crc.Crc32Iscsi;
+const Crc32c = @import("crc.zig");
 
 const lz4 = @import("../compression/lz4.zig");
 const key_format = @import("key.zig");
