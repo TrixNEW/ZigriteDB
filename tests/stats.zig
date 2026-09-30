@@ -114,7 +114,7 @@ test "store stats: fsync_count reflects sync vs buffered durability" {
     var sync_stats: db.Stats = .{};
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var synced_store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{ .stats = &sync_stats });
+    var synced_store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{ .durability = .sync, .stats = &sync_stats });
     defer synced_store.deinit();
     _ = try synced_store.write(.{ .entries = &.{item(1, 0, "saved")} });
     try testing.expectEqual(@as(u64, 1), sync_stats.fsync_count.load(.monotonic));
@@ -122,14 +122,13 @@ test "store stats: fsync_count reflects sync vs buffered durability" {
     var buffered_stats: db.Stats = .{};
     var other = testing.tmpDir(.{});
     defer other.cleanup();
-    var buffered_store = try db.Store.create(testing.allocator, io, other.dir, region, .{
-        .durability = .buffered,
-        .stats = &buffered_stats,
-    });
+    var buffered_store = try db.Store.create(testing.allocator, io, other.dir, region, .{ .stats = &buffered_stats });
     defer buffered_store.deinit();
     _ = try buffered_store.write(.{ .entries = &.{item(1, 0, "saved")} });
     try testing.expectEqual(@as(u64, 0), buffered_stats.fsync_count.load(.monotonic));
 
+    try buffered_store.flush();
+    try testing.expectEqual(@as(u64, 1), buffered_stats.fsync_count.load(.monotonic));
     try buffered_store.flush();
     try testing.expectEqual(@as(u64, 1), buffered_stats.fsync_count.load(.monotonic));
 }

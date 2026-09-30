@@ -79,8 +79,9 @@ pub fn main() !void {
 ```
 
 Batches are atomic within one 32×32 chunk region and use increasing IDs.
-Writes sync by default; buffered writes require a successful flush for durability.
-Call `close` to flush and report errors; `deinit` only releases resources.
+Writes are buffered by default. Call `flush` at each save barrier or `close`
+at shutdown to make prior writes durable. Set `.shard.durability = .sync` for
+synchronous writes; `deinit` only releases resources.
 See [World](src/world/world.zig) for the full Zig API.
 
 For other languages, link against `libzigritedb_native` and use
@@ -88,9 +89,10 @@ For other languages, link against `libzigritedb_native` and use
 `zig-out/lib` and `zig-out/include`.
 
 The C ABI is versioned by `ZG_ABI_VERSION`, which must equal `zg_abi_version()`.
-v0.3.0 is ABI 2: `zg_options` grew, so programs built against an ABI 1 header must be
-rebuilt. On Linux the soname is `libzigritedb_native.so.2`, so ABI 1 binaries will not
-load it, and `zg_open` rejects a mismatched `version`/`struct_size` before reading the rest.
+Since v0.3.0, the C ABI is 2: `zg_options` grew, so programs built against an ABI 1
+header must be rebuilt. On Linux the soname is `libzigritedb_native.so.2`, so
+ABI 1 binaries will not load it. `zg_open` rejects a mismatched
+`version`/`struct_size` before reading the rest.
 
 ## Benchmarks
 

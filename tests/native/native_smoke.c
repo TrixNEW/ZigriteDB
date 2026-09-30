@@ -35,6 +35,7 @@ int main(int argc, char **argv) {
     assert(region.dimension == 1 && region.x == -2 && region.z == 2);
     zg_options options;
     assert(zg_options_init(&options) == ZG_OK);
+    assert(options.buffered == ZG_BUFFERED);
     assert(zg_options_validate(&options) == ZG_OK);
     assert(zg_options_validate(NULL) == ZG_INVALID_ARGUMENT);
     options.buffered = 2;

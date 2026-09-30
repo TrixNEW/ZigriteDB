@@ -504,7 +504,7 @@ pub const Store = struct {
 
         if (self.closed) return error.Closed;
 
-        try self.shard.flush();
+        try self.commitBarrier();
     }
 
     pub fn close(self: *Store) !void {
@@ -515,10 +515,11 @@ pub const Store = struct {
 
         if (self.closed) return;
 
-        self.commitBarrier() catch {};
-        const result = self.shard.close();
+        const barrier_result = self.commitBarrier();
+        const close_result = self.shard.close();
         self.release();
-        try result;
+        try barrier_result;
+        try close_result;
     }
 
     pub fn deinit(self: *Store) void {
