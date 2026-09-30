@@ -87,6 +87,77 @@ static void chunkReadBenchmark(zg_handle *handle, int chunk_x, int n, size_t cou
     free(samples);
 }
 
+static void minecraftBenchmark(zg_handle *handle, size_t count, double *samples) {
+    static uint8_t subchunks[4][16384], other[5][1024], output[9][16384];
+    const size_t other_sizes[5] = {1024, 256, 1024, 512, 128};
+    uint32_t random = 42;
+    for (size_t c = 0; c < 4; ++c) {
+        for (size_t i = 0; i < sizeof(subchunks[c]); ++i) {
+            random = random * 1664525u + 1013904223u;
+            subchunks[c][i] = i < 12288 ? (uint8_t)(i / 64 + c) : (uint8_t)(random >> 24);
+        }
+    }
+    for (size_t c = 0; c < 5; ++c) {
+        for (size_t i = 0; i < other_sizes[c]; ++i) {
+            random = random * 1664525u + 1013904223u;
+            other[c][i] = c == 2 ? (uint8_t)(random >> 24) : (uint8_t)(i / 32 + c);
+        }
+    }
+
+    size_t raw_bytes = 0, full_saves = 0;
+    double started = now();
+    for (size_t i = 0; i < count; ++i) {
+        int slot = (int)(i % 64);
+        int x = 30000 + slot / 16 * 32 + slot % 16;
+        int full = i < 64 || i % 4 == 0;
+        subchunks[0][0] = (uint8_t)i;
+        other[2][0] = (uint8_t)i;
+        zg_operation ops[9];
+        ops[0] = (zg_operation){{0, x, 0, -2, ZG_SUBCHUNK}, ZG_PUT, subchunks[0], sizeof(subchunks[0])};
+        size_t n = 1;
+        if (full) {
+            for (int c = 1; c < 4; ++c)
+                ops[n++] = (zg_operation){{0, x, 0, c - 2, ZG_SUBCHUNK}, ZG_PUT, subchunks[c], sizeof(subchunks[c])};
+            for (int c = 0; c < 5; ++c)
+                ops[n++] = (zg_operation){{0, x, 0, 0, (uint32_t)c + 1}, ZG_PUT, other[c], other_sizes[c]};
+            raw_bytes += 4 * sizeof(subchunks[0]) + 1024 + 256 + 1024 + 512 + 128;
+            ++full_saves;
+        } else {
+            ops[n++] = (zg_operation){{0, x, 0, 0, ZG_ENTITIES}, ZG_PUT, other[2], other_sizes[2]};
+            raw_bytes += sizeof(subchunks[0]) + other_sizes[2];
+        }
+        double before = now();
+        check(zg_write(handle, i + 1, ops, n));
+        samples[i] = now() - before;
+    }
+    printf("\"minecraft_full_saves\":%zu,\"minecraft_partial_saves\":%zu,\"minecraft_raw_value_bytes\":%zu,",
+           full_saves, count - full_saves, raw_bytes);
+    report("minecraft_chunk_saves", samples, count, now() - started);
+    started = now();
+    check(zg_flush(handle));
+    printf(",\"minecraft_flush_ms\":%.3f,", (now() - started) * 1e3);
+
+    zg_read_request requests[9];
+    zg_read_result results[9];
+    started = now();
+    for (size_t i = 0; i < count; ++i) {
+        random = random * 1664525u + 1013904223u;
+        size_t slot = random % 64;
+        int x = 30000 + (int)(slot / 16 * 32 + slot % 16);
+        for (int c = 0; c < 4; ++c)
+            requests[c] = (zg_read_request){{0, x, 0, c - 2, ZG_SUBCHUNK}, output[c], sizeof(output[c])};
+        for (int c = 0; c < 5; ++c)
+            requests[c + 4] = (zg_read_request){{0, x, 0, 0, (uint32_t)c + 1}, output[c + 4], sizeof(output[c + 4])};
+        double before = now();
+        check(zg_get_many(handle, requests, results, 9));
+        samples[i] = now() - before;
+        for (int c = 0; c < 9; ++c) if (results[c].status != ZG_OK) exit(1);
+        size_t last = slot + 64 * ((count - 1 - slot) / 64);
+        if (output[0][0] != (uint8_t)last) exit(1);
+    }
+    report("minecraft_chunk_reads_many", samples, count, now() - started);
+}
+
 int main(int argc, char **argv) {
     if (argc < 4 || argc > 6) {
         fprintf(stderr, "usage: native_bench EMPTY_DIRECTORY BATCHES sync|group|buffered [CACHE_MB [SKIP_UNCHANGED]]\n");
@@ -236,6 +307,9 @@ int main(int argc, char **argv) {
     chunkReadBenchmark(handle, 20000, 16, count, output);
     printf(",");
     chunkReadBenchmark(handle, 20000, 32, count, output);
+    printf(",");
+
+    minecraftBenchmark(handle, count, samples);
     printf(",");
 
     started = now();

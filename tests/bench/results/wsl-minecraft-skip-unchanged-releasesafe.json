@@ -1,0 +1,2089 @@
+{
+  "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "workloads": [
+    "synthetic",
+    "minecraft-inspired"
+  ],
+  "group_batches_per_call": 16,
+  "results": [
+    {
+      "mode": "sync",
+      "batches": 512,
+      "raw_value_bytes": 2097152,
+      "save_calls": {
+        "calls": 512,
+        "calls_per_second": 663.85,
+        "p50_us": 34.41,
+        "p95_us": 4777.25,
+        "p99_us": 24233.92,
+        "p999_us": 24922.87
+      },
+      "single_component_writes": {
+        "calls": 512,
+        "calls_per_second": 183.54,
+        "p50_us": 4676.31,
+        "p95_us": 6305.84,
+        "p99_us": 25125.77,
+        "p999_us": 27444.94
+      },
+      "unchanged_rewrites": {
+        "calls": 512,
+        "calls_per_second": 7256.03,
+        "p50_us": 33.7,
+        "p95_us": 55.56,
+        "p99_us": 6724.64,
+        "p999_us": 7144.57
+      },
+      "sparse_region_reads": {
+        "calls": 512,
+        "calls_per_second": 363050.02,
+        "p50_us": 0.09,
+        "p95_us": 8.4,
+        "p99_us": 10.0,
+        "p999_us": 68.37
+      },
+      "list_region_keys": {
+        "calls": 256,
+        "calls_per_second": 23629.88,
+        "p50_us": 12.33,
+        "p95_us": 13.72,
+        "p99_us": 30.67,
+        "p999_us": 31.78
+      },
+      "listed_keys_per_region": 64,
+      "final_flush_ms": 0.003,
+      "hot_reads": {
+        "calls": 512,
+        "calls_per_second": 264347.02,
+        "p50_us": 3.68,
+        "p95_us": 3.69,
+        "p99_us": 3.8,
+        "p999_us": 15.4
+      },
+      "random_reads": {
+        "calls": 512,
+        "calls_per_second": 194154.36,
+        "p50_us": 3.97,
+        "p95_us": 5.48,
+        "p99_us": 6.99,
+        "p999_us": 42.66
+      },
+      "full_chunk_reads": {
+        "calls": 512,
+        "calls_per_second": 63205.15,
+        "p50_us": 14.68,
+        "p95_us": 19.23,
+        "p99_us": 29.74,
+        "p999_us": 47.44
+      },
+      "area_reads_8x8": {
+        "calls": 16,
+        "calls_per_second": 28560.67,
+        "p50_us": 8.34,
+        "p95_us": 15.82,
+        "p99_us": 15.82,
+        "p999_us": 15.82
+      },
+      "area_reads_16x16": {
+        "calls": 16,
+        "calls_per_second": 64724.66,
+        "p50_us": 14.93,
+        "p95_us": 19.96,
+        "p99_us": 19.96,
+        "p999_us": 19.96
+      },
+      "area_reads_32x32": {
+        "calls": 16,
+        "calls_per_second": 24308.35,
+        "p50_us": 37.73,
+        "p95_us": 48.58,
+        "p99_us": 48.58,
+        "p999_us": 48.58
+      },
+      "chunk_read_4_individual": {
+        "calls": 512,
+        "calls_per_second": 62903.79,
+        "p50_us": 14.72,
+        "p95_us": 18.42,
+        "p99_us": 34.48,
+        "p999_us": 44.85
+      },
+      "chunk_read_4_many": {
+        "calls": 512,
+        "calls_per_second": 69540.06,
+        "p50_us": 13.63,
+        "p95_us": 13.83,
+        "p99_us": 27.6,
+        "p999_us": 63.81
+      },
+      "chunk_read_16_individual": {
+        "calls": 512,
+        "calls_per_second": 16403.23,
+        "p50_us": 59.32,
+        "p95_us": 72.7,
+        "p99_us": 86.42,
+        "p999_us": 100.65
+      },
+      "chunk_read_16_many": {
+        "calls": 512,
+        "calls_per_second": 26326.94,
+        "p50_us": 36.44,
+        "p95_us": 46.74,
+        "p99_us": 57.39,
+        "p999_us": 70.27
+      },
+      "chunk_read_32_individual": {
+        "calls": 512,
+        "calls_per_second": 8070.31,
+        "p50_us": 119.41,
+        "p95_us": 145.8,
+        "p99_us": 168.2,
+        "p999_us": 177.07
+      },
+      "chunk_read_32_many": {
+        "calls": 512,
+        "calls_per_second": 14542.52,
+        "p50_us": 66.73,
+        "p95_us": 80.84,
+        "p99_us": 98.1,
+        "p999_us": 127.47
+      },
+      "minecraft_full_saves": 176,
+      "minecraft_partial_saves": 336,
+      "minecraft_raw_value_bytes": 17901568,
+      "minecraft_chunk_saves": {
+        "calls": 512,
+        "calls_per_second": 186.65,
+        "p50_us": 5056.46,
+        "p95_us": 6117.27,
+        "p99_us": 8821.01,
+        "p999_us": 26507.77
+      },
+      "minecraft_flush_ms": 0.004,
+      "minecraft_chunk_reads_many": {
+        "calls": 512,
+        "calls_per_second": 11659.02,
+        "p50_us": 78.55,
+        "p95_us": 107.84,
+        "p99_us": 131.01,
+        "p999_us": 152.27
+      },
+      "reads_during_compaction": {
+        "calls": 512,
+        "calls_per_second": 9910.15,
+        "p50_us": 3.8,
+        "p95_us": 5.31,
+        "p99_us": 4294.26,
+        "p999_us": 9078.42
+      },
+      "compaction_ms": 240.696,
+      "post_compaction_reads": {
+        "calls": 512,
+        "calls_per_second": 240040.32,
+        "p50_us": 3.78,
+        "p95_us": 4.73,
+        "p99_us": 6.65,
+        "p999_us": 52.83
+      },
+      "stats": {
+        "get_calls": 64192,
+        "writes": 1153,
+        "records_written": 2528,
+        "raw_bytes_written": 13262848,
+        "compressed_bytes_written": 4674334,
+        "disk_reads": 99088,
+        "bytes_read": 49718352,
+        "fsync_count": 1153,
+        "fsync_duration_ns": 5464464794,
+        "segment_rotations": 0,
+        "compactions": 8,
+        "compaction_input_bytes": 304512,
+        "compaction_output_bytes": 304512,
+        "compaction_duration_ns": 195969528,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 4368
+      },
+      "reopen_and_replay_ms": 50.965,
+      "reopen_small_region_ms": 0.329,
+      "reopen_after_eviction_ms": 12.282,
+      "peak_rss_kib": 14900,
+      "cpu_seconds": 0.872,
+      "binary": "native_bench",
+      "repeat": 0,
+      "skip_unchanged": true,
+      "database_bytes": 4903798,
+      "compression_ratio": 2.837377046655203
+    },
+    {
+      "mode": "sync",
+      "batches": 512,
+      "raw_value_bytes": 2097152,
+      "save_calls": {
+        "calls": 512,
+        "calls_per_second": 645.27,
+        "p50_us": 37.74,
+        "p95_us": 4896.22,
+        "p99_us": 24576.75,
+        "p999_us": 25970.51
+      },
+      "single_component_writes": {
+        "calls": 512,
+        "calls_per_second": 184.67,
+        "p50_us": 4647.47,
+        "p95_us": 5706.03,
+        "p99_us": 24948.19,
+        "p999_us": 27224.23
+      },
+      "unchanged_rewrites": {
+        "calls": 512,
+        "calls_per_second": 6795.68,
+        "p50_us": 34.71,
+        "p95_us": 50.92,
+        "p99_us": 7111.19,
+        "p999_us": 7978.63
+      },
+      "sparse_region_reads": {
+        "calls": 512,
+        "calls_per_second": 444441.36,
+        "p50_us": 0.06,
+        "p95_us": 5.72,
+        "p99_us": 8.18,
+        "p999_us": 41.68
+      },
+      "list_region_keys": {
+        "calls": 256,
+        "calls_per_second": 23904.86,
+        "p50_us": 13.63,
+        "p95_us": 16.19,
+        "p99_us": 32.48,
+        "p999_us": 47.24
+      },
+      "listed_keys_per_region": 64,
+      "final_flush_ms": 0.007,
+      "hot_reads": {
+        "calls": 512,
+        "calls_per_second": 229648.42,
+        "p50_us": 3.71,
+        "p95_us": 5.15,
+        "p99_us": 6.22,
+        "p999_us": 31.85
+      },
+      "random_reads": {
+        "calls": 512,
+        "calls_per_second": 247078.49,
+        "p50_us": 3.9,
+        "p95_us": 4.26,
+        "p99_us": 5.57,
+        "p999_us": 6.89
+      },
+      "full_chunk_reads": {
+        "calls": 512,
+        "calls_per_second": 60446.03,
+        "p50_us": 14.71,
+        "p95_us": 18.39,
+        "p99_us": 29.26,
+        "p999_us": 119.0
+      },
+      "area_reads_8x8": {
+        "calls": 16,
+        "calls_per_second": 28119.8,
+        "p50_us": 7.59,
+        "p95_us": 14.01,
+        "p99_us": 14.01,
+        "p999_us": 14.01
+      },
+      "area_reads_16x16": {
+        "calls": 16,
+        "calls_per_second": 64695.61,
+        "p50_us": 14.72,
+        "p95_us": 20.34,
+        "p99_us": 20.34,
+        "p999_us": 20.34
+      },
+      "area_reads_32x32": {
+        "calls": 16,
+        "calls_per_second": 23549.81,
+        "p50_us": 35.93,
+        "p95_us": 69.58,
+        "p99_us": 69.58,
+        "p999_us": 69.58
+      },
+      "chunk_read_4_individual": {
+        "calls": 512,
+        "calls_per_second": 58119.39,
+        "p50_us": 14.76,
+        "p95_us": 20.63,
+        "p99_us": 45.16,
+        "p999_us": 59.1
+      },
+      "chunk_read_4_many": {
+        "calls": 512,
+        "calls_per_second": 63728.86,
+        "p50_us": 13.64,
+        "p95_us": 19.59,
+        "p99_us": 32.44,
+        "p999_us": 65.95
+      },
+      "chunk_read_16_individual": {
+        "calls": 512,
+        "calls_per_second": 15643.69,
+        "p50_us": 59.42,
+        "p95_us": 80.99,
+        "p99_us": 101.64,
+        "p999_us": 121.12
+      },
+      "chunk_read_16_many": {
+        "calls": 512,
+        "calls_per_second": 26160.17,
+        "p50_us": 36.56,
+        "p95_us": 46.86,
+        "p99_us": 56.6,
+        "p999_us": 76.01
+      },
+      "chunk_read_32_individual": {
+        "calls": 512,
+        "calls_per_second": 7615.81,
+        "p50_us": 119.88,
+        "p95_us": 173.95,
+        "p99_us": 204.19,
+        "p999_us": 306.56
+      },
+      "chunk_read_32_many": {
+        "calls": 512,
+        "calls_per_second": 12636.65,
+        "p50_us": 69.02,
+        "p95_us": 113.35,
+        "p99_us": 180.21,
+        "p999_us": 285.9
+      },
+      "minecraft_full_saves": 176,
+      "minecraft_partial_saves": 336,
+      "minecraft_raw_value_bytes": 17901568,
+      "minecraft_chunk_saves": {
+        "calls": 512,
+        "calls_per_second": 190.65,
+        "p50_us": 4934.35,
+        "p95_us": 5815.02,
+        "p99_us": 7590.54,
+        "p999_us": 25214.97
+      },
+      "minecraft_flush_ms": 0.005,
+      "minecraft_chunk_reads_many": {
+        "calls": 512,
+        "calls_per_second": 12750.74,
+        "p50_us": 75.09,
+        "p95_us": 95.64,
+        "p99_us": 115.33,
+        "p999_us": 138.54
+      },
+      "reads_during_compaction": {
+        "calls": 512,
+        "calls_per_second": 10128.87,
+        "p50_us": 3.82,
+        "p95_us": 4.9,
+        "p99_us": 4398.54,
+        "p999_us": 8869.79
+      },
+      "compaction_ms": 241.751,
+      "post_compaction_reads": {
+        "calls": 512,
+        "calls_per_second": 237832.23,
+        "p50_us": 3.8,
+        "p95_us": 5.21,
+        "p99_us": 5.65,
+        "p999_us": 15.38
+      },
+      "stats": {
+        "get_calls": 64192,
+        "writes": 1153,
+        "records_written": 2528,
+        "raw_bytes_written": 13262848,
+        "compressed_bytes_written": 4674334,
+        "disk_reads": 99088,
+        "bytes_read": 49718352,
+        "fsync_count": 1153,
+        "fsync_duration_ns": 5412921863,
+        "segment_rotations": 0,
+        "compactions": 8,
+        "compaction_input_bytes": 304512,
+        "compaction_output_bytes": 304512,
+        "compaction_duration_ns": 197401650,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 4368
+      },
+      "reopen_and_replay_ms": 51.282,
+      "reopen_small_region_ms": 0.27,
+      "reopen_after_eviction_ms": 12.551,
+      "peak_rss_kib": 14812,
+      "cpu_seconds": 0.868,
+      "binary": "native_bench",
+      "repeat": 1,
+      "skip_unchanged": true,
+      "database_bytes": 4903798,
+      "compression_ratio": 2.837377046655203
+    },
+    {
+      "mode": "sync",
+      "batches": 512,
+      "raw_value_bytes": 2097152,
+      "save_calls": {
+        "calls": 512,
+        "calls_per_second": 649.92,
+        "p50_us": 34.47,
+        "p95_us": 4854.85,
+        "p99_us": 24117.02,
+        "p999_us": 25769.31
+      },
+      "single_component_writes": {
+        "calls": 512,
+        "calls_per_second": 182.59,
+        "p50_us": 4660.99,
+        "p95_us": 6367.12,
+        "p99_us": 25332.76,
+        "p999_us": 28097.8
+      },
+      "unchanged_rewrites": {
+        "calls": 512,
+        "calls_per_second": 7334.24,
+        "p50_us": 33.63,
+        "p95_us": 54.93,
+        "p99_us": 6818.89,
+        "p999_us": 7014.59
+      },
+      "sparse_region_reads": {
+        "calls": 512,
+        "calls_per_second": 487234.83,
+        "p50_us": 0.06,
+        "p95_us": 5.47,
+        "p99_us": 6.88,
+        "p999_us": 45.05
+      },
+      "list_region_keys": {
+        "calls": 256,
+        "calls_per_second": 23381.7,
+        "p50_us": 13.2,
+        "p95_us": 17.91,
+        "p99_us": 33.35,
+        "p999_us": 57.11
+      },
+      "listed_keys_per_region": 64,
+      "final_flush_ms": 0.003,
+      "hot_reads": {
+        "calls": 512,
+        "calls_per_second": 243681.19,
+        "p50_us": 3.67,
+        "p95_us": 4.98,
+        "p99_us": 5.61,
+        "p999_us": 28.79
+      },
+      "random_reads": {
+        "calls": 512,
+        "calls_per_second": 232115.75,
+        "p50_us": 3.96,
+        "p95_us": 5.49,
+        "p99_us": 5.96,
+        "p999_us": 6.37
+      },
+      "full_chunk_reads": {
+        "calls": 512,
+        "calls_per_second": 61652.56,
+        "p50_us": 14.74,
+        "p95_us": 20.85,
+        "p99_us": 27.25,
+        "p999_us": 51.16
+      },
+      "area_reads_8x8": {
+        "calls": 16,
+        "calls_per_second": 18569.99,
+        "p50_us": 9.79,
+        "p95_us": 20.94,
+        "p99_us": 20.94,
+        "p999_us": 20.94
+      },
+      "area_reads_16x16": {
+        "calls": 16,
+        "calls_per_second": 50056.63,
+        "p50_us": 18.87,
+        "p95_us": 27.7,
+        "p99_us": 27.7,
+        "p999_us": 27.7
+      },
+      "area_reads_32x32": {
+        "calls": 16,
+        "calls_per_second": 18327.79,
+        "p50_us": 54.73,
+        "p95_us": 74.77,
+        "p99_us": 74.77,
+        "p999_us": 74.77
+      },
+      "chunk_read_4_individual": {
+        "calls": 512,
+        "calls_per_second": 60011.33,
+        "p50_us": 14.52,
+        "p95_us": 18.51,
+        "p99_us": 33.42,
+        "p999_us": 85.23
+      },
+      "chunk_read_4_many": {
+        "calls": 512,
+        "calls_per_second": 70327.68,
+        "p50_us": 13.28,
+        "p95_us": 17.97,
+        "p99_us": 29.35,
+        "p999_us": 58.87
+      },
+      "chunk_read_16_individual": {
+        "calls": 512,
+        "calls_per_second": 15910.76,
+        "p50_us": 58.16,
+        "p95_us": 79.69,
+        "p99_us": 88.37,
+        "p999_us": 116.99
+      },
+      "chunk_read_16_many": {
+        "calls": 512,
+        "calls_per_second": 26935.32,
+        "p50_us": 35.44,
+        "p95_us": 45.38,
+        "p99_us": 54.97,
+        "p999_us": 87.02
+      },
+      "chunk_read_32_individual": {
+        "calls": 512,
+        "calls_per_second": 8337.76,
+        "p50_us": 116.11,
+        "p95_us": 139.81,
+        "p99_us": 154.96,
+        "p999_us": 196.08
+      },
+      "chunk_read_32_many": {
+        "calls": 512,
+        "calls_per_second": 14423.23,
+        "p50_us": 64.98,
+        "p95_us": 84.68,
+        "p99_us": 96.55,
+        "p999_us": 130.49
+      },
+      "minecraft_full_saves": 176,
+      "minecraft_partial_saves": 336,
+      "minecraft_raw_value_bytes": 17901568,
+      "minecraft_chunk_saves": {
+        "calls": 512,
+        "calls_per_second": 190.51,
+        "p50_us": 5010.05,
+        "p95_us": 5946.28,
+        "p99_us": 7671.25,
+        "p999_us": 24689.5
+      },
+      "minecraft_flush_ms": 0.006,
+      "minecraft_chunk_reads_many": {
+        "calls": 512,
+        "calls_per_second": 11045.27,
+        "p50_us": 81.52,
+        "p95_us": 120.14,
+        "p99_us": 191.22,
+        "p999_us": 279.54
+      },
+      "reads_during_compaction": {
+        "calls": 512,
+        "calls_per_second": 9909.42,
+        "p50_us": 3.9,
+        "p95_us": 5.23,
+        "p99_us": 4183.71,
+        "p999_us": 9581.77
+      },
+      "compaction_ms": 259.055,
+      "post_compaction_reads": {
+        "calls": 512,
+        "calls_per_second": 243708.67,
+        "p50_us": 3.84,
+        "p95_us": 4.75,
+        "p99_us": 6.42,
+        "p999_us": 19.02
+      },
+      "stats": {
+        "get_calls": 64192,
+        "writes": 1153,
+        "records_written": 2528,
+        "raw_bytes_written": 13262848,
+        "compressed_bytes_written": 4674334,
+        "disk_reads": 99088,
+        "bytes_read": 49718352,
+        "fsync_count": 1153,
+        "fsync_duration_ns": 5446461968,
+        "segment_rotations": 0,
+        "compactions": 8,
+        "compaction_input_bytes": 304512,
+        "compaction_output_bytes": 304512,
+        "compaction_duration_ns": 212695948,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 4368
+      },
+      "reopen_and_replay_ms": 51.247,
+      "reopen_small_region_ms": 0.615,
+      "reopen_after_eviction_ms": 12.512,
+      "peak_rss_kib": 14912,
+      "cpu_seconds": 0.876,
+      "binary": "native_bench",
+      "repeat": 2,
+      "skip_unchanged": true,
+      "database_bytes": 4903798,
+      "compression_ratio": 2.837377046655203
+    },
+    {
+      "mode": "group",
+      "batches": 512,
+      "raw_value_bytes": 2097152,
+      "save_calls": {
+        "calls": 32,
+        "calls_per_second": 145.98,
+        "p50_us": 548.98,
+        "p95_us": 25420.37,
+        "p99_us": 25753.7,
+        "p999_us": 25753.7
+      },
+      "single_component_writes": {
+        "calls": 512,
+        "calls_per_second": 1251.44,
+        "p50_us": 40.61,
+        "p95_us": 69.76,
+        "p99_us": 24588.2,
+        "p999_us": 26362.68
+      },
+      "unchanged_rewrites": {
+        "calls": 512,
+        "calls_per_second": 6559.14,
+        "p50_us": 31.34,
+        "p95_us": 51.38,
+        "p99_us": 7380.4,
+        "p999_us": 7750.49
+      },
+      "sparse_region_reads": {
+        "calls": 512,
+        "calls_per_second": 470816.72,
+        "p50_us": 0.09,
+        "p95_us": 5.58,
+        "p99_us": 6.57,
+        "p999_us": 7.68
+      },
+      "list_region_keys": {
+        "calls": 256,
+        "calls_per_second": 24414.64,
+        "p50_us": 13.96,
+        "p95_us": 16.21,
+        "p99_us": 29.3,
+        "p999_us": 39.76
+      },
+      "listed_keys_per_region": 64,
+      "final_flush_ms": 0.002,
+      "hot_reads": {
+        "calls": 512,
+        "calls_per_second": 221375.63,
+        "p50_us": 4.53,
+        "p95_us": 5.14,
+        "p99_us": 6.17,
+        "p999_us": 35.44
+      },
+      "random_reads": {
+        "calls": 512,
+        "calls_per_second": 217414.47,
+        "p50_us": 3.84,
+        "p95_us": 5.45,
+        "p99_us": 6.95,
+        "p999_us": 17.74
+      },
+      "full_chunk_reads": {
+        "calls": 512,
+        "calls_per_second": 61102.75,
+        "p50_us": 14.54,
+        "p95_us": 20.52,
+        "p99_us": 28.1,
+        "p999_us": 45.76
+      },
+      "area_reads_8x8": {
+        "calls": 16,
+        "calls_per_second": 26596.72,
+        "p50_us": 8.82,
+        "p95_us": 70.65,
+        "p99_us": 70.65,
+        "p999_us": 70.65
+      },
+      "area_reads_16x16": {
+        "calls": 16,
+        "calls_per_second": 61862.29,
+        "p50_us": 15.95,
+        "p95_us": 20.38,
+        "p99_us": 20.38,
+        "p999_us": 20.38
+      },
+      "area_reads_32x32": {
+        "calls": 16,
+        "calls_per_second": 9747.05,
+        "p50_us": 58.53,
+        "p95_us": 77.29,
+        "p99_us": 77.29,
+        "p999_us": 77.29
+      },
+      "chunk_read_4_individual": {
+        "calls": 512,
+        "calls_per_second": 60968.96,
+        "p50_us": 14.5,
+        "p95_us": 20.31,
+        "p99_us": 29.33,
+        "p999_us": 51.42
+      },
+      "chunk_read_4_many": {
+        "calls": 512,
+        "calls_per_second": 66723.37,
+        "p50_us": 13.44,
+        "p95_us": 19.83,
+        "p99_us": 28.62,
+        "p999_us": 37.71
+      },
+      "chunk_read_16_individual": {
+        "calls": 512,
+        "calls_per_second": 15556.48,
+        "p50_us": 58.5,
+        "p95_us": 81.73,
+        "p99_us": 84.49,
+        "p999_us": 100.52
+      },
+      "chunk_read_16_many": {
+        "calls": 512,
+        "calls_per_second": 25711.94,
+        "p50_us": 35.89,
+        "p95_us": 47.9,
+        "p99_us": 64.89,
+        "p999_us": 72.17
+      },
+      "chunk_read_32_individual": {
+        "calls": 512,
+        "calls_per_second": 7751.6,
+        "p50_us": 117.45,
+        "p95_us": 165.07,
+        "p99_us": 185.86,
+        "p999_us": 201.38
+      },
+      "chunk_read_32_many": {
+        "calls": 512,
+        "calls_per_second": 14118.3,
+        "p50_us": 65.93,
+        "p95_us": 84.93,
+        "p99_us": 107.07,
+        "p999_us": 114.21
+      },
+      "minecraft_full_saves": 176,
+      "minecraft_partial_saves": 336,
+      "minecraft_raw_value_bytes": 17901568,
+      "minecraft_chunk_saves": {
+        "calls": 512,
+        "calls_per_second": 2747.57,
+        "p50_us": 169.0,
+        "p95_us": 451.19,
+        "p99_us": 557.98,
+        "p999_us": 20684.06
+      },
+      "minecraft_flush_ms": 26.804,
+      "minecraft_chunk_reads_many": {
+        "calls": 512,
+        "calls_per_second": 12193.93,
+        "p50_us": 74.55,
+        "p95_us": 101.27,
+        "p99_us": 120.83,
+        "p999_us": 245.16
+      },
+      "reads_during_compaction": {
+        "calls": 512,
+        "calls_per_second": 10275.23,
+        "p50_us": 3.74,
+        "p95_us": 5.16,
+        "p99_us": 4486.73,
+        "p999_us": 8821.05
+      },
+      "compaction_ms": 239.25,
+      "post_compaction_reads": {
+        "calls": 512,
+        "calls_per_second": 245665.82,
+        "p50_us": 3.73,
+        "p95_us": 5.23,
+        "p99_us": 6.79,
+        "p999_us": 17.88
+      },
+      "stats": {
+        "get_calls": 64192,
+        "writes": 1153,
+        "records_written": 2528,
+        "raw_bytes_written": 13262848,
+        "compressed_bytes_written": 4674334,
+        "disk_reads": 99088,
+        "bytes_read": 49718352,
+        "fsync_count": 30,
+        "fsync_duration_ns": 143323335,
+        "segment_rotations": 0,
+        "compactions": 8,
+        "compaction_input_bytes": 304512,
+        "compaction_output_bytes": 304512,
+        "compaction_duration_ns": 196110530,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 4368
+      },
+      "reopen_and_replay_ms": 49.394,
+      "reopen_small_region_ms": 0.31,
+      "reopen_after_eviction_ms": 12.154,
+      "peak_rss_kib": 14812,
+      "cpu_seconds": 0.605,
+      "binary": "native_bench",
+      "repeat": 0,
+      "skip_unchanged": true,
+      "database_bytes": 4903798,
+      "compression_ratio": 2.837377046655203
+    },
+    {
+      "mode": "group",
+      "batches": 512,
+      "raw_value_bytes": 2097152,
+      "save_calls": {
+        "calls": 32,
+        "calls_per_second": 135.02,
+        "p50_us": 647.38,
+        "p95_us": 27932.64,
+        "p99_us": 29771.24,
+        "p999_us": 29771.24
+      },
+      "single_component_writes": {
+        "calls": 512,
+        "calls_per_second": 1265.28,
+        "p50_us": 39.28,
+        "p95_us": 74.83,
+        "p99_us": 24665.17,
+        "p999_us": 25122.81
+      },
+      "unchanged_rewrites": {
+        "calls": 512,
+        "calls_per_second": 6448.1,
+        "p50_us": 34.31,
+        "p95_us": 54.44,
+        "p99_us": 7431.8,
+        "p999_us": 7798.5
+      },
+      "sparse_region_reads": {
+        "calls": 512,
+        "calls_per_second": 472738.59,
+        "p50_us": 0.06,
+        "p95_us": 5.82,
+        "p99_us": 6.87,
+        "p999_us": 22.66
+      },
+      "list_region_keys": {
+        "calls": 256,
+        "calls_per_second": 23221.96,
+        "p50_us": 13.63,
+        "p95_us": 19.68,
+        "p99_us": 30.43,
+        "p999_us": 278.12
+      },
+      "listed_keys_per_region": 64,
+      "final_flush_ms": 0.002,
+      "hot_reads": {
+        "calls": 512,
+        "calls_per_second": 260661.28,
+        "p50_us": 3.66,
+        "p95_us": 3.7,
+        "p99_us": 5.72,
+        "p999_us": 15.84
+      },
+      "random_reads": {
+        "calls": 512,
+        "calls_per_second": 228042.05,
+        "p50_us": 3.94,
+        "p95_us": 5.49,
+        "p99_us": 5.95,
+        "p999_us": 7.97
+      },
+      "full_chunk_reads": {
+        "calls": 512,
+        "calls_per_second": 58838.98,
+        "p50_us": 14.54,
+        "p95_us": 20.64,
+        "p99_us": 27.72,
+        "p999_us": 62.38
+      },
+      "area_reads_8x8": {
+        "calls": 16,
+        "calls_per_second": 27541.1,
+        "p50_us": 7.77,
+        "p95_us": 14.74,
+        "p99_us": 14.74,
+        "p999_us": 14.74
+      },
+      "area_reads_16x16": {
+        "calls": 16,
+        "calls_per_second": 20337.84,
+        "p50_us": 14.59,
+        "p95_us": 26.9,
+        "p99_us": 26.9,
+        "p999_us": 26.9
+      },
+      "area_reads_32x32": {
+        "calls": 16,
+        "calls_per_second": 25785.24,
+        "p50_us": 35.85,
+        "p95_us": 48.03,
+        "p99_us": 48.03,
+        "p999_us": 48.03
+      },
+      "chunk_read_4_individual": {
+        "calls": 512,
+        "calls_per_second": 60310.26,
+        "p50_us": 14.54,
+        "p95_us": 23.36,
+        "p99_us": 32.67,
+        "p999_us": 60.15
+      },
+      "chunk_read_4_many": {
+        "calls": 512,
+        "calls_per_second": 66860.42,
+        "p50_us": 13.44,
+        "p95_us": 19.58,
+        "p99_us": 28.83,
+        "p999_us": 39.35
+      },
+      "chunk_read_16_individual": {
+        "calls": 512,
+        "calls_per_second": 15124.21,
+        "p50_us": 58.61,
+        "p95_us": 81.21,
+        "p99_us": 118.78,
+        "p999_us": 142.2
+      },
+      "chunk_read_16_many": {
+        "calls": 512,
+        "calls_per_second": 25723.61,
+        "p50_us": 36.23,
+        "p95_us": 47.13,
+        "p99_us": 67.89,
+        "p999_us": 88.54
+      },
+      "chunk_read_32_individual": {
+        "calls": 512,
+        "calls_per_second": 7769.33,
+        "p50_us": 117.98,
+        "p95_us": 160.57,
+        "p99_us": 183.18,
+        "p999_us": 191.88
+      },
+      "chunk_read_32_many": {
+        "calls": 512,
+        "calls_per_second": 14030.69,
+        "p50_us": 66.18,
+        "p95_us": 85.89,
+        "p99_us": 100.96,
+        "p999_us": 113.36
+      },
+      "minecraft_full_saves": 176,
+      "minecraft_partial_saves": 336,
+      "minecraft_raw_value_bytes": 17901568,
+      "minecraft_chunk_saves": {
+        "calls": 512,
+        "calls_per_second": 2675.26,
+        "p50_us": 177.36,
+        "p95_us": 449.12,
+        "p99_us": 572.52,
+        "p999_us": 20680.25
+      },
+      "minecraft_flush_ms": 27.339,
+      "minecraft_chunk_reads_many": {
+        "calls": 512,
+        "calls_per_second": 11997.78,
+        "p50_us": 77.06,
+        "p95_us": 100.75,
+        "p99_us": 120.89,
+        "p999_us": 167.25
+      },
+      "reads_during_compaction": {
+        "calls": 512,
+        "calls_per_second": 10218.82,
+        "p50_us": 3.78,
+        "p95_us": 5.24,
+        "p99_us": 4651.4,
+        "p999_us": 8917.47
+      },
+      "compaction_ms": 238.236,
+      "post_compaction_reads": {
+        "calls": 512,
+        "calls_per_second": 246244.06,
+        "p50_us": 3.74,
+        "p95_us": 5.38,
+        "p99_us": 5.79,
+        "p999_us": 18.53
+      },
+      "stats": {
+        "get_calls": 64192,
+        "writes": 1153,
+        "records_written": 2528,
+        "raw_bytes_written": 13262848,
+        "compressed_bytes_written": 4674334,
+        "disk_reads": 99088,
+        "bytes_read": 49718352,
+        "fsync_count": 30,
+        "fsync_duration_ns": 144957828,
+        "segment_rotations": 0,
+        "compactions": 8,
+        "compaction_input_bytes": 304512,
+        "compaction_output_bytes": 304512,
+        "compaction_duration_ns": 194574394,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 4368
+      },
+      "reopen_and_replay_ms": 50.891,
+      "reopen_small_region_ms": 0.266,
+      "reopen_after_eviction_ms": 12.459,
+      "peak_rss_kib": 14944,
+      "cpu_seconds": 0.616,
+      "binary": "native_bench",
+      "repeat": 1,
+      "skip_unchanged": true,
+      "database_bytes": 4903798,
+      "compression_ratio": 2.837377046655203
+    },
+    {
+      "mode": "group",
+      "batches": 512,
+      "raw_value_bytes": 2097152,
+      "save_calls": {
+        "calls": 32,
+        "calls_per_second": 142.45,
+        "p50_us": 562.31,
+        "p95_us": 27101.77,
+        "p99_us": 27719.24,
+        "p999_us": 27719.24
+      },
+      "single_component_writes": {
+        "calls": 512,
+        "calls_per_second": 1262.52,
+        "p50_us": 40.77,
+        "p95_us": 75.37,
+        "p99_us": 24565.0,
+        "p999_us": 25084.12
+      },
+      "unchanged_rewrites": {
+        "calls": 512,
+        "calls_per_second": 5873.41,
+        "p50_us": 33.22,
+        "p95_us": 65.17,
+        "p99_us": 7149.62,
+        "p999_us": 11947.03
+      },
+      "sparse_region_reads": {
+        "calls": 512,
+        "calls_per_second": 457720.73,
+        "p50_us": 0.06,
+        "p95_us": 5.45,
+        "p99_us": 6.55,
+        "p999_us": 44.34
+      },
+      "list_region_keys": {
+        "calls": 256,
+        "calls_per_second": 25595.23,
+        "p50_us": 12.3,
+        "p95_us": 16.58,
+        "p99_us": 35.47,
+        "p999_us": 66.13
+      },
+      "listed_keys_per_region": 64,
+      "final_flush_ms": 0.002,
+      "hot_reads": {
+        "calls": 512,
+        "calls_per_second": 247561.5,
+        "p50_us": 3.66,
+        "p95_us": 5.05,
+        "p99_us": 6.29,
+        "p999_us": 19.72
+      },
+      "random_reads": {
+        "calls": 512,
+        "calls_per_second": 251227.06,
+        "p50_us": 3.84,
+        "p95_us": 4.18,
+        "p99_us": 5.58,
+        "p999_us": 14.2
+      },
+      "full_chunk_reads": {
+        "calls": 512,
+        "calls_per_second": 63781.47,
+        "p50_us": 14.54,
+        "p95_us": 18.22,
+        "p99_us": 42.83,
+        "p999_us": 55.21
+      },
+      "area_reads_8x8": {
+        "calls": 16,
+        "calls_per_second": 33337.08,
+        "p50_us": 8.22,
+        "p95_us": 13.84,
+        "p99_us": 13.84,
+        "p999_us": 13.84
+      },
+      "area_reads_16x16": {
+        "calls": 16,
+        "calls_per_second": 25281.73,
+        "p50_us": 17.52,
+        "p95_us": 57.33,
+        "p99_us": 57.33,
+        "p999_us": 57.33
+      },
+      "area_reads_32x32": {
+        "calls": 16,
+        "calls_per_second": 21009.92,
+        "p50_us": 45.47,
+        "p95_us": 57.99,
+        "p99_us": 57.99,
+        "p999_us": 57.99
+      },
+      "chunk_read_4_individual": {
+        "calls": 512,
+        "calls_per_second": 61822.79,
+        "p50_us": 14.57,
+        "p95_us": 18.24,
+        "p99_us": 30.22,
+        "p999_us": 103.4
+      },
+      "chunk_read_4_many": {
+        "calls": 512,
+        "calls_per_second": 67967.65,
+        "p50_us": 13.49,
+        "p95_us": 19.39,
+        "p99_us": 25.62,
+        "p999_us": 52.56
+      },
+      "chunk_read_16_individual": {
+        "calls": 512,
+        "calls_per_second": 14796.98,
+        "p50_us": 58.97,
+        "p95_us": 86.14,
+        "p99_us": 114.85,
+        "p999_us": 145.11
+      },
+      "chunk_read_16_many": {
+        "calls": 512,
+        "calls_per_second": 25909.88,
+        "p50_us": 35.99,
+        "p95_us": 47.41,
+        "p99_us": 65.68,
+        "p999_us": 91.42
+      },
+      "chunk_read_32_individual": {
+        "calls": 512,
+        "calls_per_second": 7669.68,
+        "p50_us": 118.13,
+        "p95_us": 164.86,
+        "p99_us": 185.8,
+        "p999_us": 195.66
+      },
+      "chunk_read_32_many": {
+        "calls": 512,
+        "calls_per_second": 13952.06,
+        "p50_us": 66.04,
+        "p95_us": 85.9,
+        "p99_us": 99.74,
+        "p999_us": 126.69
+      },
+      "minecraft_full_saves": 176,
+      "minecraft_partial_saves": 336,
+      "minecraft_raw_value_bytes": 17901568,
+      "minecraft_chunk_saves": {
+        "calls": 512,
+        "calls_per_second": 2673.37,
+        "p50_us": 168.38,
+        "p95_us": 449.24,
+        "p99_us": 574.5,
+        "p999_us": 21207.09
+      },
+      "minecraft_flush_ms": 30.363,
+      "minecraft_chunk_reads_many": {
+        "calls": 512,
+        "calls_per_second": 10941.03,
+        "p50_us": 94.8,
+        "p95_us": 110.78,
+        "p99_us": 129.12,
+        "p999_us": 170.28
+      },
+      "reads_during_compaction": {
+        "calls": 512,
+        "calls_per_second": 6558.9,
+        "p50_us": 4.93,
+        "p95_us": 7.07,
+        "p99_us": 4465.99,
+        "p999_us": 8852.73
+      },
+      "compaction_ms": 269.415,
+      "post_compaction_reads": {
+        "calls": 512,
+        "calls_per_second": 217646.82,
+        "p50_us": 3.83,
+        "p95_us": 5.47,
+        "p99_us": 6.74,
+        "p999_us": 22.23
+      },
+      "stats": {
+        "get_calls": 64192,
+        "writes": 1153,
+        "records_written": 2528,
+        "raw_bytes_written": 13262848,
+        "compressed_bytes_written": 4674334,
+        "disk_reads": 99088,
+        "bytes_read": 49718352,
+        "fsync_count": 30,
+        "fsync_duration_ns": 145933609,
+        "segment_rotations": 0,
+        "compactions": 8,
+        "compaction_input_bytes": 304512,
+        "compaction_output_bytes": 304512,
+        "compaction_duration_ns": 224543573,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 4368
+      },
+      "reopen_and_replay_ms": 51.306,
+      "reopen_small_region_ms": 0.293,
+      "reopen_after_eviction_ms": 12.145,
+      "peak_rss_kib": 14908,
+      "cpu_seconds": 0.614,
+      "binary": "native_bench",
+      "repeat": 2,
+      "skip_unchanged": true,
+      "database_bytes": 4903798,
+      "compression_ratio": 2.837377046655203
+    },
+    {
+      "mode": "buffered",
+      "batches": 512,
+      "raw_value_bytes": 2097152,
+      "save_calls": {
+        "calls": 512,
+        "calls_per_second": 2812.37,
+        "p50_us": 33.87,
+        "p95_us": 98.85,
+        "p99_us": 19243.76,
+        "p999_us": 20598.56
+      },
+      "single_component_writes": {
+        "calls": 512,
+        "calls_per_second": 1158.91,
+        "p50_us": 40.59,
+        "p95_us": 72.31,
+        "p99_us": 24684.78,
+        "p999_us": 25869.95
+      },
+      "unchanged_rewrites": {
+        "calls": 512,
+        "calls_per_second": 6164.05,
+        "p50_us": 35.49,
+        "p95_us": 60.79,
+        "p99_us": 7404.44,
+        "p999_us": 8369.07
+      },
+      "sparse_region_reads": {
+        "calls": 512,
+        "calls_per_second": 480505.28,
+        "p50_us": 0.06,
+        "p95_us": 5.6,
+        "p99_us": 7.18,
+        "p999_us": 42.58
+      },
+      "list_region_keys": {
+        "calls": 256,
+        "calls_per_second": 21720.73,
+        "p50_us": 18.71,
+        "p95_us": 23.37,
+        "p99_us": 37.61,
+        "p999_us": 91.89
+      },
+      "listed_keys_per_region": 64,
+      "final_flush_ms": 0.003,
+      "hot_reads": {
+        "calls": 512,
+        "calls_per_second": 198227.72,
+        "p50_us": 4.92,
+        "p95_us": 5.3,
+        "p99_us": 5.4,
+        "p999_us": 16.86
+      },
+      "random_reads": {
+        "calls": 512,
+        "calls_per_second": 173283.6,
+        "p50_us": 5.35,
+        "p95_us": 5.98,
+        "p99_us": 7.26,
+        "p999_us": 32.73
+      },
+      "full_chunk_reads": {
+        "calls": 512,
+        "calls_per_second": 57829.01,
+        "p50_us": 14.61,
+        "p95_us": 20.68,
+        "p99_us": 24.37,
+        "p999_us": 78.15
+      },
+      "area_reads_8x8": {
+        "calls": 16,
+        "calls_per_second": 24551.25,
+        "p50_us": 7.69,
+        "p95_us": 14.6,
+        "p99_us": 14.6,
+        "p999_us": 14.6
+      },
+      "area_reads_16x16": {
+        "calls": 16,
+        "calls_per_second": 68648.61,
+        "p50_us": 14.21,
+        "p95_us": 20.04,
+        "p99_us": 20.04,
+        "p999_us": 20.04
+      },
+      "area_reads_32x32": {
+        "calls": 16,
+        "calls_per_second": 25430.33,
+        "p50_us": 36.23,
+        "p95_us": 46.02,
+        "p99_us": 46.02,
+        "p999_us": 46.02
+      },
+      "chunk_read_4_individual": {
+        "calls": 512,
+        "calls_per_second": 59606.33,
+        "p50_us": 14.65,
+        "p95_us": 22.45,
+        "p99_us": 44.39,
+        "p999_us": 79.83
+      },
+      "chunk_read_4_many": {
+        "calls": 512,
+        "calls_per_second": 63750.73,
+        "p50_us": 13.54,
+        "p95_us": 19.68,
+        "p99_us": 31.94,
+        "p999_us": 63.45
+      },
+      "chunk_read_16_individual": {
+        "calls": 512,
+        "calls_per_second": 16239.17,
+        "p50_us": 59.35,
+        "p95_us": 75.91,
+        "p99_us": 91.42,
+        "p999_us": 97.84
+      },
+      "chunk_read_16_many": {
+        "calls": 512,
+        "calls_per_second": 24877.91,
+        "p50_us": 36.51,
+        "p95_us": 50.66,
+        "p99_us": 72.51,
+        "p999_us": 101.86
+      },
+      "chunk_read_32_individual": {
+        "calls": 512,
+        "calls_per_second": 7561.63,
+        "p50_us": 119.65,
+        "p95_us": 170.24,
+        "p99_us": 190.21,
+        "p999_us": 223.53
+      },
+      "chunk_read_32_many": {
+        "calls": 512,
+        "calls_per_second": 13967.62,
+        "p50_us": 66.5,
+        "p95_us": 86.84,
+        "p99_us": 128.71,
+        "p999_us": 256.47
+      },
+      "minecraft_full_saves": 176,
+      "minecraft_partial_saves": 336,
+      "minecraft_raw_value_bytes": 17901568,
+      "minecraft_chunk_saves": {
+        "calls": 512,
+        "calls_per_second": 2304.76,
+        "p50_us": 187.49,
+        "p95_us": 573.73,
+        "p99_us": 732.85,
+        "p999_us": 25683.99
+      },
+      "minecraft_flush_ms": 29.366,
+      "minecraft_chunk_reads_many": {
+        "calls": 512,
+        "calls_per_second": 11351.39,
+        "p50_us": 77.24,
+        "p95_us": 112.19,
+        "p99_us": 139.08,
+        "p999_us": 169.88
+      },
+      "reads_during_compaction": {
+        "calls": 512,
+        "calls_per_second": 9560.99,
+        "p50_us": 4.73,
+        "p95_us": 6.37,
+        "p99_us": 4952.88,
+        "p999_us": 9134.06
+      },
+      "compaction_ms": 252.757,
+      "post_compaction_reads": {
+        "calls": 512,
+        "calls_per_second": 228329.34,
+        "p50_us": 3.82,
+        "p95_us": 5.54,
+        "p99_us": 6.04,
+        "p999_us": 18.43
+      },
+      "stats": {
+        "get_calls": 64192,
+        "writes": 1153,
+        "records_written": 2528,
+        "raw_bytes_written": 13262848,
+        "compressed_bytes_written": 4674334,
+        "disk_reads": 99088,
+        "bytes_read": 49718352,
+        "fsync_count": 30,
+        "fsync_duration_ns": 145695412,
+        "segment_rotations": 0,
+        "compactions": 8,
+        "compaction_input_bytes": 304512,
+        "compaction_output_bytes": 304512,
+        "compaction_duration_ns": 206394312,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 4368
+      },
+      "reopen_and_replay_ms": 51.983,
+      "reopen_small_region_ms": 0.331,
+      "reopen_after_eviction_ms": 12.951,
+      "peak_rss_kib": 14948,
+      "cpu_seconds": 0.645,
+      "binary": "native_bench",
+      "repeat": 0,
+      "skip_unchanged": true,
+      "database_bytes": 4903798,
+      "compression_ratio": 2.837377046655203
+    },
+    {
+      "mode": "buffered",
+      "batches": 512,
+      "raw_value_bytes": 2097152,
+      "save_calls": {
+        "calls": 512,
+        "calls_per_second": 2628.76,
+        "p50_us": 34.78,
+        "p95_us": 96.36,
+        "p99_us": 20106.59,
+        "p999_us": 22404.89
+      },
+      "single_component_writes": {
+        "calls": 512,
+        "calls_per_second": 1117.56,
+        "p50_us": 37.53,
+        "p95_us": 74.77,
+        "p99_us": 25725.1,
+        "p999_us": 26069.02
+      },
+      "unchanged_rewrites": {
+        "calls": 512,
+        "calls_per_second": 6245.39,
+        "p50_us": 32.86,
+        "p95_us": 61.99,
+        "p99_us": 7630.6,
+        "p999_us": 8016.21
+      },
+      "sparse_region_reads": {
+        "calls": 512,
+        "calls_per_second": 507889.65,
+        "p50_us": 0.06,
+        "p95_us": 5.52,
+        "p99_us": 5.88,
+        "p999_us": 7.83
+      },
+      "list_region_keys": {
+        "calls": 256,
+        "calls_per_second": 22157.9,
+        "p50_us": 14.17,
+        "p95_us": 22.89,
+        "p99_us": 41.27,
+        "p999_us": 51.26
+      },
+      "listed_keys_per_region": 64,
+      "final_flush_ms": 0.003,
+      "hot_reads": {
+        "calls": 512,
+        "calls_per_second": 225837.29,
+        "p50_us": 3.67,
+        "p95_us": 4.99,
+        "p99_us": 6.55,
+        "p999_us": 23.83
+      },
+      "random_reads": {
+        "calls": 512,
+        "calls_per_second": 247024.13,
+        "p50_us": 3.89,
+        "p95_us": 4.24,
+        "p99_us": 5.64,
+        "p999_us": 14.05
+      },
+      "full_chunk_reads": {
+        "calls": 512,
+        "calls_per_second": 63577.27,
+        "p50_us": 14.68,
+        "p95_us": 19.83,
+        "p99_us": 30.15,
+        "p999_us": 50.84
+      },
+      "area_reads_8x8": {
+        "calls": 16,
+        "calls_per_second": 31726.08,
+        "p50_us": 7.86,
+        "p95_us": 14.73,
+        "p99_us": 14.73,
+        "p999_us": 14.73
+      },
+      "area_reads_16x16": {
+        "calls": 16,
+        "calls_per_second": 68102.49,
+        "p50_us": 14.15,
+        "p95_us": 19.77,
+        "p99_us": 19.77,
+        "p999_us": 19.77
+      },
+      "area_reads_32x32": {
+        "calls": 16,
+        "calls_per_second": 19050.68,
+        "p50_us": 43.41,
+        "p95_us": 58.5,
+        "p99_us": 58.5,
+        "p999_us": 58.5
+      },
+      "chunk_read_4_individual": {
+        "calls": 512,
+        "calls_per_second": 61637.9,
+        "p50_us": 14.63,
+        "p95_us": 21.43,
+        "p99_us": 31.68,
+        "p999_us": 66.09
+      },
+      "chunk_read_4_many": {
+        "calls": 512,
+        "calls_per_second": 69280.37,
+        "p50_us": 13.6,
+        "p95_us": 18.75,
+        "p99_us": 28.5,
+        "p999_us": 48.18
+      },
+      "chunk_read_16_individual": {
+        "calls": 512,
+        "calls_per_second": 15816.9,
+        "p50_us": 59.09,
+        "p95_us": 80.84,
+        "p99_us": 101.26,
+        "p999_us": 120.65
+      },
+      "chunk_read_16_many": {
+        "calls": 512,
+        "calls_per_second": 25670.32,
+        "p50_us": 36.49,
+        "p95_us": 48.36,
+        "p99_us": 64.99,
+        "p999_us": 83.1
+      },
+      "chunk_read_32_individual": {
+        "calls": 512,
+        "calls_per_second": 7862.26,
+        "p50_us": 118.77,
+        "p95_us": 160.68,
+        "p99_us": 181.79,
+        "p999_us": 214.24
+      },
+      "chunk_read_32_many": {
+        "calls": 512,
+        "calls_per_second": 14294.78,
+        "p50_us": 66.6,
+        "p95_us": 84.76,
+        "p99_us": 99.25,
+        "p999_us": 114.17
+      },
+      "minecraft_full_saves": 176,
+      "minecraft_partial_saves": 336,
+      "minecraft_raw_value_bytes": 17901568,
+      "minecraft_chunk_saves": {
+        "calls": 512,
+        "calls_per_second": 2701.67,
+        "p50_us": 159.1,
+        "p95_us": 461.41,
+        "p99_us": 576.17,
+        "p999_us": 21115.51
+      },
+      "minecraft_flush_ms": 27.685,
+      "minecraft_chunk_reads_many": {
+        "calls": 512,
+        "calls_per_second": 12240.6,
+        "p50_us": 77.14,
+        "p95_us": 101.05,
+        "p99_us": 113.2,
+        "p999_us": 145.14
+      },
+      "reads_during_compaction": {
+        "calls": 512,
+        "calls_per_second": 9546.62,
+        "p50_us": 3.79,
+        "p95_us": 4.8,
+        "p99_us": 4449.8,
+        "p999_us": 9080.63
+      },
+      "compaction_ms": 247.947,
+      "post_compaction_reads": {
+        "calls": 512,
+        "calls_per_second": 247883.91,
+        "p50_us": 3.82,
+        "p95_us": 3.87,
+        "p99_us": 6.98,
+        "p999_us": 29.39
+      },
+      "stats": {
+        "get_calls": 64192,
+        "writes": 1153,
+        "records_written": 2528,
+        "raw_bytes_written": 13262848,
+        "compressed_bytes_written": 4674334,
+        "disk_reads": 99088,
+        "bytes_read": 49718352,
+        "fsync_count": 30,
+        "fsync_duration_ns": 150711362,
+        "segment_rotations": 0,
+        "compactions": 8,
+        "compaction_input_bytes": 304512,
+        "compaction_output_bytes": 304512,
+        "compaction_duration_ns": 201417593,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 4368
+      },
+      "reopen_and_replay_ms": 54.862,
+      "reopen_small_region_ms": 0.283,
+      "reopen_after_eviction_ms": 12.66,
+      "peak_rss_kib": 14956,
+      "cpu_seconds": 0.609,
+      "binary": "native_bench",
+      "repeat": 1,
+      "skip_unchanged": true,
+      "database_bytes": 4903798,
+      "compression_ratio": 2.837377046655203
+    },
+    {
+      "mode": "buffered",
+      "batches": 512,
+      "raw_value_bytes": 2097152,
+      "save_calls": {
+        "calls": 512,
+        "calls_per_second": 2391.93,
+        "p50_us": 49.13,
+        "p95_us": 115.57,
+        "p99_us": 20562.5,
+        "p999_us": 26109.13
+      },
+      "single_component_writes": {
+        "calls": 512,
+        "calls_per_second": 1057.34,
+        "p50_us": 41.72,
+        "p95_us": 89.33,
+        "p99_us": 26780.67,
+        "p999_us": 30854.4
+      },
+      "unchanged_rewrites": {
+        "calls": 512,
+        "calls_per_second": 6116.36,
+        "p50_us": 31.77,
+        "p95_us": 52.91,
+        "p99_us": 7487.22,
+        "p999_us": 7777.6
+      },
+      "sparse_region_reads": {
+        "calls": 512,
+        "calls_per_second": 444936.89,
+        "p50_us": 0.08,
+        "p95_us": 7.4,
+        "p99_us": 9.39,
+        "p999_us": 21.06
+      },
+      "list_region_keys": {
+        "calls": 256,
+        "calls_per_second": 23651.03,
+        "p50_us": 14.45,
+        "p95_us": 20.77,
+        "p99_us": 39.55,
+        "p999_us": 44.31
+      },
+      "listed_keys_per_region": 64,
+      "final_flush_ms": 0.002,
+      "hot_reads": {
+        "calls": 512,
+        "calls_per_second": 213150.11,
+        "p50_us": 3.71,
+        "p95_us": 5.19,
+        "p99_us": 6.33,
+        "p999_us": 19.17
+      },
+      "random_reads": {
+        "calls": 512,
+        "calls_per_second": 236070.35,
+        "p50_us": 3.91,
+        "p95_us": 5.43,
+        "p99_us": 7.35,
+        "p999_us": 10.52
+      },
+      "full_chunk_reads": {
+        "calls": 512,
+        "calls_per_second": 57291.17,
+        "p50_us": 14.8,
+        "p95_us": 20.77,
+        "p99_us": 50.46,
+        "p999_us": 105.63
+      },
+      "area_reads_8x8": {
+        "calls": 16,
+        "calls_per_second": 23873.58,
+        "p50_us": 7.79,
+        "p95_us": 17.17,
+        "p99_us": 17.17,
+        "p999_us": 17.17
+      },
+      "area_reads_16x16": {
+        "calls": 16,
+        "calls_per_second": 56935.45,
+        "p50_us": 15.66,
+        "p95_us": 21.58,
+        "p99_us": 21.58,
+        "p999_us": 21.58
+      },
+      "area_reads_32x32": {
+        "calls": 16,
+        "calls_per_second": 24080.17,
+        "p50_us": 37.06,
+        "p95_us": 50.71,
+        "p99_us": 50.71,
+        "p999_us": 50.71
+      },
+      "chunk_read_4_individual": {
+        "calls": 512,
+        "calls_per_second": 64326.95,
+        "p50_us": 14.9,
+        "p95_us": 18.74,
+        "p99_us": 28.05,
+        "p999_us": 40.66
+      },
+      "chunk_read_4_many": {
+        "calls": 512,
+        "calls_per_second": 68958.3,
+        "p50_us": 13.73,
+        "p95_us": 17.33,
+        "p99_us": 28.21,
+        "p999_us": 38.06
+      },
+      "chunk_read_16_individual": {
+        "calls": 512,
+        "calls_per_second": 15926.66,
+        "p50_us": 59.84,
+        "p95_us": 80.02,
+        "p99_us": 85.63,
+        "p999_us": 95.96
+      },
+      "chunk_read_16_many": {
+        "calls": 512,
+        "calls_per_second": 26086.2,
+        "p50_us": 36.7,
+        "p95_us": 46.98,
+        "p99_us": 62.28,
+        "p999_us": 78.06
+      },
+      "chunk_read_32_individual": {
+        "calls": 512,
+        "calls_per_second": 7472.93,
+        "p50_us": 120.2,
+        "p95_us": 163.55,
+        "p99_us": 209.5,
+        "p999_us": 260.93
+      },
+      "chunk_read_32_many": {
+        "calls": 512,
+        "calls_per_second": 13581.88,
+        "p50_us": 67.1,
+        "p95_us": 90.58,
+        "p99_us": 122.54,
+        "p999_us": 136.02
+      },
+      "minecraft_full_saves": 176,
+      "minecraft_partial_saves": 336,
+      "minecraft_raw_value_bytes": 17901568,
+      "minecraft_chunk_saves": {
+        "calls": 512,
+        "calls_per_second": 2675.89,
+        "p50_us": 169.49,
+        "p95_us": 464.84,
+        "p99_us": 552.22,
+        "p999_us": 21252.79
+      },
+      "minecraft_flush_ms": 30.618,
+      "minecraft_chunk_reads_many": {
+        "calls": 512,
+        "calls_per_second": 11809.61,
+        "p50_us": 76.08,
+        "p95_us": 113.42,
+        "p99_us": 128.04,
+        "p999_us": 153.33
+      },
+      "reads_during_compaction": {
+        "calls": 512,
+        "calls_per_second": 9708.61,
+        "p50_us": 4.76,
+        "p95_us": 6.74,
+        "p99_us": 4357.72,
+        "p999_us": 8901.38
+      },
+      "compaction_ms": 247.067,
+      "post_compaction_reads": {
+        "calls": 512,
+        "calls_per_second": 228029.35,
+        "p50_us": 3.87,
+        "p95_us": 5.42,
+        "p99_us": 6.27,
+        "p999_us": 22.41
+      },
+      "stats": {
+        "get_calls": 64192,
+        "writes": 1153,
+        "records_written": 2528,
+        "raw_bytes_written": 13262848,
+        "compressed_bytes_written": 4674334,
+        "disk_reads": 99088,
+        "bytes_read": 49718352,
+        "fsync_count": 30,
+        "fsync_duration_ns": 156717601,
+        "segment_rotations": 0,
+        "compactions": 8,
+        "compaction_input_bytes": 304512,
+        "compaction_output_bytes": 304512,
+        "compaction_duration_ns": 199127052,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 4368
+      },
+      "reopen_and_replay_ms": 51.283,
+      "reopen_small_region_ms": 0.267,
+      "reopen_after_eviction_ms": 12.565,
+      "peak_rss_kib": 14700,
+      "cpu_seconds": 0.63,
+      "binary": "native_bench",
+      "repeat": 2,
+      "skip_unchanged": true,
+      "database_bytes": 4903798,
+      "compression_ratio": 2.837377046655203
+    },
+    {
+      "threads": 4,
+      "same_region_parallel_reads": {
+        "calls": 512,
+        "calls_per_second": 258013.41,
+        "p50_us": 2.97,
+        "p95_us": 5.01,
+        "p99_us": 5.99,
+        "p999_us": 30.7
+      },
+      "cross_region_parallel_reads": {
+        "calls": 512,
+        "calls_per_second": 446753.06,
+        "p50_us": 4.79,
+        "p95_us": 6.61,
+        "p99_us": 17.77,
+        "p999_us": 43.94
+      },
+      "reads_during_writes_same_region": {
+        "calls": 24576,
+        "calls_per_second": 235340.72,
+        "p50_us": 2.99,
+        "p95_us": 4.6,
+        "p99_us": 6.12,
+        "p999_us": 52.2
+      },
+      "concurrent_writes_same_region": {
+        "calls": 512,
+        "calls_per_second": 4970.5,
+        "p50_us": 27.37,
+        "p95_us": 42.22,
+        "p99_us": 79.54,
+        "p999_us": 20124.68
+      },
+      "concurrent_writes_same_region_fsyncs": 0,
+      "concurrent_writes_same_region_next_id": {
+        "calls": 512,
+        "calls_per_second": 5603.45,
+        "p50_us": 53.09,
+        "p95_us": 176.91,
+        "p99_us": 20767.56,
+        "p999_us": 23532.29
+      },
+      "concurrent_writes_same_region_next_id_fsyncs": 0,
+      "concurrent_writes_different_regions": {
+        "calls": 512,
+        "calls_per_second": 2839.15,
+        "p50_us": 68.65,
+        "p95_us": 590.46,
+        "p99_us": 41572.15,
+        "p999_us": 48557.46
+      },
+      "concurrent_writes_different_regions_fsyncs": 12,
+      "binary": "native_bench_concurrency",
+      "cache_mb": 0,
+      "repeat": 0
+    },
+    {
+      "threads": 4,
+      "same_region_parallel_reads": {
+        "calls": 512,
+        "calls_per_second": 260742.25,
+        "p50_us": 3.86,
+        "p95_us": 5.37,
+        "p99_us": 7.46,
+        "p999_us": 18.78
+      },
+      "cross_region_parallel_reads": {
+        "calls": 512,
+        "calls_per_second": 612384.52,
+        "p50_us": 3.6,
+        "p95_us": 4.64,
+        "p99_us": 6.27,
+        "p999_us": 16.32
+      },
+      "reads_during_writes_same_region": {
+        "calls": 24576,
+        "calls_per_second": 239733.88,
+        "p50_us": 2.96,
+        "p95_us": 4.69,
+        "p99_us": 5.86,
+        "p999_us": 31.87
+      },
+      "concurrent_writes_same_region": {
+        "calls": 512,
+        "calls_per_second": 4998.76,
+        "p50_us": 27.04,
+        "p95_us": 42.07,
+        "p99_us": 59.84,
+        "p999_us": 20430.18
+      },
+      "concurrent_writes_same_region_fsyncs": 0,
+      "concurrent_writes_same_region_next_id": {
+        "calls": 512,
+        "calls_per_second": 5409.05,
+        "p50_us": 55.69,
+        "p95_us": 173.22,
+        "p99_us": 20661.23,
+        "p999_us": 24415.69
+      },
+      "concurrent_writes_same_region_next_id_fsyncs": 0,
+      "concurrent_writes_different_regions": {
+        "calls": 512,
+        "calls_per_second": 2388.6,
+        "p50_us": 63.61,
+        "p95_us": 526.72,
+        "p99_us": 41890.64,
+        "p999_us": 42632.57
+      },
+      "concurrent_writes_different_regions_fsyncs": 13,
+      "binary": "native_bench_concurrency",
+      "cache_mb": 0,
+      "repeat": 1
+    },
+    {
+      "threads": 4,
+      "same_region_parallel_reads": {
+        "calls": 512,
+        "calls_per_second": 276846.99,
+        "p50_us": 3.7,
+        "p95_us": 4.72,
+        "p99_us": 12.36,
+        "p999_us": 27.73
+      },
+      "cross_region_parallel_reads": {
+        "calls": 512,
+        "calls_per_second": 503242.57,
+        "p50_us": 4.27,
+        "p95_us": 5.44,
+        "p99_us": 7.78,
+        "p999_us": 20.11
+      },
+      "reads_during_writes_same_region": {
+        "calls": 24576,
+        "calls_per_second": 237097.17,
+        "p50_us": 2.97,
+        "p95_us": 4.63,
+        "p99_us": 5.84,
+        "p999_us": 30.58
+      },
+      "concurrent_writes_same_region": {
+        "calls": 512,
+        "calls_per_second": 4940.19,
+        "p50_us": 27.23,
+        "p95_us": 43.94,
+        "p99_us": 66.79,
+        "p999_us": 20446.18
+      },
+      "concurrent_writes_same_region_fsyncs": 0,
+      "concurrent_writes_same_region_next_id": {
+        "calls": 512,
+        "calls_per_second": 5266.45,
+        "p50_us": 53.84,
+        "p95_us": 167.12,
+        "p99_us": 21929.86,
+        "p999_us": 24621.6
+      },
+      "concurrent_writes_same_region_next_id_fsyncs": 0,
+      "concurrent_writes_different_regions": {
+        "calls": 512,
+        "calls_per_second": 2209.94,
+        "p50_us": 29.05,
+        "p95_us": 286.81,
+        "p99_us": 50244.45,
+        "p999_us": 55710.49
+      },
+      "concurrent_writes_different_regions_fsyncs": 13,
+      "binary": "native_bench_concurrency",
+      "cache_mb": 0,
+      "repeat": 2
+    }
+  ]
+}
