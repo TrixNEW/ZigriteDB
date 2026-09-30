@@ -56,6 +56,7 @@ pub const Scanner = struct {
         var position = self.offset;
         var count: usize = 0;
         var batch_id: u64 = 0;
+        var digest = std.crypto.hash.sha2.Sha256.init(.{});
 
         while (position < self.bytes.len) {
             const remaining = self.bytes[position..];
@@ -70,7 +71,7 @@ pub const Scanner = struct {
                 if (remaining.len < commit.commit_len) return self.tail();
 
                 const records = self.bytes[self.offset..position];
-                try commit.verify(records, remaining[0..commit.commit_len]);
+                try commit.check(remaining[0..commit.commit_len], batch_id, @intCast(count), records.len, digest.finalResult());
 
                 const end = std.math.add(usize, position, commit.commit_len) catch return error.InvalidLength;
 
@@ -102,6 +103,7 @@ pub const Scanner = struct {
             if (!same_region) return error.RegionMismatch;
 
             batch_id = header.batch_id;
+            digest.update(remaining[0..decoded.consumed]);
             position = std.math.add(usize, position, decoded.consumed) catch return error.BatchTooLarge;
 
             if (position - self.offset > commit.max_bytes) return error.BatchTooLarge;

@@ -22,6 +22,9 @@ pub const Options = struct {
     stats: ?*Stats = null,
     cache: ?*Cache = null,
     skip_unchanged: bool = false,
+    // Ask for compaction once live data drops below this share of a store this big.
+    compact_min_bytes: u64 = 16 * 1024 * 1024,
+    compact_live_percent: u8 = 50,
 
     pub fn validate(self: Options) !void {
         if (self.max_segments == 0 or self.max_segments > manifest.max_segments) return error.InvalidSegmentCount;
@@ -178,11 +181,11 @@ pub fn Shard(comptime Device: type) type {
                 options.max_keys,
                 scratch,
                 options.max_segment_size,
+                options.skip_unchanged,
             );
             errdefer index.deinit();
             index.stats = options.stats;
             index.segment_ids = ids;
-            index.fingerprints = options.skip_unchanged;
 
             if (index.has_tail) return error.NeedsRecovery;
 

@@ -379,6 +379,7 @@ int main(int argc, char **argv) {
     started = now();
     if (!group && !sync) flushStore(&store);
     printf(",\"final_barrier_ms\":%.3f", (now() - started) * 1e3);
+    if (!use_leveldb) reportStatsAs("write_stats", store.zig);
     closeStore(&store);
 
     printf(",\"database_bytes\":%llu", walkAndEvict(argv[1]));

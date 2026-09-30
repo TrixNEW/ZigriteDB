@@ -145,6 +145,8 @@ pub const Handle = struct {
     threaded: std.Io.Threaded,
     world: db.World,
     maintenance: @import("world/maintenance.zig").Queue(db.World, compactRegion),
+    // Stale regions found by writes; dropped on close.
+    compaction: @import("world/maintenance.zig").WorkQueue(db.World, db.Region, 16, false, compactStale),
     prefetch: @import("world/maintenance.zig").WorkQueue(db.World, db.Key, 256, false, warmKey),
     mutex: std.Io.Mutex = .init,
     available: std.Io.Condition = .init,
@@ -266,6 +268,8 @@ fn open(path: ?[*]const u8, length: usize, options: Options) !*Handle {
     handle.world = try db.World.open(allocator, io, dir, config);
     errdefer handle.world.deinit();
     handle.maintenance = .{ .io = io, .context = &handle.world };
+    handle.compaction = .{ .io = io, .context = &handle.world };
+    handle.world.compactor = .{ .context = handle, .submit = submitCompaction };
     handle.prefetch = .{ .io = io, .context = &handle.world };
     handle.mutex = .init;
     handle.available = .init;
@@ -278,6 +282,7 @@ fn open(path: ?[*]const u8, length: usize, options: Options) !*Handle {
 pub export fn zg_close(optional: ?*Handle) Status {
     const handle = optional orelse return .invalid_argument;
     handle.prefetch.close() catch {};
+    handle.compaction.close() catch {};
     const maintenance_result = handle.maintenance.close();
     const result = handle.world.close();
     for (&handle.writers) |*slot| if (slot.*) |*context| context.deinit();
@@ -559,6 +564,15 @@ pub export fn zg_list_keys(optional: ?*Handle, dimension: i32, x: i32, z: i32, c
 
 fn warmKey(world: *db.World, key: db.Key) !void {
     world.warm(key) catch {};
+}
+
+fn submitCompaction(context: *anyopaque, region: db.Region) void {
+    const handle: *Handle = @ptrCast(@alignCast(context));
+    handle.compaction.submit(region) catch {};
+}
+
+fn compactStale(world: *db.World, region: db.Region) !void {
+    _ = world.compact(region) catch {};
 }
 
 fn compactRegion(world: *db.World, region: db.Region) !void {

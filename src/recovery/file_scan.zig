@@ -16,6 +16,9 @@ pub fn Scanner(comptime Device: type) type {
         last_batch_id: u64,
         finished: bool = false,
         has_tail: bool = false,
+        window: []u8 = &.{},
+        window_start: usize = 0,
+        window_len: usize = 0,
 
         const Self = @This();
 
@@ -40,7 +43,7 @@ pub fn Scanner(comptime Device: type) type {
             };
         }
 
-        /// Returned records use scratch until the next call.
+        /// Records use scratch until the next call, which must pass the same scratch.
         pub fn next(self: *Self, scratch: []u8) !?recovery.Batch {
             if (self.finished) return null;
 
@@ -49,70 +52,44 @@ pub fn Scanner(comptime Device: type) type {
                 return null;
             }
 
-            if (scratch.len < segment.encoded_len) return error.BufferTooSmall;
-            @memcpy(scratch[0..segment.encoded_len], &(try self.header.encode()));
+            if (scratch.len <= segment.encoded_len) return error.BufferTooSmall;
 
-            var used: usize = segment.encoded_len;
-            var position = self.offset;
-            var count: usize = 0;
+            while (true) {
+                const in_window = scratch.ptr == self.window.ptr and scratch.len == self.window.len and
+                    self.offset >= self.window_start and self.offset < self.window_start + self.window_len;
+                if (!in_window) try self.refill(scratch);
 
-            while (position < self.length) {
-                const header_len = @min(record.encoded_len, self.length - position);
-                if (scratch.len - used < header_len) return error.BufferTooSmall;
-
-                try self.device.readExact(scratch[used..][0..header_len], position);
-                if (header_len < record.encoded_len) return self.finish(scratch[0 .. used + header_len]);
-
-                const header = try record.Header.decode(scratch[used..][0..header_len]);
-                const is_commit = header.kind == .commit;
-                const size = if (is_commit)
-                    commit.commit_len
-                else
-                    try std.math.add(usize, entry.overhead, header.stored_len);
-
-                if (!is_commit) {
-                    if (count == commit.max_records) return error.BatchTooLarge;
-                    const batch_size = try std.math.add(usize, used - segment.encoded_len, size);
-                    if (batch_size > commit.max_bytes) return error.BatchTooLarge;
-                    count += 1;
+                var scanner: recovery.Scanner = .{
+                    .bytes = scratch[0 .. segment.encoded_len + self.window_len],
+                    .header = self.header,
+                    .mode = .active,
+                    .offset = segment.encoded_len + self.offset - self.window_start,
+                    .last_batch_id = self.last_batch_id,
+                };
+                if (try scanner.next()) |batch| {
+                    const end = self.window_start + batch.end_offset - segment.encoded_len;
+                    self.offset = end;
+                    self.last_batch_id = batch.id;
+                    return .{ .id = batch.id, .records = batch.records, .end_offset = end };
                 }
 
-                const available = @min(size, self.length - position);
-                if (scratch.len - used < available) return error.BufferTooSmall;
-
-                try self.device.readExact(
-                    scratch[used + header_len ..][0 .. available - header_len],
-                    position + header_len,
-                );
-
-                used += available;
-                position += available;
-
-                if (available < size or is_commit) return self.finish(scratch[0..used]);
+                if (self.window_start + self.window_len == self.length) {
+                    if (self.mode == .sealed) return error.IncompleteBatch;
+                    self.has_tail = true;
+                    self.finished = true;
+                    return null;
+                }
+                if (self.window_start == self.offset) return error.BufferTooSmall;
+                try self.refill(scratch);
             }
-
-            return self.finish(scratch[0..used]);
         }
 
-        fn finish(self: *Self, bytes: []const u8) !?recovery.Batch {
-            var scanner = try recovery.Scanner.init(bytes, self.header, self.mode, self.last_batch_id);
-
-            if (try scanner.next()) |batch| {
-                const end = try std.math.add(usize, self.offset, batch.end_offset - segment.encoded_len);
-                self.offset = end;
-                self.last_batch_id = batch.id;
-
-                return .{
-                    .id = batch.id,
-                    .records = batch.records,
-                    .end_offset = end,
-                };
-            }
-
-            self.has_tail = scanner.has_tail;
-            self.finished = true;
-
-            return null;
+        fn refill(self: *Self, scratch: []u8) !void {
+            const len = @min(scratch.len - segment.encoded_len, self.length - self.offset);
+            try self.device.readExact(scratch[segment.encoded_len..][0..len], self.offset);
+            self.window = scratch;
+            self.window_start = self.offset;
+            self.window_len = len;
         }
     };
 }

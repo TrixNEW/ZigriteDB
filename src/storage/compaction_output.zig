@@ -22,13 +22,19 @@ pub const CompactionOutput = struct {
         self.file = null;
     }
 
-    pub fn append(self: *CompactionOutput, batch: []const u8) !void {
-        if (batch.len == 0) return;
+    pub const Placed = struct {
+        position: usize,
+        end: u64,
+    };
+
+    pub fn append(self: *CompactionOutput, batch: []const u8) !?Placed {
+        if (batch.len == 0) return null;
         if (batch.len > self.max_size - segment.encoded_len) return error.BatchTooLarge;
         if (self.file == null or batch.len > self.max_size - self.offset) try self.rotate();
         try self.file.?.writeAll(batch, self.offset);
         self.offset += batch.len;
         self.bytes = try std.math.add(u64, self.bytes, batch.len);
+        return .{ .position = self.count - 1, .end = self.offset };
     }
 
     pub fn finish(self: *CompactionOutput) !void {

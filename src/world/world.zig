@@ -20,6 +20,11 @@ pub const Options = struct {
     cache: cache_module.Options = .{},
 };
 
+pub const Compactor = struct {
+    context: *anyopaque,
+    submit: *const fn (context: *anyopaque, region: Region) void,
+};
+
 pub const ReadRequest = store_module.ReadRequest;
 pub const ReadStatus = store_module.ReadStatus;
 pub const ReadResult = store_module.ReadResult;
@@ -39,6 +44,7 @@ pub const World = struct {
     clock: u64 = 0,
     positions: std.AutoHashMapUnmanaged(Region, u32) = .empty,
     loads: usize = 0,
+    compactor: ?Compactor = null,
 
     const Slot = struct {
         region: Region,
@@ -76,7 +82,13 @@ pub const World = struct {
         if (size > self.options.shard.max_segment_size - segment.encoded_len) return error.BatchTooLarge;
         const store = (try self.acquire(batch.entries[0].key.region(), true)).?;
         defer self.unpin(store);
+        defer self.suggest(store);
         return store.write(batch);
+    }
+
+    fn suggest(self: *World, store: *Store) void {
+        const compactor = self.compactor orelse return;
+        if (store.wantsCompaction()) compactor.submit(compactor.context, store.region);
     }
 
     pub fn writeNext(self: *World, entries: []Entry) !AppendResult {
@@ -87,6 +99,7 @@ pub const World = struct {
         if (size > self.options.shard.max_segment_size - segment.encoded_len) return error.BatchTooLarge;
         const store = (try self.acquire(entries[0].key.region(), true)).?;
         defer self.unpin(store);
+        defer self.suggest(store);
         return store.writeNext(entries);
     }
 
@@ -99,6 +112,7 @@ pub const World = struct {
         }
         const store = (try self.acquire(batches[0].entries[0].key.region(), true)).?;
         defer self.unpin(store);
+        defer self.suggest(store);
         try store.writeGroup(batches);
     }
 

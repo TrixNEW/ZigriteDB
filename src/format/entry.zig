@@ -90,6 +90,23 @@ pub fn decode(bytes: []const u8) Error!Decoded {
     return decoded;
 }
 
+/// For records a scanner already checked.
+pub fn decodeVerified(bytes: []const u8) Error!Decoded {
+    const header = try record.Header.decode(bytes);
+    try validateHeader(header);
+    const len = try totalSize(header.stored_len);
+    if (bytes.len < len) return error.TruncatedRecord;
+    const key_end = record.encoded_len + Key.encoded_len;
+    return .{
+        .entry = .{
+            .header = header,
+            .key = try Key.decode(bytes[record.encoded_len..key_end]),
+            .value = bytes[key_end .. len - checksum_len],
+        },
+        .consumed = len,
+    };
+}
+
 /// Like `decode`, but leaves the LZ4 stream to be checked by `lz4.decompress`.
 pub fn decodeStored(bytes: []const u8) Error!Decoded {
     const header = try record.Header.decode(bytes);

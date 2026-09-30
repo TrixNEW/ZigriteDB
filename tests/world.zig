@@ -404,3 +404,37 @@ test "a region with records but no manifest is never discarded" {
     const stat = try region_dir.statFile(io, "0000000000000001-0000000000000001.segment", .{});
     try testing.expectEqual(@as(u64, bytes.len), stat.size);
 }
+
+const Suggestions = struct {
+    regions: [8]db.Region = undefined,
+    count: usize = 0,
+
+    fn submit(context: *anyopaque, region: db.Region) void {
+        const self: *Suggestions = @ptrCast(@alignCast(context));
+        self.regions[self.count] = region;
+        self.count += 1;
+    }
+};
+
+test "writes suggest compaction for regions that went stale" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .shard = .{ .compact_min_bytes = 4096 } });
+    defer world.deinit();
+    var suggestions: Suggestions = .{};
+    world.compactor = .{ .context = &suggestions, .submit = Suggestions.submit };
+
+    var value: [100]u8 = @splat('v');
+    var id: u64 = 1;
+    while (suggestions.count == 0) : (id += 1) {
+        try testing.expect(id < 1000);
+        _ = try world.write(.{ .entries = &.{item(id, 40, &value)} });
+    }
+    try testing.expectEqual(@as(usize, 1), suggestions.count);
+    try testing.expectEqualDeep(item(1, 40, "").key.region(), suggestions.regions[0]);
+    _ = try world.compact(suggestions.regions[0]);
+    _ = try world.write(.{ .entries = &.{item(id, 41, &value)} });
+    try testing.expectEqual(@as(usize, 1), suggestions.count);
+    try world.close();
+}

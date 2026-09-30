@@ -92,6 +92,7 @@ fn compactWithAllocator(allocator: std.mem.Allocator) !void {
         var value: [128]u8 = undefined;
         try testing.expectEqualStrings("saved", (try store.get(item(1, 0, "").key, &value)).?);
         try testing.expectEqual(@as(u64, 1), store.shard.generation.index.generation);
+        try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "0000000000000002-0000000000000001.segment", .{}));
         return err;
     };
     try store.close();
@@ -302,4 +303,109 @@ test "getMany during compaction stays safe" {
     reader.join();
 
     try testing.expectEqual(null, failure);
+}
+
+const Churn = struct {
+    store: *db.Store,
+    rounds: usize,
+    failure: ?anyerror = null,
+
+    fn run(self: *Churn) void {
+        for (1..self.rounds + 1) |i| {
+            var value: [8]u8 = undefined;
+            std.mem.writeInt(u64, &value, i, .little);
+            const x: i32 = @intCast(i % 16);
+            const entries = [_]db.entry.Entry{ item(i, x, &value), item(i, 16 + x, if (i % 3 == 0) null else &value) };
+            _ = self.store.write(.{ .entries = &entries }) catch |err| {
+                self.failure = err;
+                return;
+            };
+        }
+    }
+};
+
+fn expectChurned(store: *db.Store, rounds: usize) !void {
+    var output: [8]u8 = undefined;
+    for (0..16) |x| {
+        var last = rounds - (rounds + 16 - x) % 16;
+        if (last == 0 or last > rounds) last -= 16;
+        const value = (try store.get(item(1, @intCast(x), "").key, &output)).?;
+        try testing.expectEqual(@as(u64, last), std.mem.readInt(u64, value[0..8], .little));
+        const other = try store.get(item(1, @intCast(16 + x), "").key, &output);
+        if (last % 3 == 0) try testing.expectEqual(null, other) else try testing.expectEqual(@as(u64, last), std.mem.readInt(u64, other.?[0..8], .little));
+    }
+}
+
+test "writes keep landing while compaction runs and all of them survive" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const options: db.shard.Options = .{ .max_segment_size = 64 * 1024, .batch_buffer_size = 1024 };
+    const rounds = 3000;
+    {
+        var store = try db.Store.create(testing.allocator, io, tmp.dir, region, options);
+        defer store.deinit();
+        var churn: Churn = .{ .store = &store, .rounds = rounds };
+        const writer = try std.Thread.spawn(.{}, Churn.run, .{&churn});
+        var compactions: usize = 0;
+        while (compactions < 40) : (compactions += 1) _ = try store.compact();
+        writer.join();
+        try testing.expectEqual(null, churn.failure);
+        try expectChurned(&store, rounds);
+        _ = try store.compact();
+        try expectChurned(&store, rounds);
+        try store.close();
+    }
+    var store = try db.Store.open(testing.allocator, io, tmp.dir, options);
+    defer store.deinit();
+    try testing.expectEqual(@as(u64, rounds), try store.lastBatchId());
+    try expectChurned(&store, rounds);
+    try store.close();
+}
+
+test "stale data asks for compaction once and compaction clears it" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{ .compact_min_bytes = 4096 });
+    defer store.deinit();
+    var value: [100]u8 = @splat('v');
+    var id: u64 = 1;
+    while (!store.wantsCompaction()) : (id += 1) {
+        try testing.expect(id < 1000);
+        _ = try store.write(.{ .entries = &.{item(id, 0, &value)} });
+    }
+    try testing.expect(!store.wantsCompaction());
+    _ = try store.compact();
+    _ = try store.write(.{ .entries = &.{item(id, 1, &value)} });
+    try testing.expect(!store.wantsCompaction());
+    try testing.expect(store.shard.generation.index.live_bytes * 2 > store.shard.generation.index.total_bytes);
+    try store.close();
+}
+
+test "reopening clears segments of a compaction that never published" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{});
+        defer store.deinit();
+        _ = try store.write(.{ .entries = &.{item(1, 0, "saved")} });
+        try store.close();
+    }
+    for ([_][]const u8{ "0000000000000002-0000000000000001.segment", "0000000000000002-0000000000000002.segment" }) |name| {
+        const file = try tmp.dir.createFile(io, name, .{ .exclusive = true });
+        file.close(io);
+    }
+    const unrelated = try tmp.dir.createFile(io, "0000000000000003-0000000000000001.segment", .{ .exclusive = true });
+    unrelated.close(io);
+
+    var store = try db.Store.open(testing.allocator, io, tmp.dir, .{});
+    defer store.deinit();
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "0000000000000002-0000000000000002.segment", .{}));
+    _ = try tmp.dir.statFile(io, "0000000000000003-0000000000000001.segment", .{});
+    try testing.expectEqual(@as(u64, 2), (try store.compact()).generation);
+    var value: [16]u8 = undefined;
+    try testing.expectEqualStrings("saved", (try store.get(item(1, 0, "").key, &value)).?);
+    try store.close();
 }

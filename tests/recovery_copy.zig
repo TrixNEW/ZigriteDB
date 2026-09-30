@@ -90,3 +90,30 @@ fn copyWithAllocator(allocator: std.mem.Allocator, source: std.Io.Dir) !void {
     defer destination.cleanup();
     _ = try db.recovery_copy.recoverTo(allocator, io, source, destination.dir, .{});
 }
+
+test "recovery copies every batch of a segment byte for byte" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var source = testing.tmpDir(.{});
+    defer source.cleanup();
+    var destination = testing.tmpDir(.{});
+    defer destination.cleanup();
+    var values: [50][12]u8 = undefined;
+    {
+        var store = try db.Store.create(testing.allocator, io, source.dir, support.header.region, .{});
+        defer store.deinit();
+        for (&values, 1..) |*value, id| {
+            value.* = "value-000000".*;
+            _ = std.fmt.printInt(value[6..], id, 10, .lower, .{ .width = 6, .fill = '0' });
+            _ = try store.write(.{ .entries = &.{support.item(id, @intCast(id % 20), value)} });
+        }
+        try store.close();
+    }
+    const result = try db.recovery_copy.recoverTo(testing.allocator, io, source.dir, destination.dir, .{});
+    try testing.expectEqual(@as(u64, 50), result.committed_batches);
+
+    var recovered = try db.Store.open(testing.allocator, io, destination.dir, .{});
+    defer recovered.deinit();
+    var output: [12]u8 = undefined;
+    for (30..50) |i| try testing.expectEqualStrings(&values[i], (try recovered.get(support.item(1, @intCast((i + 1) % 20), "").key, &output)).?);
+    try recovered.close();
+}

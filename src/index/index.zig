@@ -50,6 +50,7 @@ pub const Change = struct {
 pub const Prepared = struct {
     changes: []const Change,
     batch_id: u64,
+    bytes: u64,
 };
 
 // The sort is stable, so the last change per key wins.
@@ -84,6 +85,8 @@ pub const Index = struct {
     changes: std.ArrayListUnmanaged(Change) = .empty,
     // Only skip_unchanged needs these.
     fingerprints: bool = true,
+    total_bytes: u64 = 0,
+    live_bytes: u64 = 0,
 
     pub fn deinit(self: *Index) void {
         self.entries.deinit(self.allocator);
@@ -141,7 +144,6 @@ pub const Index = struct {
         return decodeInto(try self.readRecordAt(location, key, device, scratch), output);
     }
 
-    /// Decodes a record already read from `location`.
     pub fn decodeAt(bytes: []const u8, location: Location, key: Key, output: []u8) ![]const u8 {
         return decodeInto(try checkRecord(bytes, location, key), output);
     }
@@ -208,10 +210,14 @@ pub const Index = struct {
     }
 
     fn apply(self: *Index, batch: recovery.Batch, position: usize) !void {
-        self.publish(try self.prepare(batch, position));
+        self.publish(try self.prepareRecords(batch, position, true));
     }
 
     pub fn prepare(self: *Index, batch: recovery.Batch, position: usize) !Prepared {
+        return self.prepareRecords(batch, position, false);
+    }
+
+    fn prepareRecords(self: *Index, batch: recovery.Batch, position: usize, comptime verified: bool) !Prepared {
         if (position >= self.segment_ids.len) return error.InvalidSegmentId;
         if (batch.id <= self.last_batch_id) return error.BatchOrder;
         if (batch.records.len == 0) return error.EmptyBatch;
@@ -224,7 +230,7 @@ pub const Index = struct {
         var record_count: usize = 0;
 
         while (offset < batch.records.len) {
-            const decoded = try entry.decode(batch.records[offset..]);
+            const decoded = try if (verified) entry.decodeVerified(batch.records[offset..]) else entry.decode(batch.records[offset..]);
             const item = decoded.entry;
             if (record_count == commit.max_records) return error.BatchTooLarge;
             if (item.header.batch_id != batch.id) return error.BatchIdMismatch;
@@ -246,7 +252,7 @@ pub const Index = struct {
             offset += decoded.consumed;
         }
 
-        return self.finish(batch.id);
+        return self.finish(batch.id, batch.records.len + commit.commit_len);
     }
 
     /// Batches must be encoded back to back from `start`.
@@ -272,7 +278,7 @@ pub const Index = struct {
             offset += commit.commit_len;
         }
 
-        return self.finish(previous);
+        return self.finish(previous, offset - start);
     }
 
     fn locate(self: *const Index, item: entry.Entry, position: usize, offset: u64, batch_id: u64) ?Location {
@@ -287,7 +293,7 @@ pub const Index = struct {
         };
     }
 
-    fn finish(self: *Index, batch_id: u64) !Prepared {
+    fn finish(self: *Index, batch_id: u64, bytes: u64) !Prepared {
         const changes = latestPerKey(self.changes.items);
         var additions: u32 = 0;
         var removals: u32 = 0;
@@ -302,19 +308,29 @@ pub const Index = struct {
 
         try self.entries.ensureTotalCapacity(self.allocator, @intCast(new_count));
 
-        return .{ .changes = changes, .batch_id = batch_id };
+        return .{ .changes = changes, .batch_id = batch_id, .bytes = bytes };
     }
 
     pub fn publish(self: *Index, prepared: Prepared) void {
         for (prepared.changes) |change| {
-            if (change.location == null) _ = self.entries.remove(change.key);
+            if (change.location != null) continue;
+            if (self.entries.fetchRemove(change.key)) |old| self.live_bytes -= recordLen(old.value);
         }
         for (prepared.changes) |change| {
-            if (change.location) |location| self.entries.putAssumeCapacity(change.key, location);
+            const location = change.location orelse continue;
+            const slot = self.entries.getOrPutAssumeCapacity(change.key);
+            if (slot.found_existing) self.live_bytes -= recordLen(slot.value_ptr.*);
+            slot.value_ptr.* = location;
+            self.live_bytes += recordLen(location);
         }
+        self.total_bytes += prepared.bytes;
         self.last_batch_id = prepared.batch_id;
     }
 };
+
+fn recordLen(location: Location) u64 {
+    return @as(u64, location.stored_len) + entry.overhead;
+}
 
 pub fn rebuild(
     allocator: std.mem.Allocator,
@@ -322,7 +338,7 @@ pub fn rebuild(
     segments: []const []const u8,
     max_keys: u32,
 ) !Index {
-    return rebuildSource(false, allocator, metadata, segments, max_keys, &.{}, 0);
+    return rebuildSource(false, allocator, metadata, segments, max_keys, &.{}, 0, true);
 }
 
 pub fn rebuildFiles(
@@ -332,8 +348,9 @@ pub fn rebuildFiles(
     max_keys: u32,
     scratch: []u8,
     max_segment_size: u64,
+    fingerprints: bool,
 ) !Index {
-    return rebuildSource(true, allocator, metadata, devices, max_keys, scratch, max_segment_size);
+    return rebuildSource(true, allocator, metadata, devices, max_keys, scratch, max_segment_size, fingerprints);
 }
 
 fn rebuildSource(
@@ -344,6 +361,7 @@ fn rebuildSource(
     max_keys: u32,
     scratch: []u8,
     max_segment_size: u64,
+    fingerprints: bool,
 ) !Index {
     if (metadata.generation == 0) return error.InvalidGeneration;
     if (sources.len == 0 or sources.len > manifest.max_segments or
@@ -356,6 +374,7 @@ fn rebuildSource(
         .generation = metadata.generation,
         .max_keys = max_keys,
         .segment_ids = metadata.segments,
+        .fingerprints = fingerprints,
     };
     errdefer index.deinit();
 

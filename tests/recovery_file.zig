@@ -150,7 +150,7 @@ fn rebuildFiles(allocator: std.mem.Allocator) !void {
     var device: Device = .{ .bytes = &bytes };
     try populate(&device, 10);
     var scratch: [256]u8 = undefined;
-    var index = try db.index.rebuildFiles(allocator, metadata, &[_]*Device{&device}, 1, &scratch, bytes.len);
+    var index = try db.index.rebuildFiles(allocator, metadata, &[_]*Device{&device}, 1, &scratch, bytes.len, false);
     defer index.deinit();
 
     try testing.expect(device.used > scratch.len);
@@ -183,7 +183,7 @@ test "reopen append and read through the index" {
     try testing.expectEqual(@as(u64, 1), writer.last_batch_id);
     _ = try writer.append(.{ .entries = &.{item(2)} }, &scratch, .sync);
 
-    var index = try db.index.rebuildFiles(testing.allocator, metadata, &[_]db.storage.File{file}, 1, &scratch, 4096);
+    var index = try db.index.rebuildFiles(testing.allocator, metadata, &[_]db.storage.File{file}, 1, &scratch, 4096, false);
     defer index.deinit();
     try testing.expectEqual(@as(u64, 2), index.last_batch_id);
     try testing.expectEqualStrings("saved", (try index.read(item(1).key, file, &scratch)).?);

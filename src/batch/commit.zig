@@ -76,11 +76,27 @@ pub fn verify(records: []const u8, commit: []const u8) Error!void {
     if (byte_len != records.len) return error.BatchMismatch;
 
     const summary = try summarize(records);
+    try check(commit, summary.batch_id, summary.count, records.len, summary.digest);
+}
+
+/// For batches the caller already decoded and hashed.
+pub fn check(commit: []const u8, batch_id: u64, count: u32, byte_len: usize, digest: [32]u8) Error!void {
+    if (commit.len < commit_len) return error.IncompleteCommit;
+    if (commit.len != commit_len) return error.InvalidCommit;
+
+    const header = try record.Header.decode(commit);
+    if (header.kind != .commit) return error.InvalidCommit;
+    if (std.mem.readInt(u32, commit[76..80], .little) != Crc32c.hash(commit[0..76])) return error.ChecksumMismatch;
+
+    const stored_count = std.mem.readInt(u32, commit[32..36], .little);
+    const stored_len = std.mem.readInt(u64, commit[36..44], .little);
+    if (stored_count == 0 or stored_count > max_records or stored_len == 0 or stored_len > max_bytes) return error.InvalidCommit;
 
     const batch_mismatch =
-        header.batch_id != summary.batch_id or
-        count != summary.count or
-        !std.mem.eql(u8, commit[44..76], &summary.digest);
+        stored_len != byte_len or
+        header.batch_id != batch_id or
+        stored_count != count or
+        !std.mem.eql(u8, commit[44..76], &digest);
 
     if (batch_mismatch) return error.BatchMismatch;
 }
