@@ -33,7 +33,7 @@ test "concurrent sync writers share fsyncs and every acknowledged write survives
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var stats: db.Stats = .{};
-    const options: db.shard.Options = .{ .stats = &stats };
+    const options: db.shard.Options = .{ .durability = .sync, .stats = &stats };
     var writers: [threads]Writer = undefined;
 
     {

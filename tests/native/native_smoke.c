@@ -140,6 +140,18 @@ int main(int argc, char **argv) {
     assert(stats.get_calls == 0 && stats.writes == 0 && stats.compactions == 0);
     assert(zg_close(handle) == ZG_OK);
     assert(zg_close(NULL) == ZG_INVALID_ARGUMENT);
+    options.batch_buffer_size = 1024 * 1024;
+    options.max_segment_size = 16 * 1024 * 1024;
+    assert(zg_open((uint8_t *)argv[1], strlen(argv[1]), &options, &handle) == ZG_OK);
+    zg_operation large[65];
+    for (int i = 0; i < 65; ++i)
+        large[i] = (zg_operation){{0, i % 32, i / 32, 0, ZG_METADATA}, ZG_PUT, value, sizeof(value)};
+    assert(zg_write(handle, 6, large, 65) == ZG_OK);
+    zg_batch large_group[2] = {{7, large, 33}, {8, large + 33, 32}};
+    assert(zg_write_group(handle, large_group, 2) == ZG_OK);
+    assert(zg_get(handle, &large[64].key, output, sizeof(output), &required) == ZG_OK);
+    assert(required == sizeof(value) && memcmp(output, value, required) == 0);
+    assert(zg_close(handle) == ZG_OK);
     puts("C API smoke test passed");
     return 0;
 }

@@ -99,7 +99,7 @@ int main(int argc, char **argv) {
     int grouped = strcmp(argv[3], "group") == 0;
     int buffered = strcmp(argv[3], "buffered") == 0;
     if (!grouped && !buffered && strcmp(argv[3], "sync")) return 1;
-    double *samples = malloc(count * sizeof(*samples));
+    double *samples = malloc((count < 256 ? 256 : count) * sizeof(*samples));
     if (!samples) return 1;
     zg_options options;
     check(zg_options_init(&options));
