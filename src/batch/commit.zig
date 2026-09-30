@@ -28,17 +28,21 @@ const Summary = struct {
 
 pub fn seal(records: []const u8) Error![commit_len]u8 {
     const summary = try summarize(records);
+    return marker(summary.batch_id, summary.count, records.len, summary.digest);
+}
+
+pub fn marker(batch_id: u64, count: u32, byte_len: usize, digest: [32]u8) Error![commit_len]u8 {
     const header = try (record.Header{
         .kind = .commit,
-        .batch_id = summary.batch_id,
+        .batch_id = batch_id,
     }).encode();
 
     var bytes: [commit_len]u8 = undefined;
 
     @memcpy(bytes[0..32], &header);
-    std.mem.writeInt(u32, bytes[32..36], summary.count, .little);
-    std.mem.writeInt(u64, bytes[36..44], @intCast(records.len), .little);
-    @memcpy(bytes[44..76], &summary.digest);
+    std.mem.writeInt(u32, bytes[32..36], count, .little);
+    std.mem.writeInt(u64, bytes[36..44], @intCast(byte_len), .little);
+    @memcpy(bytes[44..76], &digest);
 
     const checksum = Crc32c.hash(bytes[0..76]);
     std.mem.writeInt(u32, bytes[76..80], checksum, .little);

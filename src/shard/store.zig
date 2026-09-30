@@ -218,15 +218,29 @@ pub const Store = struct {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
             if (self.closed) return error.Closed;
+            if (self.shard.writer.failed) return error.WriterFailed;
             for (batches) |batch| {
-                const size = try batch.size();
+                const size = try batch.validate();
                 if (size > self.shard.options.batch_buffer_size) return error.BufferTooSmall;
                 if (size > self.shard.options.max_segment_size - segment.encoded_len) return error.BatchTooLarge;
             }
             const durability = self.shard.options.durability;
             self.shard.options.durability = .buffered;
             defer self.shard.options.durability = durability;
-            for (batches) |batch| _ = try self.writeLocked(batch);
+            if (self.shard.options.skip_unchanged) {
+                for (batches) |batch| _ = try self.writeLocked(batch);
+            } else {
+                var rest = batches;
+                while (rest.len != 0) {
+                    const written = self.shard.writeBatches(rest, true) catch |err| retry: {
+                        if (err != error.SegmentFull) return err;
+                        try self.rotate();
+                        break :retry try self.shard.writeBatches(rest, true);
+                    };
+                    for (rest[0..written.count]) |batch| self.recordWrite(batch);
+                    rest = rest[written.count..];
+                }
+            }
             break :blk self.nextTicket();
         };
         try self.waitDurable(ticket);
@@ -315,20 +329,22 @@ pub const Store = struct {
             break :blk try self.shard.write(batch_to_write);
         };
 
-        if (self.shard.options.stats) |s| {
-            _ = s.writes.fetchAdd(1, .monotonic);
-            _ = s.records_written.fetchAdd(@intCast(batch_to_write.entries.len), .monotonic);
-            var raw_bytes: u64 = 0;
-            var compressed_bytes: u64 = 0;
-            for (batch_to_write.entries) |item| {
-                raw_bytes += item.header.raw_len;
-                compressed_bytes += item.header.stored_len;
-            }
-            _ = s.raw_bytes_written.fetchAdd(raw_bytes, .monotonic);
-            _ = s.compressed_bytes_written.fetchAdd(compressed_bytes, .monotonic);
-        }
-
+        self.recordWrite(batch_to_write);
         return result;
+    }
+
+    fn recordWrite(self: *Store, batch: WriteBatch) void {
+        const s = self.shard.options.stats orelse return;
+        _ = s.writes.fetchAdd(1, .monotonic);
+        _ = s.records_written.fetchAdd(@intCast(batch.entries.len), .monotonic);
+        var raw_bytes: u64 = 0;
+        var compressed_bytes: u64 = 0;
+        for (batch.entries) |item| {
+            raw_bytes += item.header.raw_len;
+            compressed_bytes += item.header.stored_len;
+        }
+        _ = s.raw_bytes_written.fetchAdd(raw_bytes, .monotonic);
+        _ = s.compressed_bytes_written.fetchAdd(compressed_bytes, .monotonic);
     }
 
     fn repeated(entries: []const Entry, index: usize) bool {

@@ -12,6 +12,7 @@ const segment = @import("../format/segment.zig");
 const file_scan = @import("../recovery/file_scan.zig");
 const recovery = @import("../recovery/scan.zig");
 const Stats = @import("../stats.zig").Stats;
+const WriteBatch = @import("../batch/write.zig").WriteBatch;
 
 const PackedKey = packed struct(u64) {
     local_x: u5,
@@ -80,6 +81,8 @@ pub const Index = struct {
     stats: ?*Stats = null,
     segment_ids: []const u64 = &.{},
     changes: std.ArrayListUnmanaged(Change) = .empty,
+    // Only skip_unchanged needs these.
+    fingerprints: bool = true,
 
     pub fn deinit(self: *Index) void {
         self.entries.deinit(self.allocator);
@@ -229,19 +232,55 @@ pub const Index = struct {
 
             record_count += 1;
             const key = try packKey(item.key);
-            const location: ?Location = if (item.header.kind == .delete) null else .{
-                .segment = @intCast(position),
-                .offset = try std.math.add(u64, start, offset),
-                .batch_id = batch.id,
-                .stored_len = item.header.stored_len,
-                .raw_len = item.header.raw_len,
-                .fingerprint = fingerprint(item.header.compression, item.value),
-            };
-
-            try self.changes.append(self.allocator, .{ .key = key, .location = location });
+            try self.changes.append(self.allocator, .{
+                .key = key,
+                .location = self.locate(item, position, try std.math.add(u64, start, offset), batch.id),
+            });
             offset += decoded.consumed;
         }
 
+        return self.finish(batch.id);
+    }
+
+    /// Batches must be encoded back to back from `start`.
+    pub fn prepareBatches(self: *Index, batches: []const WriteBatch, start: u64, position: usize) !Prepared {
+        if (position >= self.segment_ids.len) return error.InvalidSegmentId;
+
+        self.changes.clearRetainingCapacity();
+        var previous = self.last_batch_id;
+        var offset = start;
+        for (batches) |batch| {
+            const id = batch.id();
+            if (id <= previous) return error.BatchOrder;
+            if (!std.meta.eql(batch.entries[0].key.region(), self.region)) return error.RegionMismatch;
+            previous = id;
+
+            for (batch.entries) |item| {
+                try self.changes.append(self.allocator, .{
+                    .key = try packKey(item.key),
+                    .location = self.locate(item, position, offset, id),
+                });
+                offset += entry.overhead + item.header.stored_len;
+            }
+            offset += commit.commit_len;
+        }
+
+        return self.finish(previous);
+    }
+
+    fn locate(self: *const Index, item: entry.Entry, position: usize, offset: u64, batch_id: u64) ?Location {
+        if (item.header.kind == .delete) return null;
+        return .{
+            .segment = @intCast(position),
+            .offset = offset,
+            .batch_id = batch_id,
+            .stored_len = item.header.stored_len,
+            .raw_len = item.header.raw_len,
+            .fingerprint = if (self.fingerprints) fingerprint(item.header.compression, item.value) else 0,
+        };
+    }
+
+    fn finish(self: *Index, batch_id: u64) !Prepared {
         const changes = latestPerKey(self.changes.items);
         var additions: u32 = 0;
         var removals: u32 = 0;
@@ -256,7 +295,7 @@ pub const Index = struct {
 
         try self.entries.ensureTotalCapacity(self.allocator, @intCast(new_count));
 
-        return .{ .changes = changes, .batch_id = batch.id };
+        return .{ .changes = changes, .batch_id = batch_id };
     }
 
     pub fn publish(self: *Index, prepared: Prepared) void {

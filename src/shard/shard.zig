@@ -116,6 +116,7 @@ pub fn Shard(comptime Device: type) type {
                     .max_keys = options.max_keys,
                     .stats = options.stats,
                     .segment_ids = ids,
+                    .fingerprints = options.skip_unchanged,
                 },
                 .devices = devices,
                 .segment_ids = ids,
@@ -177,6 +178,7 @@ pub fn Shard(comptime Device: type) type {
             errdefer index.deinit();
             index.stats = options.stats;
             index.segment_ids = ids;
+            index.fingerprints = options.skip_unchanged;
 
             if (index.has_tail) return error.NeedsRecovery;
 
@@ -260,26 +262,48 @@ pub fn Shard(comptime Device: type) type {
             self.writer = next;
             self.generation.index.active_offset = segment.encoded_len;
         }
+
         pub fn write(self: *Self, batch: WriteBatch) !writer_module.AppendResult {
+            return (try self.writeBatches(&.{batch}, false)).result;
+        }
+
+        pub const Written = struct {
+            result: writer_module.AppendResult,
+            count: usize,
+        };
+
+        /// Writes as many leading batches as fit in one append.
+        pub fn writeBatches(self: *Self, batches: []const WriteBatch, validated: bool) !Written {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
 
             if (self.closed) return error.Closed;
             if (self.writer.failed) return error.WriterFailed;
 
-            const bytes = try batch.encode(self.scratch[0..self.options.batch_buffer_size]);
-            const end = std.math.add(u64, self.writer.offset, bytes.len) catch return error.SegmentFull;
-            if (end > self.options.max_segment_size) return error.SegmentFull;
+            const buffer = self.scratch[0..self.options.batch_buffer_size];
+            const room = self.options.max_segment_size - self.writer.offset;
+            var used: usize = 0;
+            var count: usize = 0;
+            for (batches) |batch| {
+                const len = try if (validated) batch.size() else batch.validate();
+                if (len > buffer.len - used) {
+                    if (count == 0) return error.BufferTooSmall;
+                    break;
+                }
+                if (used + len > room) {
+                    if (count == 0) return error.SegmentFull;
+                    break;
+                }
+                _ = try batch.encodeChecked(buffer[used..]);
+                used += len;
+                count += 1;
+            }
 
-            const prepared = try self.generation.index.prepare(.{
-                .id = batch.entries[0].header.batch_id,
-                .records = bytes[0 .. bytes.len - commit.commit_len],
-                .end_offset = std.math.cast(usize, end) orelse return error.InvalidLength,
-            }, self.generation.segment_count - 1);
-            const result = try self.writer.appendEncoded(bytes, self.options.durability);
+            const prepared = try self.generation.index.prepareBatches(batches[0..count], self.writer.offset, self.generation.segment_count - 1);
+            const result = try self.writer.appendTrusted(buffer[0..used], batches[count - 1].id(), self.options.durability);
             self.generation.index.publish(prepared);
             self.generation.index.active_offset = @intCast(result.end);
-            return result;
+            return .{ .result = result, .count = count };
         }
 
         fn pin(self: *Self, key: Key) !?Pinned {

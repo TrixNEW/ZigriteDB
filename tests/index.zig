@@ -335,3 +335,29 @@ test "negative regions still pack local coordinates within 0..31" {
     try testing.expectEqualStrings("max", (try index.read(corner_max.key, device, &scratch)).?);
     try testing.expectEqual(@as(usize, 2), index.count());
 }
+
+test "prepared batches match rebuilding from their encoded bytes" {
+    var bytes: [2048]u8 = undefined;
+    try header(1, &bytes);
+    const first = [_]db.entry.Entry{ item(1, 0, "a"), item(1, 1, "bb"), item(1, 0, "ccc") };
+    const second = [_]db.entry.Entry{ item(2, 1, null), item(2, 2, "dddd") };
+    var end = try append(&first, &bytes, 48);
+    end = try append(&second, &bytes, end);
+
+    var rebuilt = try db.index.rebuild(testing.allocator, metadata, &.{bytes[0..end]}, 8);
+    defer rebuilt.deinit();
+    var index: db.index.Index = .{
+        .allocator = testing.allocator,
+        .region = metadata.region,
+        .generation = 1,
+        .max_keys = 8,
+        .segment_ids = metadata.segments,
+    };
+    defer index.deinit();
+    index.publish(try index.prepareBatches(&.{ .{ .entries = &first }, .{ .entries = &second } }, 48, 0));
+
+    try testing.expectEqual(rebuilt.count(), index.count());
+    try testing.expectEqual(@as(u64, 2), index.last_batch_id);
+    for (0..3) |x| try testing.expectEqualDeep(try rebuilt.get(item(1, @intCast(x), "").key), try index.get(item(1, @intCast(x), "").key));
+    try testing.expectError(error.BatchOrder, index.prepareBatches(&.{.{ .entries = &second }}, end, 0));
+}

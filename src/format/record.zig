@@ -84,7 +84,7 @@ pub const Header = struct {
         return header;
     }
 
-    fn validate(self: Header) Error!void {
+    pub fn validate(self: Header) Error!void {
         if (self.batch_id == 0) return error.InvalidBatchId;
 
         const value_too_large =

@@ -96,3 +96,18 @@ test "wrong commit details" {
         try testing.expectError(error.BatchMismatch, batch.verify(records, &commit));
     }
 }
+
+test "encoded batches carry the same commit as sealing their records" {
+    var entries: [3]db.entry.Entry = undefined;
+    const values = [_][]const u8{ "one", "", "three" };
+    for (&entries, values, 0..) |*entry, value, i| entry.* = .{
+        .header = .{ .kind = .put, .batch_id = 9, .stored_len = @intCast(value.len), .raw_len = @intCast(value.len) },
+        .key = .{ .dimension = 0, .chunk_x = @intCast(i), .chunk_z = 0, .component = .metadata },
+        .value = value,
+    };
+    var buffer: [512]u8 = undefined;
+    const bytes = try (db.WriteBatch{ .entries = &entries }).encode(&buffer);
+    const records = bytes[0 .. bytes.len - batch.commit_len];
+    try testing.expectEqualSlices(u8, &(try batch.seal(records)), bytes[records.len..]);
+    try batch.verify(records, bytes[records.len..]);
+}
