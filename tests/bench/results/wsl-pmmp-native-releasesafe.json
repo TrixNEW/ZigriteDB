@@ -1,0 +1,930 @@
+{
+  "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "native_only": true,
+  "php_included": false,
+  "leveldb_fork": "pmmp/leveldb",
+  "leveldb_ref": "1c7564468b41610da4f498430e795ca4de0931ff",
+  "extension_ref": "88071eb1b1eae96af043229104b9d813f7cbe40c",
+  "saves": 1024,
+  "repeats": 3,
+  "results": [
+    {
+      "engine": "zig",
+      "mode": "buffered",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 3239.87,
+      "write_calls": {
+        "calls": 1024,
+        "calls_per_second": 3239.87,
+        "p50_us": 152.3,
+        "p95_us": 481.95,
+        "p99_us": 559.99,
+        "p999_us": 20187.25
+      },
+      "final_barrier_ms": 54.118,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 11396.95,
+        "p50_us": 81.43,
+        "p95_us": 113.19,
+        "p99_us": 130.54,
+        "p999_us": 167.33
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 11406.76,
+        "p50_us": 81.52,
+        "p95_us": 113.54,
+        "p99_us": 132.45,
+        "p999_us": 153.79
+      },
+      "chunk_reads_many": {
+        "calls": 1024,
+        "calls_per_second": 12729.9,
+        "p50_us": 73.85,
+        "p95_us": 99.17,
+        "p99_us": 115.01,
+        "p999_us": 125.55
+      },
+      "stats": {
+        "get_calls": 21504,
+        "writes": 1024,
+        "records_written": 3568,
+        "raw_bytes_written": 33312768,
+        "compressed_bytes_written": 10919068,
+        "disk_reads": 36864,
+        "bytes_read": 67842048,
+        "fsync_count": 4,
+        "fsync_duration_ns": 54108280,
+        "segment_rotations": 0,
+        "compactions": 0,
+        "compaction_input_bytes": 0,
+        "compaction_output_bytes": 0,
+        "compaction_duration_ns": 0,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 0
+      },
+      "reopen_and_read_ms": 38.065,
+      "peak_rss_kib": 13824,
+      "cpu_seconds": 0.553,
+      "repeat": 0,
+      "database_bytes": 11190524
+    },
+    {
+      "engine": "leveldb",
+      "mode": "buffered",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 4213.9,
+      "write_calls": {
+        "calls": 1024,
+        "calls_per_second": 4213.9,
+        "p50_us": 26.31,
+        "p95_us": 168.18,
+        "p99_us": 288.89,
+        "p999_us": 29900.69
+      },
+      "final_barrier_ms": 9.216,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 8522.98,
+        "p50_us": 65.18,
+        "p95_us": 529.81,
+        "p99_us": 867.32,
+        "p999_us": 1839.54
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 30630.87,
+        "p50_us": 10.8,
+        "p95_us": 127.01,
+        "p99_us": 165.05,
+        "p999_us": 210.16
+      },
+      "reopen_and_read_ms": 41.699,
+      "peak_rss_kib": 26208,
+      "cpu_seconds": 0.512,
+      "repeat": 0,
+      "database_bytes": 1710448
+    },
+    {
+      "engine": "zig",
+      "mode": "sync",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 202.8,
+      "write_calls": {
+        "calls": 1024,
+        "calls_per_second": 202.8,
+        "p50_us": 4768.6,
+        "p95_us": 5422.83,
+        "p99_us": 6541.6,
+        "p999_us": 24082.14
+      },
+      "final_barrier_ms": 0.0,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 11630.16,
+        "p50_us": 83.81,
+        "p95_us": 100.16,
+        "p99_us": 115.03,
+        "p999_us": 127.12
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 11769.88,
+        "p50_us": 83.68,
+        "p95_us": 97.78,
+        "p99_us": 106.57,
+        "p999_us": 118.66
+      },
+      "chunk_reads_many": {
+        "calls": 1024,
+        "calls_per_second": 13013.29,
+        "p50_us": 75.45,
+        "p95_us": 88.69,
+        "p99_us": 99.86,
+        "p999_us": 125.82
+      },
+      "stats": {
+        "get_calls": 21504,
+        "writes": 1024,
+        "records_written": 3568,
+        "raw_bytes_written": 33312768,
+        "compressed_bytes_written": 10919068,
+        "disk_reads": 36864,
+        "bytes_read": 67842048,
+        "fsync_count": 1024,
+        "fsync_duration_ns": 4664359425,
+        "segment_rotations": 0,
+        "compactions": 0,
+        "compaction_input_bytes": 0,
+        "compaction_output_bytes": 0,
+        "compaction_duration_ns": 0,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 0
+      },
+      "reopen_and_read_ms": 40.342,
+      "peak_rss_kib": 13824,
+      "cpu_seconds": 0.738,
+      "repeat": 0,
+      "database_bytes": 11190524
+    },
+    {
+      "engine": "leveldb",
+      "mode": "sync",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 207.43,
+      "write_calls": {
+        "calls": 1024,
+        "calls_per_second": 207.43,
+        "p50_us": 4668.46,
+        "p95_us": 5299.72,
+        "p99_us": 8764.53,
+        "p999_us": 10415.99
+      },
+      "final_barrier_ms": 0.0,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 15340.26,
+        "p50_us": 13.69,
+        "p95_us": 182.81,
+        "p99_us": 599.25,
+        "p999_us": 1098.81
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 37245.82,
+        "p50_us": 9.0,
+        "p95_us": 124.66,
+        "p99_us": 162.65,
+        "p999_us": 222.34
+      },
+      "reopen_and_read_ms": 40.85,
+      "peak_rss_kib": 20440,
+      "cpu_seconds": 0.642,
+      "repeat": 0,
+      "database_bytes": 1709957
+    },
+    {
+      "engine": "zig",
+      "mode": "group",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 1616.83,
+      "write_calls": {
+        "calls": 64,
+        "calls_per_second": 101.05,
+        "p50_us": 8440.22,
+        "p95_us": 9028.54,
+        "p99_us": 31354.68,
+        "p999_us": 31354.68
+      },
+      "final_barrier_ms": 0.0,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 12027.38,
+        "p50_us": 81.1,
+        "p95_us": 96.03,
+        "p99_us": 115.86,
+        "p999_us": 151.95
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 12187.69,
+        "p50_us": 80.74,
+        "p95_us": 93.17,
+        "p99_us": 101.2,
+        "p999_us": 116.82
+      },
+      "chunk_reads_many": {
+        "calls": 1024,
+        "calls_per_second": 13698.67,
+        "p50_us": 71.26,
+        "p95_us": 84.68,
+        "p99_us": 99.66,
+        "p999_us": 115.73
+      },
+      "stats": {
+        "get_calls": 21504,
+        "writes": 1024,
+        "records_written": 3568,
+        "raw_bytes_written": 33312768,
+        "compressed_bytes_written": 10919068,
+        "disk_reads": 36864,
+        "bytes_read": 67842048,
+        "fsync_count": 64,
+        "fsync_duration_ns": 312968498,
+        "segment_rotations": 0,
+        "compactions": 0,
+        "compaction_input_bytes": 0,
+        "compaction_output_bytes": 0,
+        "compaction_duration_ns": 0,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 0
+      },
+      "reopen_and_read_ms": 38.98,
+      "peak_rss_kib": 13824,
+      "cpu_seconds": 0.556,
+      "repeat": 0,
+      "database_bytes": 11190524
+    },
+    {
+      "engine": "leveldb",
+      "mode": "group",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 2320.05,
+      "write_calls": {
+        "calls": 64,
+        "calls_per_second": 145.0,
+        "p50_us": 5894.74,
+        "p95_us": 10081.37,
+        "p99_us": 10419.21,
+        "p999_us": 10419.21
+      },
+      "final_barrier_ms": 0.0,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 14332.02,
+        "p50_us": 11.9,
+        "p95_us": 228.23,
+        "p99_us": 708.94,
+        "p999_us": 914.76
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 34166.21,
+        "p50_us": 10.6,
+        "p95_us": 126.23,
+        "p99_us": 144.53,
+        "p999_us": 170.78
+      },
+      "reopen_and_read_ms": 37.687,
+      "peak_rss_kib": 23112,
+      "cpu_seconds": 0.457,
+      "repeat": 0,
+      "database_bytes": 1659984
+    },
+    {
+      "engine": "leveldb",
+      "mode": "buffered",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 4265.27,
+      "write_calls": {
+        "calls": 1024,
+        "calls_per_second": 4265.27,
+        "p50_us": 26.12,
+        "p95_us": 163.22,
+        "p99_us": 229.67,
+        "p999_us": 29758.2
+      },
+      "final_barrier_ms": 8.228,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 8528.96,
+        "p50_us": 66.06,
+        "p95_us": 534.4,
+        "p99_us": 898.41,
+        "p999_us": 1961.56
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 34464.98,
+        "p50_us": 9.66,
+        "p95_us": 127.38,
+        "p99_us": 147.93,
+        "p999_us": 214.42
+      },
+      "reopen_and_read_ms": 41.996,
+      "peak_rss_kib": 26332,
+      "cpu_seconds": 0.495,
+      "repeat": 1,
+      "database_bytes": 1710448
+    },
+    {
+      "engine": "zig",
+      "mode": "buffered",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 3426.58,
+      "write_calls": {
+        "calls": 1024,
+        "calls_per_second": 3426.58,
+        "p50_us": 128.86,
+        "p95_us": 424.57,
+        "p99_us": 510.74,
+        "p999_us": 20328.5
+      },
+      "final_barrier_ms": 26.252,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 11199.6,
+        "p50_us": 83.72,
+        "p95_us": 113.39,
+        "p99_us": 131.26,
+        "p999_us": 143.91
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 11111.59,
+        "p50_us": 83.82,
+        "p95_us": 114.3,
+        "p99_us": 130.96,
+        "p999_us": 144.55
+      },
+      "chunk_reads_many": {
+        "calls": 1024,
+        "calls_per_second": 12783.6,
+        "p50_us": 72.72,
+        "p95_us": 100.06,
+        "p99_us": 116.98,
+        "p999_us": 126.18
+      },
+      "stats": {
+        "get_calls": 21504,
+        "writes": 1024,
+        "records_written": 3568,
+        "raw_bytes_written": 33312768,
+        "compressed_bytes_written": 10919068,
+        "disk_reads": 36864,
+        "bytes_read": 67842048,
+        "fsync_count": 4,
+        "fsync_duration_ns": 26240771,
+        "segment_rotations": 0,
+        "compactions": 0,
+        "compaction_input_bytes": 0,
+        "compaction_output_bytes": 0,
+        "compaction_duration_ns": 0,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 0
+      },
+      "reopen_and_read_ms": 39.015,
+      "peak_rss_kib": 13824,
+      "cpu_seconds": 0.529,
+      "repeat": 1,
+      "database_bytes": 11190524
+    },
+    {
+      "engine": "leveldb",
+      "mode": "sync",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 208.35,
+      "write_calls": {
+        "calls": 1024,
+        "calls_per_second": 208.35,
+        "p50_us": 4674.5,
+        "p95_us": 5238.52,
+        "p99_us": 8653.39,
+        "p999_us": 9937.98
+      },
+      "final_barrier_ms": 0.0,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 15562.7,
+        "p50_us": 21.93,
+        "p95_us": 188.42,
+        "p99_us": 549.87,
+        "p999_us": 837.72
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 39736.64,
+        "p50_us": 8.93,
+        "p95_us": 120.84,
+        "p99_us": 138.0,
+        "p999_us": 201.23
+      },
+      "reopen_and_read_ms": 41.079,
+      "peak_rss_kib": 20400,
+      "cpu_seconds": 0.63,
+      "repeat": 1,
+      "database_bytes": 1709957
+    },
+    {
+      "engine": "zig",
+      "mode": "sync",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 201.13,
+      "write_calls": {
+        "calls": 1024,
+        "calls_per_second": 201.13,
+        "p50_us": 4824.11,
+        "p95_us": 5421.83,
+        "p99_us": 6148.2,
+        "p999_us": 24396.23
+      },
+      "final_barrier_ms": 0.0,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 11993.14,
+        "p50_us": 81.3,
+        "p95_us": 95.23,
+        "p99_us": 121.0,
+        "p999_us": 142.58
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 12151.1,
+        "p50_us": 81.19,
+        "p95_us": 93.54,
+        "p99_us": 106.44,
+        "p999_us": 122.17
+      },
+      "chunk_reads_many": {
+        "calls": 1024,
+        "calls_per_second": 13823.87,
+        "p50_us": 70.96,
+        "p95_us": 83.6,
+        "p99_us": 89.16,
+        "p999_us": 108.23
+      },
+      "stats": {
+        "get_calls": 21504,
+        "writes": 1024,
+        "records_written": 3568,
+        "raw_bytes_written": 33312768,
+        "compressed_bytes_written": 10919068,
+        "disk_reads": 36864,
+        "bytes_read": 67842048,
+        "fsync_count": 1024,
+        "fsync_duration_ns": 4710453140,
+        "segment_rotations": 0,
+        "compactions": 0,
+        "compaction_input_bytes": 0,
+        "compaction_output_bytes": 0,
+        "compaction_duration_ns": 0,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 0
+      },
+      "reopen_and_read_ms": 51.725,
+      "peak_rss_kib": 13824,
+      "cpu_seconds": 0.74,
+      "repeat": 1,
+      "database_bytes": 11190524
+    },
+    {
+      "engine": "leveldb",
+      "mode": "group",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 2382.58,
+      "write_calls": {
+        "calls": 64,
+        "calls_per_second": 148.91,
+        "p50_us": 5885.81,
+        "p95_us": 9779.5,
+        "p99_us": 9968.2,
+        "p999_us": 9968.2
+      },
+      "final_barrier_ms": 0.0,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 13838.1,
+        "p50_us": 14.99,
+        "p95_us": 238.75,
+        "p99_us": 760.34,
+        "p999_us": 961.42
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 39482.7,
+        "p50_us": 9.78,
+        "p95_us": 118.15,
+        "p99_us": 169.11,
+        "p999_us": 204.06
+      },
+      "reopen_and_read_ms": 38.846,
+      "peak_rss_kib": 23304,
+      "cpu_seconds": 0.458,
+      "repeat": 1,
+      "database_bytes": 1659984
+    },
+    {
+      "engine": "zig",
+      "mode": "group",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 1629.44,
+      "write_calls": {
+        "calls": 64,
+        "calls_per_second": 101.84,
+        "p50_us": 8354.46,
+        "p95_us": 11852.5,
+        "p99_us": 31193.49,
+        "p999_us": 31193.49
+      },
+      "final_barrier_ms": 0.0,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 12372.94,
+        "p50_us": 78.89,
+        "p95_us": 92.41,
+        "p99_us": 106.22,
+        "p999_us": 120.74
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 12438.36,
+        "p50_us": 78.72,
+        "p95_us": 92.42,
+        "p99_us": 105.4,
+        "p999_us": 123.02
+      },
+      "chunk_reads_many": {
+        "calls": 1024,
+        "calls_per_second": 13347.73,
+        "p50_us": 73.5,
+        "p95_us": 86.45,
+        "p99_us": 95.0,
+        "p999_us": 114.62
+      },
+      "stats": {
+        "get_calls": 21504,
+        "writes": 1024,
+        "records_written": 3568,
+        "raw_bytes_written": 33312768,
+        "compressed_bytes_written": 10919068,
+        "disk_reads": 36864,
+        "bytes_read": 67842048,
+        "fsync_count": 64,
+        "fsync_duration_ns": 314022820,
+        "segment_rotations": 0,
+        "compactions": 0,
+        "compaction_input_bytes": 0,
+        "compaction_output_bytes": 0,
+        "compaction_duration_ns": 0,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 0
+      },
+      "reopen_and_read_ms": 37.227,
+      "peak_rss_kib": 13824,
+      "cpu_seconds": 0.552,
+      "repeat": 1,
+      "database_bytes": 11190524
+    },
+    {
+      "engine": "zig",
+      "mode": "buffered",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 3458.26,
+      "write_calls": {
+        "calls": 1024,
+        "calls_per_second": 3458.26,
+        "p50_us": 127.88,
+        "p95_us": 421.19,
+        "p99_us": 497.28,
+        "p999_us": 19599.54
+      },
+      "final_barrier_ms": 26.302,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 11427.32,
+        "p50_us": 81.67,
+        "p95_us": 111.79,
+        "p99_us": 130.96,
+        "p999_us": 159.7
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 11500.65,
+        "p50_us": 81.21,
+        "p95_us": 111.89,
+        "p99_us": 127.67,
+        "p999_us": 153.33
+      },
+      "chunk_reads_many": {
+        "calls": 1024,
+        "calls_per_second": 12666.86,
+        "p50_us": 74.51,
+        "p95_us": 100.07,
+        "p99_us": 116.7,
+        "p999_us": 138.25
+      },
+      "stats": {
+        "get_calls": 21504,
+        "writes": 1024,
+        "records_written": 3568,
+        "raw_bytes_written": 33312768,
+        "compressed_bytes_written": 10919068,
+        "disk_reads": 36864,
+        "bytes_read": 67842048,
+        "fsync_count": 4,
+        "fsync_duration_ns": 26292630,
+        "segment_rotations": 0,
+        "compactions": 0,
+        "compaction_input_bytes": 0,
+        "compaction_output_bytes": 0,
+        "compaction_duration_ns": 0,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 0
+      },
+      "reopen_and_read_ms": 38.621,
+      "peak_rss_kib": 13824,
+      "cpu_seconds": 0.531,
+      "repeat": 2,
+      "database_bytes": 11190524
+    },
+    {
+      "engine": "leveldb",
+      "mode": "buffered",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 4363.77,
+      "write_calls": {
+        "calls": 1024,
+        "calls_per_second": 4363.77,
+        "p50_us": 26.4,
+        "p95_us": 158.05,
+        "p99_us": 196.05,
+        "p999_us": 28996.19
+      },
+      "final_barrier_ms": 13.529,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 9248.61,
+        "p50_us": 62.75,
+        "p95_us": 511.15,
+        "p99_us": 803.92,
+        "p999_us": 1798.4
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 34316.1,
+        "p50_us": 9.94,
+        "p95_us": 124.19,
+        "p99_us": 139.52,
+        "p999_us": 161.43
+      },
+      "reopen_and_read_ms": 40.82,
+      "peak_rss_kib": 25312,
+      "cpu_seconds": 0.484,
+      "repeat": 2,
+      "database_bytes": 1710448
+    },
+    {
+      "engine": "zig",
+      "mode": "sync",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 203.52,
+      "write_calls": {
+        "calls": 1024,
+        "calls_per_second": 203.52,
+        "p50_us": 4737.01,
+        "p95_us": 5374.13,
+        "p99_us": 6205.23,
+        "p999_us": 24159.09
+      },
+      "final_barrier_ms": 0.0,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 11840.72,
+        "p50_us": 82.36,
+        "p95_us": 96.48,
+        "p99_us": 114.98,
+        "p999_us": 136.17
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 11930.7,
+        "p50_us": 82.49,
+        "p95_us": 95.72,
+        "p99_us": 106.43,
+        "p999_us": 119.27
+      },
+      "chunk_reads_many": {
+        "calls": 1024,
+        "calls_per_second": 13635.66,
+        "p50_us": 72.03,
+        "p95_us": 84.86,
+        "p99_us": 90.98,
+        "p999_us": 100.57
+      },
+      "stats": {
+        "get_calls": 21504,
+        "writes": 1024,
+        "records_written": 3568,
+        "raw_bytes_written": 33312768,
+        "compressed_bytes_written": 10919068,
+        "disk_reads": 36864,
+        "bytes_read": 67842048,
+        "fsync_count": 1024,
+        "fsync_duration_ns": 4654453559,
+        "segment_rotations": 0,
+        "compactions": 0,
+        "compaction_input_bytes": 0,
+        "compaction_output_bytes": 0,
+        "compaction_duration_ns": 0,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 0
+      },
+      "reopen_and_read_ms": 40.118,
+      "peak_rss_kib": 13824,
+      "cpu_seconds": 0.727,
+      "repeat": 2,
+      "database_bytes": 11190524
+    },
+    {
+      "engine": "leveldb",
+      "mode": "sync",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 209.47,
+      "write_calls": {
+        "calls": 1024,
+        "calls_per_second": 209.47,
+        "p50_us": 4628.9,
+        "p95_us": 5206.44,
+        "p99_us": 8664.36,
+        "p999_us": 9170.61
+      },
+      "final_barrier_ms": 0.0,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 15082.99,
+        "p50_us": 16.2,
+        "p95_us": 186.87,
+        "p99_us": 593.46,
+        "p999_us": 1019.73
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 34314.84,
+        "p50_us": 10.47,
+        "p95_us": 125.86,
+        "p99_us": 172.92,
+        "p999_us": 235.76
+      },
+      "reopen_and_read_ms": 42.414,
+      "peak_rss_kib": 20500,
+      "cpu_seconds": 0.646,
+      "repeat": 2,
+      "database_bytes": 1709957
+    },
+    {
+      "engine": "zig",
+      "mode": "group",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 1608.37,
+      "write_calls": {
+        "calls": 64,
+        "calls_per_second": 100.52,
+        "p50_us": 8489.04,
+        "p95_us": 9064.11,
+        "p99_us": 31616.81,
+        "p999_us": 31616.81
+      },
+      "final_barrier_ms": 0.0,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 11530.91,
+        "p50_us": 82.98,
+        "p95_us": 108.86,
+        "p99_us": 133.74,
+        "p999_us": 153.68
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 11819.12,
+        "p50_us": 82.68,
+        "p95_us": 97.04,
+        "p99_us": 111.76,
+        "p999_us": 129.84
+      },
+      "chunk_reads_many": {
+        "calls": 1024,
+        "calls_per_second": 12858.95,
+        "p50_us": 74.48,
+        "p95_us": 98.34,
+        "p99_us": 115.81,
+        "p999_us": 129.51
+      },
+      "stats": {
+        "get_calls": 21504,
+        "writes": 1024,
+        "records_written": 3568,
+        "raw_bytes_written": 33312768,
+        "compressed_bytes_written": 10919068,
+        "disk_reads": 36864,
+        "bytes_read": 67842048,
+        "fsync_count": 64,
+        "fsync_duration_ns": 312511236,
+        "segment_rotations": 0,
+        "compactions": 0,
+        "compaction_input_bytes": 0,
+        "compaction_output_bytes": 0,
+        "compaction_duration_ns": 0,
+        "recovery_attempts": 0,
+        "recovery_errors": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_evictions": 0,
+        "unchanged_write_skips": 0
+      },
+      "reopen_and_read_ms": 41.739,
+      "peak_rss_kib": 13824,
+      "cpu_seconds": 0.564,
+      "repeat": 2,
+      "database_bytes": 11190524
+    },
+    {
+      "engine": "leveldb",
+      "mode": "group",
+      "logical_saves": 1024,
+      "logical_saves_per_second": 2302.58,
+      "write_calls": {
+        "calls": 64,
+        "calls_per_second": 143.91,
+        "p50_us": 6117.51,
+        "p95_us": 10390.49,
+        "p99_us": 10526.49,
+        "p999_us": 10526.49
+      },
+      "final_barrier_ms": 0.0,
+      "chunk_reads_first_pass": {
+        "calls": 1024,
+        "calls_per_second": 14060.48,
+        "p50_us": 12.25,
+        "p95_us": 231.65,
+        "p99_us": 718.28,
+        "p999_us": 1028.21
+      },
+      "chunk_reads_repeat": {
+        "calls": 1024,
+        "calls_per_second": 35953.68,
+        "p50_us": 9.93,
+        "p95_us": 125.42,
+        "p99_us": 140.53,
+        "p999_us": 167.88
+      },
+      "reopen_and_read_ms": 38.306,
+      "peak_rss_kib": 23040,
+      "cpu_seconds": 0.464,
+      "repeat": 2,
+      "database_bytes": 1659984
+    }
+  ]
+}

@@ -6,13 +6,12 @@
   Embedded world storage built for fast chunk saves and reads.
 </p>
 
-ZigriteDB is an embedded storage engine for Minecraft Bedrock worlds, written
-in Zig and built for [Quark](https://github.com/Bedrock-Phanatics/Quark).
-Append-only writes, batched saves, indexed reads, and LZ4 compression keep
-storage focused on individual chunk components.
+ZigriteDB is an embedded Minecraft Bedrock world storage engine written in Zig
+for [Quark](https://github.com/Bedrock-Phanatics/Quark). It uses append-only
+writes, batched saves, indexed reads, and LZ4 compression for chunk components.
 
-**In development.** The API and file format may change. Not yet recommended
-for production worlds.
+> **In development:** The API and file format may change. Do not use it for
+> production worlds yet.
 
 ## Build
 
@@ -79,50 +78,49 @@ pub fn main() !void {
 ```
 
 Batches are atomic within one 32×32 chunk region and use increasing IDs.
-Writes are buffered by default. Call `flush` at each save barrier or `close`
-at shutdown to make prior writes durable. Set `.shard.durability = .sync` for
-synchronous writes; `deinit` only releases resources.
-See [World](src/world/world.zig) for the full Zig API.
+Writes are buffered by default; call `flush` at save barriers or `close` at
+shutdown for durability. For synchronous writes, set
+`.shard.durability = .sync`. `deinit` only releases resources. See
+[World](src/world/world.zig) for the full Zig API.
 
-For other languages, link against `libzigritedb_native` and use
-[zigritedb.h](include/zigritedb.h). Libraries and headers are installed under
-`zig-out/lib` and `zig-out/include`.
+## C API
 
-The C ABI is versioned by `ZG_ABI_VERSION`, which must equal `zg_abi_version()`.
-Since v0.3.0, the C ABI is 2: `zg_options` grew, so programs built against an ABI 1
-header must be rebuilt. On Linux the soname is `libzigritedb_native.so.2`, so
-ABI 1 binaries will not load it. `zg_open` rejects a mismatched
-`version`/`struct_size` before reading the rest.
+For other languages, link `libzigritedb_native` and include
+[zigritedb.h](include/zigritedb.h). The library and header install to
+`zig-out/lib` and `zig-out/include`. The current C ABI is version 2; clients
+built against version 1 must be rebuilt.
 
 ## Benchmarks
 
-Three-run medians for a synthetic Bedrock-style workload: 64 chunks across four
-regions, four 16 KiB subchunks plus biomes, entities, block entities, heightmap,
-and metadata. Later saves mix full and two-component dirty updates.
+Three-run medians for 1,024 saves across 64 chunks, using identical payloads
+and save order. Full saves contain four 16 KiB subchunks, biomes, block
+entities, and entities; the workload also includes two-component updates.
 
-| Workload | Throughput | p50 | p95 |
-| --- | ---: | ---: | ---: |
-| Buffered chunk saves | 2,457 saves/s | 148 µs | 487 µs |
-| Synchronous chunk saves | 169 saves/s | 5.63 ms | 6.83 ms |
-| Nine-component random reads, no cache | 12,132 reads/s | 77 µs | 106 µs |
-| Nine-component random reads, 16 MiB cache | 26,858 reads/s | 10 µs | 221 µs |
+| Workload | ZigriteDB | PMMP LevelDB fork |
+| --- | ---: | ---: |
+| Buffered chunk saves | 3,427 saves/s | 4,265 saves/s |
+| Synchronous chunk saves | 203 saves/s | 208 saves/s |
+| Durable groups of 16 saves | 1,617 saves/s | 2,320 saves/s |
+| Seven-component reads, first pass | 11,397 reads/s | 8,529 reads/s |
+| Seven-component reads, repeated | 11,407 reads/s | 34,316 reads/s |
 
-AMD Ryzen 5 5500; WSL2 Linux 6.6, `/tmp` on ext4; Zig 0.16.0 ReleaseSafe,
-library source at `06ab3d1` plus this benchmark change. Cache read rows use
-the same synchronous write setup. The cache improves the median but has a
-higher p95 on this workload. No PMMP result is included because PHP and its
-LevelDB extension were unavailable. These are synthetic measurements, not a
-server trace or a comparison with another database.
+**Native code only.** This compares ZigriteDB's C API with the
+[C++ LevelDB fork](https://github.com/pmmp/leveldb) used by
+[PMMP's PHP extension](https://github.com/pmmp/php-leveldb). PHP calls, NBT
+serialization, and the full world provider are excluded. PHP adds overhead,
+so these figures are not PMMP server throughput and performance through PHP
+will be slower.
 
-```sh
-zig build bench -Doptimize=ReleaseSafe
-python3 tests/bench/run.py --directory /path/to/benchmark/filesystem
-```
+Both engines use matching durability modes. PMMP uses its
+[raw zlib and 64 KiB block settings](https://github.com/pmmp/PocketMine-MP/blob/stable/src/world/format/io/leveldb/LevelDB.php)
+and default 8 MiB block cache; ZigriteDB uses its default 0 MiB value cache.
+Buffered saves/s excludes the final durability barrier; grouped saves/s
+includes one after every 16 saves. Compression and compaction differ.
 
-The runner emits latency through p99.9, throughput, memory, bytes, fsync,
-cache, compaction, and reopen measurements as JSON. Raw results are in
-[tests/bench/results](tests/bench/results). Use `--skip-unchanged` to compare
-that option with the default on the same workload.
+Measured on a Ryzen 5 5500 under WSL2 (Linux 6.6, ext4), with Zig 0.16.0
+ReleaseSafe. Detailed latencies and memory use are in the
+[raw results](tests/bench/results); see the [build script](tests/bench/build_pmmp_native.sh)
+and [runner](tests/bench/run_pmmp_native.py) to reproduce the comparison.
 
 ## Testing
 
