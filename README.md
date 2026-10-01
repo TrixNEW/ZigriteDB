@@ -21,6 +21,10 @@ Requires **Zig 0.16.0** and **Linux** for storage operations.
 zig build -Doptimize=ReleaseSafe
 ```
 
+Checksums use the CPU's CRC32C instruction when the target has it. Builds for
+other machines should target at least `-Dcpu=x86_64_v2`; baseline x86_64 falls
+back to a much slower table.
+
 ## Zig API
 
 Place a checkout at `vendor/zigritedb` and add this to your application's
@@ -83,6 +87,10 @@ shutdown for durability. For synchronous writes, set
 `.shard.durability = .sync`. `deinit` only releases resources. See
 [World](src/world/world.zig) for the full Zig API.
 
+Regions are compacted in the background while reads and writes continue. The
+C API does this automatically once a region is mostly stale; Zig users can call
+`compact` or set `World.compactor` to schedule it themselves.
+
 ## C API
 
 For other languages, link `libzigritedb_native` and include
@@ -92,35 +100,41 @@ built against version 1 must be rebuilt.
 
 ## Benchmarks
 
-Three-run medians for 1,024 saves across 64 chunks, using identical payloads
-and save order. Full saves contain four 16 KiB subchunks, biomes, block
-entities, and entities; the workload also includes two-component updates.
+Three-run medians on a 4,096-chunk world (8,192 saves) with identical payloads
+and save order. Full saves hold four 16 KiB subchunks, biomes, block entities
+and entities; later saves mix full saves with two-component updates. A chunk
+read is seven gets.
 
 | Workload | ZigriteDB | PMMP LevelDB fork |
 | --- | ---: | ---: |
-| Buffered chunk saves | 3,427 saves/s | 4,265 saves/s |
-| Synchronous chunk saves | 203 saves/s | 208 saves/s |
-| Durable groups of 16 saves | 1,617 saves/s | 2,320 saves/s |
-| Seven-component reads, first pass | 11,397 reads/s | 8,529 reads/s |
-| Seven-component reads, repeated | 11,407 reads/s | 34,316 reads/s |
+| Buffered chunk saves | 15,033 saves/s | 434 saves/s |
+| Synchronous chunk saves | 193 saves/s | 178 saves/s |
+| Durable groups of 16 saves | 2,321 saves/s | 444 saves/s |
+| Chunk read p50, no cache, cold | 42 µs | 653 µs |
+| Chunk read p50, 8 MiB cache | 31 µs | 199 µs |
+| Reopen and first read | 68 ms | 40 ms |
+| Size after writes / after full compaction | 132 / 90 MB | 97 / 76 MB |
+| Peak memory | 19 MiB | 110 MiB |
 
 **Native code only.** This compares ZigriteDB's C API with the
 [C++ LevelDB fork](https://github.com/pmmp/leveldb) used by
 [PMMP's PHP extension](https://github.com/pmmp/php-leveldb). PHP calls, NBT
-serialization, and the full world provider are excluded. PHP adds overhead,
-so these figures are not PMMP server throughput and performance through PHP
-will be slower.
+serialization and the world provider are excluded, so these are not PMMP server
+numbers.
 
-Both engines use matching durability modes. PMMP uses its
-[raw zlib and 64 KiB block settings](https://github.com/pmmp/PocketMine-MP/blob/stable/src/world/format/io/leveldb/LevelDB.php)
-and default 8 MiB block cache; ZigriteDB uses its default 0 MiB value cache.
-Buffered saves/s excludes the final durability barrier; grouped saves/s
-includes one after every 16 saves. Compression and compaction differ.
+Both engines run with the same cache size and with checksum verification on
+(ZigriteDB always verifies; LevelDB's default does not). LevelDB uses PMMP's
+[raw zlib and 64 KiB block settings](https://github.com/pmmp/PocketMine-MP/blob/stable/src/world/format/io/leveldb/LevelDB.php),
+which is why its files are smaller. Buffered saves exclude the final barrier;
+groups sync after every 16 saves. Measured on a Ryzen 5 5500 under WSL2
+(Linux 6.6, ext4) with Zig 0.16.0 ReleaseSafe and LevelDB built with CMake
+Release.
 
-Measured on a Ryzen 5 5500 under WSL2 (Linux 6.6, ext4), with Zig 0.16.0
-ReleaseSafe. Detailed latencies and memory use are in the
-[raw results](tests/bench/results); see the [build script](tests/bench/build_pmmp_native.sh)
-and [runner](tests/bench/run_pmmp_native.py) to reproduce the comparison.
+LevelDB still wins on database size and reopen time. Cache, thread scaling,
+ReleaseFast and 64-chunk results are in the
+[detailed results](tests/bench/results/README.md); see the
+[build script](tests/bench/build_pmmp_native.sh) and
+[runner](tests/bench/run_pmmp_native.py) to reproduce them.
 
 ## Testing
 

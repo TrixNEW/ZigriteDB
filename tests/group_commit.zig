@@ -62,3 +62,65 @@ test "concurrent sync writers share fsyncs and every acknowledged write survives
     }
     try store.close();
 }
+
+test "groups split across runs and segments survive reopen" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stats: db.Stats = .{};
+    const value = "0123456789012345678901234567890123456789";
+    const batch_len = try (db.WriteBatch{ .entries = &.{item(1, 0, value)} }).size();
+    const options: db.shard.Options = .{
+        .batch_buffer_size = batch_len * 2,
+        .max_segment_size = db.segment.encoded_len + batch_len * 3,
+        .stats = &stats,
+    };
+
+    var values: [10][40]u8 = undefined;
+    var entries: [10][1]db.entry.Entry = undefined;
+    var batches: [10]db.WriteBatch = undefined;
+    for (&values, &entries, &batches, 0..) |*bytes, *batch_entries, *batch, i| {
+        bytes.* = value.*;
+        bytes[0] = @intCast('a' + i);
+        batch_entries.* = .{item(i + 1, @intCast(i % 4), bytes)};
+        batch.* = .{ .entries = batch_entries };
+    }
+
+    {
+        var store = try db.Store.create(testing.allocator, io, tmp.dir, item(1, 0, "").key.region(), options);
+        defer store.deinit();
+        try store.writeGroup(&batches);
+        try store.close();
+    }
+    try testing.expectEqual(@as(u64, 10), stats.writes.load(.monotonic));
+    try testing.expect(stats.segment_rotations.load(.monotonic) >= 3);
+
+    var store = try db.Store.open(testing.allocator, io, tmp.dir, options);
+    defer store.deinit();
+    try testing.expectEqual(@as(u64, 10), try store.lastBatchId());
+    var output: [40]u8 = undefined;
+    for (6..10) |i| try testing.expectEqualStrings(&values[i], (try store.get(item(1, @intCast(i % 4), "").key, &output)).?);
+    try store.close();
+}
+
+test "a group with one corrupt batch writes nothing" {
+    if (!db.directory.supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, item(1, 0, "").key.region(), .{});
+    defer store.deinit();
+
+    var corrupt = item(2, 1, "abc");
+    corrupt.header.compression = .lz4;
+    corrupt.header.raw_len = 10;
+    try testing.expectError(error.InvalidCompressedData, store.writeGroup(&.{
+        .{ .entries = &.{item(1, 0, "fine")} },
+        .{ .entries = &.{corrupt} },
+    }));
+    try testing.expectEqual(@as(u64, 0), try store.lastBatchId());
+    var output: [8]u8 = undefined;
+    try testing.expectEqual(null, try store.get(item(1, 0, "").key, &output));
+    try store.writeGroup(&.{.{ .entries = &.{item(1, 0, "fine")} }});
+    try testing.expectEqualStrings("fine", (try store.get(item(1, 0, "").key, &output)).?);
+    try store.close();
+}

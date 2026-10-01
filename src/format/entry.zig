@@ -1,5 +1,5 @@
 const std = @import("std");
-const Crc32c = std.hash.crc.Crc32Iscsi;
+const Crc32c = @import("crc.zig");
 
 const lz4 = @import("../compression/lz4.zig");
 const key_format = @import("key.zig");
@@ -22,7 +22,7 @@ pub const Entry = struct {
 
     /// Scratch must not overlap value; compressed results borrow it.
     pub fn compress(self: Entry, encoder: *lz4.Encoder, scratch: []u8) Error!Entry {
-        _ = try self.size();
+        _ = try self.encodedLen();
         if (self.header.kind != .put or self.header.compression != .none) return self;
         const compressed = try encoder.compress(self.value, scratch);
         if (compressed.len >= self.value.len) return self;
@@ -33,27 +33,32 @@ pub const Entry = struct {
         return result;
     }
 
-    pub fn size(self: Entry) Error!usize {
-        _ = try self.header.encode();
-        _ = try self.key.encode();
-
+    /// Like `size`, but leaves the compressed stream unchecked.
+    pub fn encodedLen(self: Entry) Error!usize {
+        try self.header.validate();
+        try self.key.validate();
         try validateHeader(self.header);
         if (self.value.len != self.header.stored_len) return error.InvalidLength;
-
-        if (self.header.compression == .lz4) try lz4.validate(self.value, self.header.raw_len);
         return totalSize(self.header.stored_len);
+    }
+
+    pub fn size(self: Entry) Error!usize {
+        const len = try self.encodedLen();
+        if (self.header.compression == .lz4) try lz4.validate(self.value, self.header.raw_len);
+        return len;
     }
 
     /// `destination` must not overlap `value`
     /// Errors leave it unchanged
     pub fn encode(self: Entry, destination: []u8) Error![]u8 {
         _ = try self.size();
+        return self.encodeChecked(destination);
+    }
+
+    /// `encode` for entries that already passed `size`.
+    pub fn encodeChecked(self: Entry, destination: []u8) Error![]u8 {
         const header_bytes = try self.header.encode();
         const key_bytes = try self.key.encode();
-
-        try validateHeader(self.header);
-        if (self.value.len != self.header.stored_len) return error.InvalidLength;
-
         const len = try totalSize(self.header.stored_len);
         if (destination.len < len) return error.BufferTooSmall;
 
@@ -79,6 +84,31 @@ pub const Decoded = struct {
 
 /// The decoded value borrows from `bytes`
 pub fn decode(bytes: []const u8) Error!Decoded {
+    const decoded = try decodeStored(bytes);
+    const item = decoded.entry;
+    if (item.header.compression == .lz4) try lz4.validate(item.value, item.header.raw_len);
+    return decoded;
+}
+
+/// For records a scanner already checked.
+pub fn decodeVerified(bytes: []const u8) Error!Decoded {
+    const header = try record.Header.decode(bytes);
+    try validateHeader(header);
+    const len = try totalSize(header.stored_len);
+    if (bytes.len < len) return error.TruncatedRecord;
+    const key_end = record.encoded_len + Key.encoded_len;
+    return .{
+        .entry = .{
+            .header = header,
+            .key = try Key.decode(bytes[record.encoded_len..key_end]),
+            .value = bytes[key_end .. len - checksum_len],
+        },
+        .consumed = len,
+    };
+}
+
+/// Like `decode`, but leaves the LZ4 stream to be checked by `lz4.decompress`.
+pub fn decodeStored(bytes: []const u8) Error!Decoded {
     const header = try record.Header.decode(bytes);
     try validateHeader(header);
 
@@ -92,9 +122,6 @@ pub fn decode(bytes: []const u8) Error!Decoded {
     if (expected_checksum != actual_checksum) return error.ChecksumMismatch;
 
     const key_end = record.encoded_len + Key.encoded_len;
-
-    if (header.compression == .lz4) try lz4.validate(bytes[key_end..checksum_offset], header.raw_len);
-
     return .{
         .entry = .{
             .header = header,

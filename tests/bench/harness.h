@@ -29,16 +29,16 @@ static inline int compare(const void *a, const void *b) {
 static inline void report(const char *name, double *samples, size_t count, double elapsed) {
     qsort(samples, count, sizeof(*samples), compare);
     printf("\"%s\":{\"calls\":%zu,\"calls_per_second\":%.2f,"
-           "\"p50_us\":%.2f,\"p95_us\":%.2f,\"p99_us\":%.2f,\"p999_us\":%.2f}",
+           "\"p50_us\":%.2f,\"p95_us\":%.2f,\"p99_us\":%.2f,\"p999_us\":%.2f,\"max_us\":%.2f}",
            name, count, count / elapsed, samples[(count - 1) / 2] * 1e6,
            samples[(count - 1) * 95 / 100] * 1e6, samples[(count - 1) * 99 / 100] * 1e6,
-           samples[(count - 1) * 999 / 1000] * 1e6);
+           samples[(count - 1) * 999 / 1000] * 1e6, samples[count - 1] * 1e6);
 }
 
-static inline void reportStats(zg_handle *handle) {
+static inline void reportStatsAs(const char *name, zg_handle *handle) {
     zg_stats stats;
     check(zg_stats_get(handle, &stats));
-    printf(",\"stats\":{"
+    printf(",\"%s\":{"
            "\"get_calls\":%" PRIu64 ",\"writes\":%" PRIu64 ",\"records_written\":%" PRIu64 ","
            "\"raw_bytes_written\":%" PRIu64 ",\"compressed_bytes_written\":%" PRIu64 ","
            "\"disk_reads\":%" PRIu64 ",\"bytes_read\":%" PRIu64 ","
@@ -49,7 +49,7 @@ static inline void reportStats(zg_handle *handle) {
            "\"recovery_attempts\":%" PRIu64 ",\"recovery_errors\":%" PRIu64 ","
            "\"cache_hits\":%" PRIu64 ",\"cache_misses\":%" PRIu64 ",\"cache_evictions\":%" PRIu64 ","
            "\"unchanged_write_skips\":%" PRIu64 "}",
-           stats.get_calls, stats.writes, stats.records_written,
+           name, stats.get_calls, stats.writes, stats.records_written,
            stats.raw_bytes_written, stats.compressed_bytes_written,
            stats.disk_reads, stats.bytes_read,
            stats.fsync_count, stats.fsync_duration_ns,
@@ -59,6 +59,10 @@ static inline void reportStats(zg_handle *handle) {
            stats.recovery_attempts, stats.recovery_errors,
            stats.cache_hits, stats.cache_misses, stats.cache_evictions,
            stats.unchanged_write_skips);
+}
+
+static inline void reportStats(zg_handle *handle) {
+    reportStatsAs("stats", handle);
 }
 
 #endif

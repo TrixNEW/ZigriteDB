@@ -32,7 +32,7 @@ test "hits only match the batch the index points at" {
 
 test "memory stays under the budget and referenced entries survive a sweep" {
     var stats: db.Stats = .{};
-    const budget = 4 * (db.cache.entry_overhead + 8);
+    const budget = comptime 4 * db.cache.cost(8);
     var cache = try db.cache.Cache.init(testing.allocator, .{ .bytes = budget, .shards = 1 });
     defer cache.deinit();
     cache.stats = &stats;
@@ -40,6 +40,9 @@ test "memory stays under the budget and referenced entries survive a sweep" {
 
     for (0..4) |x| cache.put(io, key(@intCast(x)), 1, "12345678");
     _ = cache.get(io, key(0), 1, &output);
+    cache.put(io, key(4), 1, "12345678");
+    try testing.expectEqual(null, cache.get(io, key(4), 1, &output));
+    try testing.expectEqual(@as(u64, 0), stats.cache_evictions.load(.monotonic));
     cache.put(io, key(4), 1, "12345678");
 
     try testing.expect(cache.shards[0].used <= budget);
@@ -70,7 +73,7 @@ fn hammer(cache: *db.cache.Cache, seed: u64, failure: *std.atomic.Value(bool)) v
 }
 
 test "concurrent gets and puts never return another key's or batch's bytes" {
-    var cache = try db.cache.Cache.init(testing.allocator, .{ .bytes = 16 * (db.cache.entry_overhead + 8), .shards = 4 });
+    var cache = try db.cache.Cache.init(testing.allocator, .{ .bytes = 16 * db.cache.cost(8), .shards = 4 });
     defer cache.deinit();
     var failure: std.atomic.Value(bool) = .init(false);
     var threads: [4]std.Thread = undefined;
@@ -140,4 +143,52 @@ test "world reads stay correct through overwrites, deletes, compaction and evict
     try world.getMany(&.{.{ .key = first.key, .output = &output }}, &results);
     try testing.expectEqualStrings("fourth", results[0].value);
     try world.close();
+}
+
+test "a scan larger than the cache does not flush the hot set" {
+    const budget = comptime 8 * db.cache.cost(16);
+    var cache = try db.cache.Cache.init(testing.allocator, .{ .bytes = budget, .shards = 1 });
+    defer cache.deinit();
+    var output: [16]u8 = undefined;
+    const value = "0123456789abcdef";
+
+    for (0..8) |x| cache.put(io, key(@intCast(x)), 1, value);
+    for (0..8) |x| _ = cache.get(io, key(@intCast(x)), 1, &output);
+    for (100..400) |x| cache.put(io, key(@intCast(x)), 1, value);
+    for (0..8) |x| try testing.expect(cache.get(io, key(@intCast(x)), 1, &output) != null);
+    try testing.expect(cache.shards[0].used <= budget);
+}
+
+test "newer versions and evictions reuse buffers without growing memory" {
+    var cache = try db.cache.Cache.init(testing.allocator, .{ .bytes = 4 * db.cache.cost(1000), .shards = 1 });
+    defer cache.deinit();
+    var value: [1000]u8 = undefined;
+    var output: [1000]u8 = undefined;
+    for (1..200) |round| {
+        @memset(&value, @truncate(round));
+        for (0..6) |x| {
+            cache.put(io, key(@intCast(x)), round, value[0 .. 900 + x]);
+            cache.put(io, key(@intCast(x)), round, value[0 .. 900 + x]);
+        }
+        try testing.expect(cache.shards[0].used <= cache.shards[0].capacity);
+        for (0..6) |x| if (cache.get(io, key(@intCast(x)), round, &output)) |hit| {
+            try testing.expectEqualSlices(u8, value[0 .. 900 + x], hit);
+        };
+    }
+}
+
+test "a full cache still takes in keys that are read often" {
+    const budget = comptime 8 * db.cache.cost(16);
+    var cache = try db.cache.Cache.init(testing.allocator, .{ .bytes = budget, .shards = 1 });
+    defer cache.deinit();
+    var output: [16]u8 = undefined;
+    const value = "0123456789abcdef";
+
+    for (0..8) |x| cache.put(io, key(@intCast(x)), 1, value);
+    cache.put(io, key(100), 1, value);
+    try testing.expectEqual(null, cache.get(io, key(100), 1, &output));
+    for (0..3) |_| _ = cache.get(io, key(100), 1, &output);
+    cache.put(io, key(100), 1, value);
+    try testing.expect(cache.get(io, key(100), 1, &output) != null);
+    try testing.expect(cache.shards[0].used <= budget);
 }

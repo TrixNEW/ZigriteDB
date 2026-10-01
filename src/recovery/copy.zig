@@ -118,10 +118,10 @@ fn copyTo(comptime compact: bool, allocator: std.mem.Allocator, io: std.Io, sour
         while (try scanner.next(scratch)) |batch| {
             const size = batch.records.len + commit.commit_len;
             const data = if (compact)
-                try compactBatch(&live.?, position, batch, filtered)
+                try compactBatch(&live.?, position, batch, filtered, live.?.last_batch_id)
             else
-                scratch[segment.encoded_len..][0..size];
-            if (compact) try merged.append(data) else try target.?.writeAll(data, offset);
+                batch.records.ptr[0..size];
+            if (compact) _ = try merged.append(data) else try target.?.writeAll(data, offset);
             offset += data.len;
 
             if (data.len != 0) result.committed_batches = try std.math.add(u64, result.committed_batches, 1);
@@ -164,5 +164,5 @@ fn rebuild(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, metadata: 
         };
         opened += 1;
     }
-    return index_module.rebuildFiles(allocator, metadata, devices, options.max_keys, scratch, options.max_segment_size);
+    return index_module.rebuildFiles(allocator, metadata, devices, options.max_keys, scratch, options.max_segment_size, false);
 }

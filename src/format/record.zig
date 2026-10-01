@@ -1,5 +1,5 @@
 const std = @import("std");
-const Crc32c = std.hash.crc.Crc32Iscsi;
+const Crc32c = @import("crc.zig");
 
 pub const encoded_len = 32;
 pub const max_value_len = 16 * 1024 * 1024;
@@ -84,7 +84,7 @@ pub const Header = struct {
         return header;
     }
 
-    fn validate(self: Header) Error!void {
+    pub fn validate(self: Header) Error!void {
         if (self.batch_id == 0) return error.InvalidBatchId;
 
         const value_too_large =

@@ -1,5 +1,5 @@
 const std = @import("std");
-const Crc32c = std.hash.crc.Crc32Iscsi;
+const Crc32c = @import("../format/crc.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const entry = @import("../format/entry.zig");
@@ -28,17 +28,21 @@ const Summary = struct {
 
 pub fn seal(records: []const u8) Error![commit_len]u8 {
     const summary = try summarize(records);
+    return marker(summary.batch_id, summary.count, records.len, summary.digest);
+}
+
+pub fn marker(batch_id: u64, count: u32, byte_len: usize, digest: [32]u8) Error![commit_len]u8 {
     const header = try (record.Header{
         .kind = .commit,
-        .batch_id = summary.batch_id,
+        .batch_id = batch_id,
     }).encode();
 
     var bytes: [commit_len]u8 = undefined;
 
     @memcpy(bytes[0..32], &header);
-    std.mem.writeInt(u32, bytes[32..36], summary.count, .little);
-    std.mem.writeInt(u64, bytes[36..44], @intCast(records.len), .little);
-    @memcpy(bytes[44..76], &summary.digest);
+    std.mem.writeInt(u32, bytes[32..36], count, .little);
+    std.mem.writeInt(u64, bytes[36..44], @intCast(byte_len), .little);
+    @memcpy(bytes[44..76], &digest);
 
     const checksum = Crc32c.hash(bytes[0..76]);
     std.mem.writeInt(u32, bytes[76..80], checksum, .little);
@@ -72,11 +76,27 @@ pub fn verify(records: []const u8, commit: []const u8) Error!void {
     if (byte_len != records.len) return error.BatchMismatch;
 
     const summary = try summarize(records);
+    try check(commit, summary.batch_id, summary.count, records.len, summary.digest);
+}
+
+/// For batches the caller already decoded and hashed.
+pub fn check(commit: []const u8, batch_id: u64, count: u32, byte_len: usize, digest: [32]u8) Error!void {
+    if (commit.len < commit_len) return error.IncompleteCommit;
+    if (commit.len != commit_len) return error.InvalidCommit;
+
+    const header = try record.Header.decode(commit);
+    if (header.kind != .commit) return error.InvalidCommit;
+    if (std.mem.readInt(u32, commit[76..80], .little) != Crc32c.hash(commit[0..76])) return error.ChecksumMismatch;
+
+    const stored_count = std.mem.readInt(u32, commit[32..36], .little);
+    const stored_len = std.mem.readInt(u64, commit[36..44], .little);
+    if (stored_count == 0 or stored_count > max_records or stored_len == 0 or stored_len > max_bytes) return error.InvalidCommit;
 
     const batch_mismatch =
-        header.batch_id != summary.batch_id or
-        count != summary.count or
-        !std.mem.eql(u8, commit[44..76], &summary.digest);
+        stored_len != byte_len or
+        header.batch_id != batch_id or
+        stored_count != count or
+        !std.mem.eql(u8, commit[44..76], &digest);
 
     if (batch_mismatch) return error.BatchMismatch;
 }

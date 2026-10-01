@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const lock = @import("../lock.zig");
+
 const WriteBatch = @import("../batch/write.zig").WriteBatch;
 const key_format = @import("../format/key.zig");
 const Key = key_format.Key;
@@ -20,6 +22,11 @@ pub const Options = struct {
     cache: cache_module.Options = .{},
 };
 
+pub const Compactor = struct {
+    context: *anyopaque,
+    submit: *const fn (context: *anyopaque, region: Region) void,
+};
+
 pub const ReadRequest = store_module.ReadRequest;
 pub const ReadStatus = store_module.ReadStatus;
 pub const ReadResult = store_module.ReadResult;
@@ -32,21 +39,33 @@ pub const World = struct {
     slots: []Slot,
     count: usize = 0,
     mutex: std.Io.Mutex = .init,
+    // Held shared to pin an open region; changes to the slot table also hold `mutex`.
+    table: std.Io.RwLock = .init,
     closed: bool = false,
     closing: bool = false,
     changed: std.Io.Condition = .init,
     missing: [256]?Region = .{null} ** 256,
-    clock: u64 = 0,
     positions: std.AutoHashMapUnmanaged(Region, u32) = .empty,
     loads: usize = 0,
+    hand: usize = 0,
+    compactor: ?Compactor = null,
+    waiters: std.atomic.Value(usize) = .init(0),
+
+    const Opened = struct {
+        store: Store,
+        users: std.atomic.Value(usize) = .init(0),
+    };
 
     const Slot = struct {
         region: Region,
-        store: *Store,
-        users: usize = 0,
-        last_used: u64 = 0,
+        opened: *Opened,
+        referenced: std.atomic.Value(bool) = .init(true),
         loading: bool = false,
         evicting: ?Region = null,
+
+        fn idle(self: *const Slot) bool {
+            return !self.loading and self.opened.users.load(.seq_cst) == 0;
+        }
     };
 
     pub fn open(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: Options) !World {
@@ -76,7 +95,13 @@ pub const World = struct {
         if (size > self.options.shard.max_segment_size - segment.encoded_len) return error.BatchTooLarge;
         const store = (try self.acquire(batch.entries[0].key.region(), true)).?;
         defer self.unpin(store);
+        defer self.suggest(store);
         return store.write(batch);
+    }
+
+    fn suggest(self: *World, store: *Store) void {
+        const compactor = self.compactor orelse return;
+        if (store.wantsCompaction()) compactor.submit(compactor.context, store.region);
     }
 
     pub fn writeNext(self: *World, entries: []Entry) !AppendResult {
@@ -87,6 +112,7 @@ pub const World = struct {
         if (size > self.options.shard.max_segment_size - segment.encoded_len) return error.BatchTooLarge;
         const store = (try self.acquire(entries[0].key.region(), true)).?;
         defer self.unpin(store);
+        defer self.suggest(store);
         return store.writeNext(entries);
     }
 
@@ -99,6 +125,7 @@ pub const World = struct {
         }
         const store = (try self.acquire(batches[0].entries[0].key.region(), true)).?;
         defer self.unpin(store);
+        defer self.suggest(store);
         try store.writeGroup(batches);
     }
 
@@ -132,19 +159,31 @@ pub const World = struct {
         if (requests.len == 0) return;
 
         var start: usize = 0;
-        while (start < requests.len) : (start += max_read_batch) {
-            const end = @min(requests.len, start + max_read_batch);
+        while (start < requests.len) : (start += read_chunk) {
+            const end = @min(requests.len, start + read_chunk);
             try self.getManyChunk(requests[start..end], results[start..end]);
         }
     }
 
+    // Kept small: ReleaseSafe fills undefined stack arrays.
+    const read_chunk = 32;
+
     fn getManyChunk(self: *World, requests: []const ReadRequest, results: []ReadResult) !void {
-        var order: [max_read_batch]u16 = undefined;
+        const first = requests[0].key.region();
+        for (requests[1..]) |request| {
+            if (!std.meta.eql(request.key.region(), first)) break;
+        } else {
+            const store = (try self.acquire(first, false)) orelse return;
+            defer self.unpin(store);
+            return store.getMany(requests, results);
+        }
+
+        var order: [read_chunk]u16 = undefined;
         for (order[0..requests.len], 0..) |*value, i| value.* = @intCast(i);
         std.sort.pdq(u16, order[0..requests.len], requests, requestRegionLessThan);
 
-        var sub_requests: [store_module.max_batch_keys]ReadRequest = undefined;
-        var sub_results: [store_module.max_batch_keys]ReadResult = undefined;
+        var sub_requests: [read_chunk]ReadRequest = undefined;
+        var sub_results: [read_chunk]ReadResult = undefined;
 
         var run: usize = 0;
         while (run < requests.len) {
@@ -174,7 +213,7 @@ pub const World = struct {
 
     pub fn regions(self: *World, allocator: std.mem.Allocator) ![]Region {
         {
-            try self.mutex.lock(self.io);
+            try lock.lock(&self.mutex, self.io);
             defer self.mutex.unlock(self.io);
             if (self.closed or self.closing) return error.Closed;
         }
@@ -263,7 +302,7 @@ pub const World = struct {
 
     pub fn flush(self: *World) !void {
         var stores: [1024]*Store = undefined;
-        try self.mutex.lock(self.io);
+        try lock.lock(&self.mutex, self.io);
         if (self.closed or self.closing) {
             self.mutex.unlock(self.io);
             return error.Closed;
@@ -271,28 +310,36 @@ pub const World = struct {
         var count: usize = 0;
         for (self.slots[0..self.count]) |*slot| {
             if (slot.loading) continue;
-            slot.users += 1;
-            stores[count] = slot.store;
+            _ = slot.opened.users.fetchAdd(1, .seq_cst);
+            stores[count] = &slot.opened.store;
             count += 1;
         }
         self.mutex.unlock(self.io);
         defer for (stores[0..count]) |store| self.unpin(store);
-        var failure: ?anyerror = null;
-        for (stores[0..count]) |store| {
-            store.flush() catch |err| {
-                if (failure == null) failure = err;
-            };
-        }
-        if (failure) |err| return err;
+
+        // Regions are separate files, so their fsyncs can overlap.
+        var failures: [1024]?anyerror = undefined;
+        var group: std.Io.Group = .init;
+        for (stores[0..count], failures[0..count]) |store, *failure| group.async(self.io, flushStore, .{ store, failure });
+        try group.await(self.io);
+        for (failures[0..count]) |failure| if (failure) |err| return err;
+    }
+
+    fn flushStore(store: *Store, failure: *?anyerror) void {
+        store.flush() catch |err| {
+            failure.* = err;
+            return;
+        };
+        failure.* = null;
     }
 
     pub fn close(self: *World) !void {
-        self.mutex.lockUncancelable(self.io);
+        lock.lockUncancelable(&self.mutex, self.io);
         defer self.mutex.unlock(self.io);
-        while (self.closing and !self.closed) self.changed.waitUncancelable(self.io, &self.mutex);
+        while (self.closing and !self.closed) self.waitUncancelable();
         if (self.closed) return;
-        self.closing = true;
-        while (self.inUse()) self.changed.waitUncancelable(self.io, &self.mutex);
+        self.startClosing();
+        while (self.inUse()) self.waitUnused();
         var failure: ?anyerror = null;
         while (self.count != 0) {
             self.evict() catch |err| {
@@ -304,38 +351,99 @@ pub const World = struct {
     }
 
     pub fn deinit(self: *World) void {
-        self.mutex.lockUncancelable(self.io);
+        lock.lockUncancelable(&self.mutex, self.io);
         defer self.mutex.unlock(self.io);
-        while (self.closing and !self.closed) self.changed.waitUncancelable(self.io, &self.mutex);
+        while (self.closing and !self.closed) self.waitUncancelable();
         if (self.closed) return;
-        self.closing = true;
-        while (self.inUse()) self.changed.waitUncancelable(self.io, &self.mutex);
+        self.startClosing();
+        while (self.inUse()) self.waitUnused();
         for (self.slots[0..self.count]) |slot| {
-            slot.store.deinit();
-            self.allocator.destroy(slot.store);
+            slot.opened.store.deinit();
+            self.allocator.destroy(slot.opened);
         }
         self.release();
     }
 
     fn acquire(self: *World, region: Region, create: bool) !?*Store {
-        try self.mutex.lock(self.io);
+        if (self.pinOpen(region)) |store| return store;
+        try lock.lock(&self.mutex, self.io);
         defer self.mutex.unlock(self.io);
         while (true) {
             if (self.closed or self.closing) return error.Closed;
             if (self.busy(region)) {
-                try self.changed.wait(self.io, &self.mutex);
+                try self.wait();
                 continue;
             }
-            if (self.find(region)) |i| {
-                self.clock += 1;
-                self.slots[i].last_used = self.clock;
-                self.slots[i].users += 1;
-                return self.slots[i].store;
-            }
+            if (self.find(region)) |i| return self.pin(&self.slots[i]);
             if (!create and self.knownMissing(region)) return null;
-            if (self.count < self.slots.len or self.hasIdle()) return self.load(region, create);
-            try self.changed.wait(self.io, &self.mutex);
+            if (self.count < self.slots.len or self.hasIdle()) return self.load(region, create) catch |err| switch (err) {
+                // A reader pinned the last idle region after `hasIdle`.
+                error.NoIdleSlot => {
+                    try self.waitIdle();
+                    continue;
+                },
+                else => return err,
+            };
+            try self.waitIdle();
         }
+    }
+
+    fn pinOpen(self: *World, region: Region) ?*Store {
+        self.table.lockSharedUncancelable(self.io);
+        defer self.table.unlockShared(self.io);
+        if (self.closing) return null;
+        const i = self.positions.get(region) orelse return null;
+        if (self.slots[i].loading) return null;
+        return self.pin(&self.slots[i]);
+    }
+
+    fn pin(_: *World, slot: *Slot) *Store {
+        _ = slot.opened.users.fetchAdd(1, .seq_cst);
+        if (!slot.referenced.load(.monotonic)) slot.referenced.store(true, .monotonic);
+        return &slot.opened.store;
+    }
+
+    fn unpin(self: *World, store: *Store) void {
+        const opened: *Opened = @fieldParentPtr("store", store);
+        _ = opened.users.fetchSub(1, .seq_cst);
+        if (self.waiters.load(.seq_cst) == 0) return;
+        lock.lockUncancelable(&self.mutex, self.io);
+        defer self.mutex.unlock(self.io);
+        self.changed.broadcast(self.io);
+    }
+
+    fn wait(self: *World) !void {
+        _ = self.waiters.fetchAdd(1, .seq_cst);
+        defer _ = self.waiters.fetchSub(1, .seq_cst);
+        try self.changed.wait(self.io, &self.mutex);
+    }
+
+    fn waitUncancelable(self: *World) void {
+        _ = self.waiters.fetchAdd(1, .seq_cst);
+        defer _ = self.waiters.fetchSub(1, .seq_cst);
+        self.changed.waitUncancelable(self.io, &self.mutex);
+    }
+
+    // Pins drop without `mutex`, so register as a waiter before checking them; either the check
+    // sees the unpin or the unpin sees the waiter.
+    fn waitIdle(self: *World) !void {
+        _ = self.waiters.fetchAdd(1, .seq_cst);
+        defer _ = self.waiters.fetchSub(1, .seq_cst);
+        if (self.hasIdle()) return;
+        try self.changed.wait(self.io, &self.mutex);
+    }
+
+    fn waitUnused(self: *World) void {
+        _ = self.waiters.fetchAdd(1, .seq_cst);
+        defer _ = self.waiters.fetchSub(1, .seq_cst);
+        if (!self.inUse()) return;
+        self.changed.waitUncancelable(self.io, &self.mutex);
+    }
+
+    fn startClosing(self: *World) void {
+        self.table.lockUncancelable(self.io);
+        defer self.table.unlock(self.io);
+        self.closing = true;
     }
 
     fn find(self: *World, region: Region) ?usize {
@@ -353,25 +461,16 @@ pub const World = struct {
         return false;
     }
 
-    fn unpin(self: *World, store: *Store) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        const slot = &self.slots[self.find(store.region).?];
-        std.debug.assert(!slot.loading and slot.store == store and slot.users != 0);
-        slot.users -= 1;
-        self.changed.broadcast(self.io);
-    }
-
     fn hasIdle(self: *World) bool {
-        for (self.slots[0..self.count]) |slot| {
-            if (slot.users == 0) return true;
+        for (self.slots[0..self.count]) |*slot| {
+            if (slot.idle()) return true;
         }
         return false;
     }
 
     fn inUse(self: *World) bool {
-        for (self.slots[0..self.count]) |slot| {
-            if (slot.users != 0) return true;
+        for (self.slots[0..self.count]) |*slot| {
+            if (!slot.idle()) return true;
         }
         return false;
     }
@@ -390,28 +489,33 @@ pub const World = struct {
     fn load(self: *World, region: Region, create: bool) !?*Store {
         if (create and self.knownMissing(region)) self.missing[missingSlot(region)] = null;
 
-        var victim: ?*Store = null;
+        var victim: ?*Opened = null;
         var evicting: ?Region = null;
-        if (self.count == self.slots.len) {
-            const i = self.idleIndex().?;
-            victim = self.slots[i].store;
-            evicting = self.slots[i].region;
-            self.removeAt(i);
+        {
+            self.table.lockUncancelable(self.io);
+            defer self.table.unlock(self.io);
+            if (self.count == self.slots.len) {
+                const i = self.idleIndex() orelse return error.NoIdleSlot;
+                victim = self.slots[i].opened;
+                evicting = self.slots[i].region;
+                self.removeAt(i);
+            }
+            self.slots[self.count] = .{ .region = region, .opened = undefined, .loading = true, .evicting = evicting };
+            self.positions.putAssumeCapacity(region, @intCast(self.count));
+            self.count += 1;
         }
-        self.clock += 1;
-        self.slots[self.count] = .{ .region = region, .store = undefined, .users = 1, .last_used = self.clock, .loading = true, .evicting = evicting };
-        self.positions.putAssumeCapacity(region, @intCast(self.count));
-        self.count += 1;
         self.loads += 1;
 
         self.mutex.unlock(self.io);
-        const opened = self.openRegion(region, create, victim);
-        self.mutex.lockUncancelable(self.io);
+        const result = self.openRegion(region, create, victim);
+        lock.lockUncancelable(&self.mutex, self.io);
         defer self.changed.broadcast(self.io);
         self.loads -= 1;
 
+        self.table.lockUncancelable(self.io);
+        defer self.table.unlock(self.io);
         const i = self.find(region).?;
-        const store = (opened catch |err| {
+        const opened = (result catch |err| {
             self.removeAt(i);
             return err;
         }) orelse {
@@ -419,10 +523,11 @@ pub const World = struct {
             self.missing[missingSlot(region)] = region;
             return null;
         };
-        self.slots[i].store = store;
+        opened.users.store(1, .seq_cst);
+        self.slots[i].opened = opened;
         self.slots[i].loading = false;
         self.slots[i].evicting = null;
-        return store;
+        return &opened.store;
     }
 
     fn removeAt(self: *World, i: usize) void {
@@ -433,19 +538,23 @@ pub const World = struct {
         self.positions.getPtr(self.slots[i].region).?.* = @intCast(i);
     }
 
+    /// Second chance: recently pinned regions are skipped once.
     fn idleIndex(self: *World) ?usize {
-        var oldest: ?usize = null;
-        for (self.slots[0..self.count], 0..) |slot, i| {
-            if (slot.users != 0) continue;
-            if (oldest == null or slot.last_used < self.slots[oldest.?].last_used) oldest = i;
+        for (0..2 * self.count) |step| {
+            const i = (self.hand + step) % self.count;
+            const slot = &self.slots[i];
+            if (!slot.idle()) continue;
+            if (slot.referenced.swap(false, .monotonic)) continue;
+            self.hand = i + 1;
+            return i;
         }
-        return oldest;
+        return null;
     }
 
-    fn openRegion(self: *World, region: Region, create: bool, victim: ?*Store) !?*Store {
-        if (victim) |store| {
-            defer self.allocator.destroy(store);
-            try store.close();
+    fn openRegion(self: *World, region: Region, create: bool, victim: ?*Opened) !?*Opened {
+        if (victim) |opened| {
+            defer self.allocator.destroy(opened);
+            try opened.store.close();
         }
 
         var name_buffer: [40]u8 = undefined;
@@ -463,8 +572,10 @@ pub const World = struct {
             break :blk try self.directory.dir.openDir(self.io, name, .{ .follow_symlinks = false });
         };
         defer dir.close(self.io);
-        const store = try self.allocator.create(Store);
-        errdefer self.allocator.destroy(store);
+        const opened = try self.allocator.create(Opened);
+        errdefer self.allocator.destroy(opened);
+        opened.* = .{ .store = undefined };
+        const store = &opened.store;
         store.* = if (created)
             try Store.create(self.allocator, self.io, dir, region, self.options.shard)
         else
@@ -478,15 +589,20 @@ pub const World = struct {
         errdefer store.deinit();
         if (!std.meta.eql(store.shard.generation.index.region, region)) return error.RegionMismatch;
         if (created) try self.directory.syncEntries();
-        return store;
+        return opened;
     }
 
     fn evict(self: *World) !void {
-        const i = self.idleIndex().?;
-        const store = self.slots[i].store;
-        self.removeAt(i);
-        defer self.allocator.destroy(store);
-        try store.close();
+        const opened = blk: {
+            self.table.lockUncancelable(self.io);
+            defer self.table.unlock(self.io);
+            const i = self.idleIndex().?;
+            const opened = self.slots[i].opened;
+            self.removeAt(i);
+            break :blk opened;
+        };
+        defer self.allocator.destroy(opened);
+        try opened.store.close();
     }
 
     fn release(self: *World) void {
@@ -495,6 +611,8 @@ pub const World = struct {
             self.allocator.destroy(cache);
             self.options.shard.cache = null;
         }
+        self.table.lockUncancelable(self.io);
+        defer self.table.unlock(self.io);
         self.allocator.free(self.slots);
         self.positions.deinit(self.allocator);
         self.directory.deinit();

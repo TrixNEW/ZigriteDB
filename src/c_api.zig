@@ -1,5 +1,5 @@
 const std = @import("std");
-const allocator = std.heap.page_allocator;
+const allocator = std.heap.c_allocator;
 
 const db = @import("root.zig");
 
@@ -145,6 +145,8 @@ pub const Handle = struct {
     threaded: std.Io.Threaded,
     world: db.World,
     maintenance: @import("world/maintenance.zig").Queue(db.World, compactRegion),
+    // Stale regions found by writes; dropped on close.
+    compaction: @import("world/maintenance.zig").WorkQueue(db.World, db.Region, 16, false, compactStale),
     prefetch: @import("world/maintenance.zig").WorkQueue(db.World, db.Key, 256, false, warmKey),
     mutex: std.Io.Mutex = .init,
     available: std.Io.Condition = .init,
@@ -266,6 +268,8 @@ fn open(path: ?[*]const u8, length: usize, options: Options) !*Handle {
     handle.world = try db.World.open(allocator, io, dir, config);
     errdefer handle.world.deinit();
     handle.maintenance = .{ .io = io, .context = &handle.world };
+    handle.compaction = .{ .io = io, .context = &handle.world };
+    handle.world.compactor = .{ .context = handle, .submit = submitCompaction };
     handle.prefetch = .{ .io = io, .context = &handle.world };
     handle.mutex = .init;
     handle.available = .init;
@@ -278,6 +282,7 @@ fn open(path: ?[*]const u8, length: usize, options: Options) !*Handle {
 pub export fn zg_close(optional: ?*Handle) Status {
     const handle = optional orelse return .invalid_argument;
     handle.prefetch.close() catch {};
+    handle.compaction.close() catch {};
     const maintenance_result = handle.maintenance.close();
     const result = handle.world.close();
     for (&handle.writers) |*slot| if (slot.*) |*context| context.deinit();
@@ -407,29 +412,39 @@ pub export fn zg_get_many(optional: ?*Handle, requests: ?[*]const ReadRequest, r
     if (requests == null or results == null or count == 0) return .invalid_argument;
     if (count > max_c_batch) return .limit;
 
-    var native_requests: [max_c_batch]db.ReadRequest = undefined;
-    var native_results: [max_c_batch]db.ReadResult = undefined;
-    for (requests.?[0..count], 0..) |request, i| {
-        const key = request.key.native() catch |err| return status(err);
+    for (requests.?[0..count]) |request| {
+        _ = request.key.native() catch |err| return status(err);
         if (request.output == null and request.capacity != 0) return .invalid_argument;
-        const bytes: []u8 = if (request.output) |ptr| ptr[0..request.capacity] else &.{};
-        native_requests[i] = .{ .key = key, .output = bytes };
     }
 
-    handle.world.getMany(native_requests[0..count], native_results[0..count]) catch |err| return status(err);
+    var start: usize = 0;
+    while (start < count) : (start += read_chunk) {
+        const end = @min(count, start + read_chunk);
+        var native_requests: [read_chunk]db.ReadRequest = undefined;
+        var native_results: [read_chunk]db.ReadResult = undefined;
+        for (requests.?[start..end], native_requests[0 .. end - start]) |request, *native| {
+            const bytes: []u8 = if (request.output) |ptr| ptr[0..request.capacity] else &.{};
+            native.* = .{ .key = request.key.native() catch unreachable, .output = bytes };
+        }
 
-    for (native_results[0..count], 0..) |result, i| {
-        results.?[i] = .{
-            .status = switch (result.status) {
-                .ok => .ok,
-                .not_found => .not_found,
-                .buffer_too_small => .buffer_too_small,
-            },
-            .required = result.required,
-        };
+        handle.world.getMany(native_requests[0 .. end - start], native_results[0 .. end - start]) catch |err| return status(err);
+
+        for (native_results[0 .. end - start], results.?[start..end]) |result, *target| {
+            target.* = .{
+                .status = switch (result.status) {
+                    .ok => .ok,
+                    .not_found => .not_found,
+                    .buffer_too_small => .buffer_too_small,
+                },
+                .required = result.required,
+            };
+        }
     }
     return .ok;
 }
+
+// Kept small: ReleaseSafe fills undefined stack arrays.
+const read_chunk = 32;
 
 pub export fn zg_flush(optional: ?*Handle) Status {
     const handle = optional orelse return .invalid_argument;
@@ -549,6 +564,15 @@ pub export fn zg_list_keys(optional: ?*Handle, dimension: i32, x: i32, z: i32, c
 
 fn warmKey(world: *db.World, key: db.Key) !void {
     world.warm(key) catch {};
+}
+
+fn submitCompaction(context: *anyopaque, region: db.Region) void {
+    const handle: *Handle = @ptrCast(@alignCast(context));
+    handle.compaction.submit(region) catch {};
+}
+
+fn compactStale(world: *db.World, region: db.Region) !void {
+    _ = world.compact(region) catch {};
 }
 
 fn compactRegion(world: *db.World, region: db.Region) !void {

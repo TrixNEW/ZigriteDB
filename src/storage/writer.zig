@@ -64,7 +64,8 @@ pub fn Writer(comptime Device: type) type {
             if (self.failed) return error.WriterFailed;
 
             const bytes = try batch.encode(scratch);
-            return self.appendEncoded(bytes, durability);
+            if (!std.meta.eql(batch.entries[0].key.region(), self.header.region)) return error.RegionMismatch;
+            return self.appendTrusted(bytes, batch.id(), durability);
         }
 
         pub fn appendEncoded(self: *Self, bytes: []const u8, durability: Durability) !AppendResult {
@@ -78,14 +79,19 @@ pub fn Writer(comptime Device: type) type {
             const id = first.entry.header.batch_id;
             const region = first.entry.key.region();
 
-            if (id <= self.last_batch_id) return error.BatchOrder;
-
             const same_region =
                 region.dimension == self.header.region.dimension and
                 region.x == self.header.region.x and
                 region.z == self.header.region.z;
 
             if (!same_region) return error.RegionMismatch;
+            return self.appendTrusted(bytes, id, durability);
+        }
+
+        /// For bytes we encoded ourselves; `id` is the last batch in them.
+        pub fn appendTrusted(self: *Self, bytes: []const u8, id: u64, durability: Durability) !AppendResult {
+            if (self.failed) return error.WriterFailed;
+            if (id <= self.last_batch_id) return error.BatchOrder;
 
             const end = std.math.add(u64, self.offset, bytes.len) catch return error.SegmentFull;
             if (end > self.max_size) return error.SegmentFull;
