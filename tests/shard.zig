@@ -227,7 +227,7 @@ test "concurrent same-key reads all see the correct value" {
         try testing.expectEqual(null, results[i].err);
         try testing.expectEqualStrings("shared", buffers[i][0 .. results[i].len orelse 0]);
     }
-    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers.load(.seq_cst));
 }
 
 test "a corrupted read releases its pin so close does not hang" {
@@ -240,7 +240,7 @@ test "a corrupted read releases its pin so close does not hang" {
 
     var output: [128]u8 = undefined;
     try testing.expectError(error.ChecksumMismatch, shard.get(item(1, 0, "").key, &output));
-    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers.load(.seq_cst));
 
     try shard.close();
 }
@@ -270,7 +270,7 @@ test "getMany resolves multiple keys in one region with one pin" {
     try testing.expectEqualStrings("bb", out1[0..results[1].value.len]);
     try testing.expectEqual(Shard.ReadStatus.ok, results[2].status);
     try testing.expectEqualStrings("c", out2[0..results[2].value.len]);
-    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers.load(.seq_cst));
 }
 
 test "getMany reports independent status per key" {
@@ -295,7 +295,7 @@ test "getMany reports independent status per key" {
     try testing.expectEqual(Shard.ReadStatus.buffer_too_small, results[1].status);
     try testing.expectEqual(@as(usize, 5), results[1].required);
     try testing.expectEqual(Shard.ReadStatus.not_found, results[2].status);
-    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers.load(.seq_cst));
 }
 
 test "getMany rejects a batch over the key limit" {
@@ -343,7 +343,7 @@ test "getMany runs alongside a plain get on the same shard" {
     try testing.expectEqual(Shard.ReadStatus.ok, many_results[0].status);
     try testing.expectEqual(Shard.ReadStatus.ok, many_results[1].status);
     try testing.expectEqual(null, single_result.err);
-    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers.load(.seq_cst));
 }
 
 const Gated = struct {
@@ -419,7 +419,7 @@ test "a pinned get reads its captured location while writers overwrite, rehash a
 
     try testing.expectEqual(null, result.err);
     try testing.expectEqualStrings("old", output[0..result.len.?]);
-    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers.load(.seq_cst));
     var fresh: [3]u8 = undefined;
     try testing.expectEqual(null, try shard.get(item(1, 0, "").key, &fresh));
 }
@@ -450,7 +450,7 @@ test "a pinned getMany reads its captured locations while writers overwrite, reh
     try testing.expectEqualStrings("old", results[0].value);
     try testing.expectEqual(GatedShard.ReadStatus.ok, results[1].status);
     try testing.expectEqualStrings("kept", results[1].value);
-    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers.load(.seq_cst));
 }
 
 const NullPublisher = struct {
@@ -561,5 +561,5 @@ test "keys from another region never alias this region's packed index entries" {
         entry.key = alias;
         try testing.expectError(error.RegionMismatch, shard.unchanged(entry));
     }
-    try testing.expectEqual(@as(usize, 0), shard.generation.readers);
+    try testing.expectEqual(@as(usize, 0), shard.generation.readers.load(.seq_cst));
 }

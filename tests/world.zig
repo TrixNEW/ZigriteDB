@@ -124,7 +124,7 @@ test "world releases its lock even when a shard cannot flush" {
     var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
     defer world.deinit();
     _ = try world.write(.{ .entries = &.{item(1, 0, "saved")} });
-    world.slots[0].store.shard.writer.failed = true;
+    world.slots[0].opened.store.shard.writer.failed = true;
     try testing.expectError(error.WriterFailed, world.close());
     var reopened = try db.World.open(testing.allocator, io, tmp.dir, .{});
     defer reopened.deinit();
@@ -156,25 +156,25 @@ test "busy shards stay pinned while other regions write and close waits" {
     var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .max_open_shards = 2 });
     defer world.deinit();
     _ = try world.write(.{ .entries = &.{item(1, 0, "first")} });
-    const first = world.slots[0].store;
+    const first = &world.slots[0].opened.store;
     _ = try world.write(.{ .entries = &.{item(1, 32, "second")} });
 
-    first.shard.mutex.lockUncancelable(io);
+    first.shard.table.lockUncancelable(io);
     var locked = true;
-    defer if (locked) first.shard.mutex.unlock(io);
+    defer if (locked) first.shard.table.unlock(io);
     var read_result: anyerror!void = error.Unexpected;
     const reader = try std.Thread.spawn(.{}, readPinned, .{ &world, &read_result });
     var joined = false;
     defer if (!joined) reader.join();
     defer if (locked) {
-        first.shard.mutex.unlock(io);
+        first.shard.table.unlock(io);
         locked = false;
     };
     while (true) {
         world.mutex.lockUncancelable(io);
         var pinned = false;
         for (world.slots[0..world.count]) |slot| {
-            if (slot.store == first) pinned = slot.users != 0;
+            if (&slot.opened.store == first) pinned = slot.opened.users.load(.seq_cst) != 0;
         }
         world.mutex.unlock(io);
         if (pinned) break;
@@ -195,7 +195,7 @@ test "busy shards stay pinned while other regions write and close waits" {
         std.Thread.yield() catch {};
     }
     const rejected = world.get(item(1, 64, "").key, &output);
-    first.shard.mutex.unlock(io);
+    first.shard.table.unlock(io);
     locked = false;
     closer.join();
     try testing.expectError(error.Closed, rejected);
@@ -233,9 +233,9 @@ test "save groups sync buffered batches and reject mixed regions before writing"
     }));
     try testing.expectEqual(@as(usize, 0), world.count);
     try world.writeGroup(&batches);
-    const writer = &world.slots[0].store.shard.writer;
+    const writer = &world.slots[0].opened.store.shard.writer;
     try testing.expectEqual(writer.offset, writer.synced_offset);
-    try testing.expectEqual(.buffered, world.slots[0].store.shard.options.durability);
+    try testing.expectEqual(.buffered, world.slots[0].opened.store.shard.options.durability);
     try testing.expectError(error.BatchOrder, world.writeGroup(&batches));
     try world.close();
     var reopened = try db.World.open(testing.allocator, io, tmp.dir, .{});

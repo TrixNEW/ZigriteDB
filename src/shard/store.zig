@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const lock = @import("../lock.zig");
+
 const WriteBatch = @import("../batch/write.zig").WriteBatch;
 const Entry = @import("../format/entry.zig").Entry;
 const Key = @import("../format/key.zig").Key;
@@ -214,9 +216,9 @@ pub const Store = struct {
 
     fn commitWrite(self: *Store, batch: WriteBatch, assign: ?[]Entry) !writer.AppendResult {
         var result, const ticket = blk: {
-            try self.writer_mutex.lock(self.io);
+            try lock.lock(&self.writer_mutex, self.io);
             defer self.writer_mutex.unlock(self.io);
-            try self.mutex.lock(self.io);
+            try lock.lock(&self.mutex, self.io);
             defer self.mutex.unlock(self.io);
 
             if (assign) |entries| {
@@ -237,9 +239,9 @@ pub const Store = struct {
     pub fn writeGroup(self: *Store, batches: []const WriteBatch) !void {
         try @import("../batch/group.zig").validate(batches);
         const ticket = blk: {
-            try self.writer_mutex.lock(self.io);
+            try lock.lock(&self.writer_mutex, self.io);
             defer self.writer_mutex.unlock(self.io);
-            try self.mutex.lock(self.io);
+            try lock.lock(&self.mutex, self.io);
             defer self.mutex.unlock(self.io);
             if (self.closed) return error.Closed;
             if (self.shard.writer.failed) return error.WriterFailed;
@@ -272,14 +274,14 @@ pub const Store = struct {
     }
 
     fn nextTicket(self: *Store) u64 {
-        self.commit_mutex.lockUncancelable(self.io);
+        lock.lockUncancelable(&self.commit_mutex, self.io);
         defer self.commit_mutex.unlock(self.io);
         self.appended_ticket += 1;
         return self.appended_ticket;
     }
 
     fn waitDurable(self: *Store, ticket: u64) !void {
-        self.commit_mutex.lockUncancelable(self.io);
+        lock.lockUncancelable(&self.commit_mutex, self.io);
         defer self.commit_mutex.unlock(self.io);
 
         while (self.synced_ticket < ticket) {
@@ -293,7 +295,7 @@ pub const Store = struct {
             const target = self.appended_ticket;
             self.commit_mutex.unlock(self.io);
             const result = self.shard.syncAppended();
-            self.commit_mutex.lockUncancelable(self.io);
+            lock.lockUncancelable(&self.commit_mutex, self.io);
             self.syncing = false;
             if (result) |_| self.synced_ticket = target else |err| self.commit_error = err;
             self.committed.broadcast(self.io);
@@ -301,7 +303,7 @@ pub const Store = struct {
     }
 
     fn commitBarrier(self: *Store) !void {
-        self.commit_mutex.lockUncancelable(self.io);
+        lock.lockUncancelable(&self.commit_mutex, self.io);
         defer self.commit_mutex.unlock(self.io);
         defer self.committed.broadcast(self.io);
 
@@ -396,7 +398,7 @@ pub const Store = struct {
 
     /// Writers only wait for the final tail copy, fsync and manifest swap.
     pub fn compact(self: *Store) !CompactionResult {
-        try self.compact_mutex.lock(self.io);
+        try lock.lock(&self.compact_mutex, self.io);
         defer self.compact_mutex.unlock(self.io);
 
         const options = self.shard.options;
@@ -467,9 +469,9 @@ pub const Store = struct {
         }
 
         const retired, const old_devices, const old_count, const count = blk: {
-            try self.writer_mutex.lock(self.io);
+            try lock.lock(&self.writer_mutex, self.io);
             defer self.writer_mutex.unlock(self.io);
-            try self.mutex.lock(self.io);
+            try lock.lock(&self.mutex, self.io);
             defer self.mutex.unlock(self.io);
             if (self.closed) return error.Closed;
             if (self.shard.writer.failed) return error.WriterFailed;
@@ -507,7 +509,7 @@ pub const Store = struct {
 
             published = true;
             {
-                self.directory_mutex.lockUncancelable(self.io);
+                lock.lockUncancelable(&self.directory_mutex, self.io);
                 defer self.directory_mutex.unlock(self.io);
                 var publisher: publication.Publisher(*Directory) = .{ .backend = &self.directory };
                 publisher.publish(bytes) catch |err| {
@@ -564,7 +566,7 @@ pub const Store = struct {
         }
 
         const cleanup = blk: {
-            self.directory_mutex.lockUncancelable(self.io);
+            lock.lockUncancelable(&self.directory_mutex, self.io);
             defer self.directory_mutex.unlock(self.io);
             break :blk reclamation.reclaim(&self.directory, generation, retired.index.generation, retired.segment_ids[0..old_count]);
         };
@@ -617,7 +619,7 @@ pub const Store = struct {
     };
 
     fn end(self: *Store) !End {
-        try self.mutex.lock(self.io);
+        try lock.lock(&self.mutex, self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.Closed;
         if (self.shard.writer.failed) return error.WriterFailed;
@@ -638,8 +640,8 @@ pub const Store = struct {
         var written: usize = 0;
         var count: u32 = 0;
         {
-            self.shard.mutex.lockUncancelable(self.io);
-            defer self.shard.mutex.unlock(self.io);
+            self.shard.table.lockSharedUncancelable(self.io);
+            defer self.shard.table.unlockShared(self.io);
             while (read < batch.records.len) {
                 const decoded = try entry.decodeVerified(batch.records[read..]);
                 const bytes = batch.records[read..][0..decoded.consumed];
@@ -747,20 +749,20 @@ pub const Store = struct {
     }
 
     pub fn reclaim(self: *Store, generation: u64, ids: []const u64) !reclamation.Result {
-        try self.writer_mutex.lock(self.io);
+        try lock.lock(&self.writer_mutex, self.io);
         defer self.writer_mutex.unlock(self.io);
-        try self.mutex.lock(self.io);
+        try lock.lock(&self.mutex, self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.Closed;
         if (self.shard.writer.failed) return error.WriterFailed;
-        self.directory_mutex.lockUncancelable(self.io);
+        lock.lockUncancelable(&self.directory_mutex, self.io);
         defer self.directory_mutex.unlock(self.io);
         return reclamation.reclaim(&self.directory, self.shard.generation.index.generation, generation, ids);
     }
 
     pub fn keys(self: *Store, allocator: std.mem.Allocator, filter: KeyFilter) ![]Key {
         {
-            try self.mutex.lock(self.io);
+            try lock.lock(&self.mutex, self.io);
             defer self.mutex.unlock(self.io);
             if (self.closed) return error.Closed;
         }
@@ -785,14 +787,14 @@ pub const Store = struct {
     }
 
     pub fn lastBatchId(self: *Store) !u64 {
-        try self.mutex.lock(self.io);
+        try lock.lock(&self.mutex, self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.Closed;
         return self.shard.generation.index.last_batch_id;
     }
 
     pub fn valueSize(self: *Store, key: Key) !?u32 {
-        try self.mutex.lock(self.io);
+        try lock.lock(&self.mutex, self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.Closed;
         const location = (try self.shard.generation.index.get(key)) orelse return null;
@@ -800,7 +802,7 @@ pub const Store = struct {
     }
 
     pub fn flush(self: *Store) !void {
-        try self.mutex.lock(self.io);
+        try lock.lock(&self.mutex, self.io);
         defer self.mutex.unlock(self.io);
 
         if (self.closed) return error.Closed;
@@ -809,11 +811,11 @@ pub const Store = struct {
     }
 
     pub fn close(self: *Store) !void {
-        self.compact_mutex.lockUncancelable(self.io);
+        lock.lockUncancelable(&self.compact_mutex, self.io);
         defer self.compact_mutex.unlock(self.io);
-        self.writer_mutex.lockUncancelable(self.io);
+        lock.lockUncancelable(&self.writer_mutex, self.io);
         defer self.writer_mutex.unlock(self.io);
-        self.mutex.lockUncancelable(self.io);
+        lock.lockUncancelable(&self.mutex, self.io);
         defer self.mutex.unlock(self.io);
 
         if (self.closed) return;
@@ -826,11 +828,11 @@ pub const Store = struct {
     }
 
     pub fn deinit(self: *Store) void {
-        self.compact_mutex.lockUncancelable(self.io);
+        lock.lockUncancelable(&self.compact_mutex, self.io);
         defer self.compact_mutex.unlock(self.io);
-        self.writer_mutex.lockUncancelable(self.io);
+        lock.lockUncancelable(&self.writer_mutex, self.io);
         defer self.writer_mutex.unlock(self.io);
-        self.mutex.lockUncancelable(self.io);
+        lock.lockUncancelable(&self.mutex, self.io);
         defer self.mutex.unlock(self.io);
 
         if (!self.closed) self.release();
@@ -838,7 +840,7 @@ pub const Store = struct {
 
     fn sourceFailure(self: *Store, err: anyerror) anyerror {
         if (err != error.Canceled) {
-            self.mutex.lockUncancelable(self.io);
+            lock.lockUncancelable(&self.mutex, self.io);
             defer self.mutex.unlock(self.io);
             self.shard.writer.failed = true;
         }
@@ -853,7 +855,7 @@ pub const Store = struct {
         errdefer handle.close(self.io);
 
         const device: File = .{ .handle = handle, .io = self.io };
-        self.directory_mutex.lockUncancelable(self.io);
+        lock.lockUncancelable(&self.directory_mutex, self.io);
         defer self.directory_mutex.unlock(self.io);
         var publisher: publication.Publisher(*Directory) = .{ .backend = &self.directory };
         try self.shard.rotate(device, id, &publisher);

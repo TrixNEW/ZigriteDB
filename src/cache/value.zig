@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const lock = @import("../lock.zig");
+
 const Key = @import("../format/key.zig").Key;
 const Stats = @import("../stats.zig").Stats;
 
@@ -27,13 +29,14 @@ pub const Cache = struct {
 
     const Slot = struct {
         key: Key,
+        hash: u64,
         batch_id: u64,
         buffer: []u8,
         len: usize,
         referenced: bool = false,
     };
 
-    const seen_len = 1024;
+    const counts_len = 4096;
 
     const Shard = struct {
         mutex: std.Io.Mutex = .init,
@@ -42,8 +45,10 @@ pub const Cache = struct {
         hand: usize = 0,
         used: usize = 0,
         capacity: usize,
-        // Recent misses; when full, a key is only admitted on its second miss.
-        seen: [seen_len]u32 = @splat(0),
+        // Rough, decaying read counts: a full shard only takes a key read more often than
+        // the one it would evict.
+        counts: [counts_len]u8 = @splat(0),
+        touches: usize = 0,
 
         fn take(self: *Shard, index: usize) []u8 {
             const slot = self.slots.items[index];
@@ -54,12 +59,28 @@ pub const Cache = struct {
             return slot.buffer;
         }
 
-        fn admit(self: *Shard, hash: u64) bool {
-            const tag: u32 = @truncate(hash >> 32 | 1);
-            const i: usize = @intCast((hash >> 16) % seen_len);
-            if (self.seen[i] == tag) return true;
-            self.seen[i] = tag;
-            return false;
+        fn touch(self: *Shard, hash: u64) void {
+            const count = &self.counts[@intCast((hash >> 16) % counts_len)];
+            if (count.* < 15) count.* += 1;
+            self.touches += 1;
+            if (self.touches < counts_len * 8) return;
+            self.touches = 0;
+            for (&self.counts) |*value| value.* >>= 1;
+        }
+
+        fn frequency(self: *const Shard, hash: u64) u8 {
+            return self.counts[@intCast((hash >> 16) % counts_len)];
+        }
+
+        /// The slot the clock would evict next, clearing reference bits on the way.
+        fn victim(self: *Shard) usize {
+            while (true) {
+                if (self.hand >= self.slots.items.len) self.hand = 0;
+                const slot = &self.slots.items[self.hand];
+                if (!slot.referenced) return self.hand;
+                slot.referenced = false;
+                self.hand += 1;
+            }
         }
     };
 
@@ -87,9 +108,11 @@ pub const Cache = struct {
     }
 
     pub fn get(self: *Cache, io: std.Io, key: Key, batch_id: u64, output: []u8) ?[]const u8 {
-        const shard = &self.shards[hashKey(key) % self.shards.len];
-        shard.mutex.lockUncancelable(io);
+        const hash = hashKey(key);
+        const shard = &self.shards[hash % self.shards.len];
+        lock.lockUncancelable(&shard.mutex, io);
         defer shard.mutex.unlock(io);
+        shard.touch(hash);
 
         const hit: ?[]const u8 = blk: {
             const index = shard.map.get(key) orelse break :blk null;
@@ -110,7 +133,7 @@ pub const Cache = struct {
         const size = sizeClass(value.len);
         if (size + entry_overhead > shard.capacity) return;
 
-        shard.mutex.lockUncancelable(io);
+        lock.lockUncancelable(&shard.mutex, io);
         defer shard.mutex.unlock(io);
 
         var reuse: ?[]u8 = null;
@@ -125,17 +148,12 @@ pub const Cache = struct {
                 return;
             }
             self.allocator.free(shard.take(index));
-        } else if (shard.used + size + entry_overhead > shard.capacity and !shard.admit(hash)) return;
+        } else if (shard.used + size + entry_overhead > shard.capacity) {
+            if (shard.frequency(hash) <= shard.frequency(shard.slots.items[shard.victim()].hash)) return;
+        }
 
         while (shard.used + size + entry_overhead > shard.capacity) {
-            if (shard.hand >= shard.slots.items.len) shard.hand = 0;
-            const slot = &shard.slots.items[shard.hand];
-            if (slot.referenced) {
-                slot.referenced = false;
-                shard.hand += 1;
-                continue;
-            }
-            const buffer = shard.take(shard.hand);
+            const buffer = shard.take(shard.victim());
             if (reuse == null and buffer.len == size) reuse = buffer else self.allocator.free(buffer);
             if (self.stats) |s| _ = s.cache_evictions.fetchAdd(1, .monotonic);
         }
@@ -144,7 +162,7 @@ pub const Cache = struct {
         shard.slots.ensureUnusedCapacity(self.allocator, 1) catch return self.allocator.free(buffer);
         shard.map.put(self.allocator, key, @intCast(shard.slots.items.len)) catch return self.allocator.free(buffer);
         @memcpy(buffer[0..value.len], value);
-        shard.slots.appendAssumeCapacity(.{ .key = key, .batch_id = batch_id, .buffer = buffer, .len = value.len });
+        shard.slots.appendAssumeCapacity(.{ .key = key, .hash = hash, .batch_id = batch_id, .buffer = buffer, .len = value.len });
         shard.used += size + entry_overhead;
     }
 };

@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const lock = @import("../lock.zig");
+
 const commit = @import("../batch/commit.zig");
 const WriteBatch = @import("../batch/write.zig").WriteBatch;
 const entry = @import("../format/entry.zig");
@@ -45,11 +47,15 @@ pub fn Shard(comptime Device: type) type {
         generation: *Generation,
         options: Options,
         scratch: []u8,
+        // Serializes writers and guards `idle`.
         mutex: std.Io.Mutex = .init,
+        // Shared for readers; exclusive to change the generation, index or close state.
+        table: std.Io.RwLock = .init,
         idle: std.Io.Condition = .init,
+        drainers: std.atomic.Value(usize) = .init(0),
         closed: bool = false,
         closing: bool = false,
-        // Reusable read buffers, guarded by `mutex`.
+        spare_mutex: std.Io.Mutex = .init,
         spare: std.ArrayListUnmanaged([]u8) = .empty,
         lent: usize = 0,
 
@@ -61,7 +67,7 @@ pub fn Shard(comptime Device: type) type {
             devices: []Device,
             segment_ids: []u64,
             segment_count: usize,
-            readers: usize = 0,
+            readers: std.atomic.Value(usize) = .init(0),
 
             pub fn destroy(self: *Generation) void {
                 self.index.deinit();
@@ -75,7 +81,7 @@ pub fn Shard(comptime Device: type) type {
             generation: *Generation,
             device: Device,
             location: index_module.Location,
-            scratch: []u8,
+            scratch: ?[]u8 = null,
         };
 
         pub const max_batch_keys = 128;
@@ -229,7 +235,7 @@ pub fn Shard(comptime Device: type) type {
         }
 
         pub fn rotate(self: *Self, device: Device, id: u64, publisher: anytype) !void {
-            try self.mutex.lock(self.io);
+            try lock.lock(&self.mutex, self.io);
             defer self.mutex.unlock(self.io);
 
             if (self.closed) return error.Closed;
@@ -264,6 +270,8 @@ pub fn Shard(comptime Device: type) type {
                 return err;
             };
 
+            self.table.lockUncancelable(self.io);
+            defer self.table.unlock(self.io);
             self.generation.devices[self.generation.segment_count] = device;
             self.generation.segment_count = count;
             self.writer = next;
@@ -281,7 +289,7 @@ pub fn Shard(comptime Device: type) type {
 
         /// Writes as many leading batches as fit in one append.
         pub fn writeBatches(self: *Self, batches: []const WriteBatch, validated: bool) !Written {
-            try self.mutex.lock(self.io);
+            try lock.lock(&self.mutex, self.io);
             defer self.mutex.unlock(self.io);
 
             if (self.closed) return error.Closed;
@@ -306,16 +314,24 @@ pub fn Shard(comptime Device: type) type {
                 count += 1;
             }
 
-            const prepared = try self.generation.index.prepareBatches(batches[0..count], self.writer.offset, self.generation.segment_count - 1);
+            const prepared = blk: {
+                self.table.lockUncancelable(self.io);
+                defer self.table.unlock(self.io);
+                break :blk try self.generation.index.prepareBatches(batches[0..count], self.writer.offset, self.generation.segment_count - 1);
+            };
             const result = try self.writer.appendTrusted(buffer[0..used], batches[count - 1].id(), self.options.durability);
-            self.generation.index.publish(prepared);
+            {
+                self.table.lockUncancelable(self.io);
+                defer self.table.unlock(self.io);
+                self.generation.index.publish(prepared);
+            }
             self.generation.index.active_offset = @intCast(result.end);
             return .{ .result = result, .count = count };
         }
 
         fn pin(self: *Self, key: Key) !?Pinned {
-            try self.mutex.lock(self.io);
-            defer self.mutex.unlock(self.io);
+            try self.table.lockShared(self.io);
+            defer self.table.unlockShared(self.io);
 
             if (self.closed or self.closing) return error.Closed;
 
@@ -323,50 +339,61 @@ pub fn Shard(comptime Device: type) type {
             const location = (try generation.index.get(key)) orelse return null;
             if (location.segment >= generation.segment_count) return error.IndexMismatch;
 
-            const scratch = try self.lend();
-            generation.readers += 1;
+            _ = generation.readers.fetchAdd(1, .seq_cst);
             return .{
                 .generation = generation,
                 .device = generation.devices[location.segment],
                 .location = location,
-                .scratch = scratch,
             };
         }
 
-        // Reserves room up front so unpin can always take the buffer back.
-        fn lend(self: *Self) ![]u8 {
-            try self.spare.ensureTotalCapacity(self.allocator, self.spare.items.len + self.lent + 1);
-            self.lent += 1;
-            return self.spare.pop() orelse &.{};
+        fn unpin(self: *Self, generation: *Generation, scratch: ?[]u8) void {
+            if (scratch) |buffer| self.giveBack(buffer);
+            if (generation.readers.fetchSub(1, .seq_cst) != 1 or self.drainers.load(.seq_cst) == 0) return;
+            lock.lockUncancelable(&self.mutex, self.io);
+            defer self.mutex.unlock(self.io);
+            self.idle.broadcast(self.io);
         }
 
-        fn unpin(self: *Self, generation: *Generation, scratch: []u8) void {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-
-            generation.readers -= 1;
-            if (generation.readers == 0) self.idle.broadcast(self.io);
-            self.lent -= 1;
-            if (scratch.len == 0) return;
-            if (scratch.len > max_spare_len or self.closed) return self.allocator.free(scratch);
-            self.spare.appendAssumeCapacity(scratch);
+        /// Waits for every reader of `generation`; `mutex` must be held.
+        fn waitReaders(self: *Self, generation: *Generation) void {
+            _ = self.drainers.fetchAdd(1, .seq_cst);
+            defer _ = self.drainers.fetchSub(1, .seq_cst);
+            while (generation.readers.load(.seq_cst) != 0) self.idle.waitUncancelable(self.io, &self.mutex);
         }
 
         const min_spare_len = 64 * 1024;
         const max_spare_len = 1024 * 1024;
 
-        fn fit(self: *Self, scratch: *[]u8, len: usize) ![]u8 {
-            if (scratch.len < len) {
-                self.allocator.free(scratch.*);
+        /// Reserves room in the pool so `giveBack` never allocates.
+        fn borrow(self: *Self, scratch: *?[]u8, len: usize) ![]u8 {
+            if (scratch.* == null) {
+                lock.lockUncancelable(&self.spare_mutex, self.io);
+                defer self.spare_mutex.unlock(self.io);
+                try self.spare.ensureTotalCapacity(self.allocator, self.spare.items.len + self.lent + 1);
+                self.lent += 1;
+                scratch.* = self.spare.pop() orelse &.{};
+            }
+            if (scratch.*.?.len < len) {
+                self.allocator.free(scratch.*.?);
                 scratch.* = &.{};
                 scratch.* = try self.allocator.alloc(u8, @max(len, min_spare_len));
             }
-            return scratch.*[0..len];
+            return scratch.*.?[0..len];
         }
 
-        fn pinMany(self: *Self, requests: []const ReadRequest, slots: []?BatchSlot, scratch: *[]u8) !?*Generation {
-            try self.mutex.lock(self.io);
-            defer self.mutex.unlock(self.io);
+        fn giveBack(self: *Self, buffer: []u8) void {
+            lock.lockUncancelable(&self.spare_mutex, self.io);
+            defer self.spare_mutex.unlock(self.io);
+            self.lent -= 1;
+            if (buffer.len == 0) return;
+            if (buffer.len > max_spare_len) return self.allocator.free(buffer);
+            self.spare.appendAssumeCapacity(buffer);
+        }
+
+        fn pinMany(self: *Self, requests: []const ReadRequest, slots: []?BatchSlot) !?*Generation {
+            try self.table.lockShared(self.io);
+            defer self.table.unlockShared(self.io);
 
             if (self.closed or self.closing) return error.Closed;
 
@@ -383,8 +410,7 @@ pub fn Shard(comptime Device: type) type {
             }
 
             if (hits == 0) return null;
-            scratch.* = try self.lend();
-            generation.readers += 1;
+            _ = generation.readers.fetchAdd(1, .seq_cst);
             return generation;
         }
 
@@ -392,7 +418,7 @@ pub fn Shard(comptime Device: type) type {
             const batch_id = pinned.location.batch_id;
             if (self.options.cache) |cache| if (cache.get(self.io, key, batch_id, output)) |value| return value;
 
-            const scratch = try self.fit(&pinned.scratch, recordLen(pinned.location));
+            const scratch = try self.borrow(&pinned.scratch, recordLen(pinned.location));
             const value = try pinned.generation.index.readAtInto(pinned.location, key, pinned.device, scratch, output);
             if (self.options.cache) |cache| cache.put(self.io, key, batch_id, value);
             return value;
@@ -407,7 +433,7 @@ pub fn Shard(comptime Device: type) type {
             if (location.stored_len != item.header.stored_len or location.raw_len != item.header.raw_len or
                 location.fingerprint != index_module.fingerprint(item.header.compression, item.value)) return false;
 
-            const scratch = try self.fit(&pinned.scratch, recordLen(location));
+            const scratch = try self.borrow(&pinned.scratch, recordLen(location));
             const stored = try pinned.generation.index.readRecordAt(location, item.key, pinned.device, scratch);
             return stored.header.compression == item.header.compression and std.mem.eql(u8, stored.value, item.value);
         }
@@ -416,8 +442,8 @@ pub fn Shard(comptime Device: type) type {
             var list: std.ArrayListUnmanaged(Key) = .empty;
             errdefer list.deinit(allocator);
             {
-                try self.mutex.lock(self.io);
-                defer self.mutex.unlock(self.io);
+                try self.table.lockShared(self.io);
+                defer self.table.unlockShared(self.io);
                 if (self.closed or self.closing) return error.Closed;
                 try self.generation.index.appendKeys(allocator, filter, &list);
             }
@@ -463,8 +489,8 @@ pub fn Shard(comptime Device: type) type {
             const n = requests.len;
 
             var slots: [read_chunk]?BatchSlot = undefined;
-            var scratch: []u8 = &.{};
-            const generation = (try self.pinMany(requests, slots[0..n], &scratch)) orelse return;
+            var scratch: ?[]u8 = null;
+            const generation = (try self.pinMany(requests, slots[0..n])) orelse return;
             defer self.unpin(generation, scratch);
 
             for (requests, slots[0..n], results) |request, *slot, *result| {
@@ -499,7 +525,7 @@ pub fn Shard(comptime Device: type) type {
                     end = @max(end, next_end);
                 }
 
-                const bytes = try self.fit(&scratch, @intCast(end - start));
+                const bytes = try self.borrow(&scratch, @intCast(end - start));
                 try generation.devices[head.segment_position].readExact(bytes, start);
                 if (generation.index.stats) |s| {
                     _ = s.disk_reads.fetchAdd(1, .monotonic);
@@ -539,9 +565,11 @@ pub fn Shard(comptime Device: type) type {
         }
 
         pub fn swap(self: *Self, generation: *Generation, next_writer: writer_module.Writer(Device)) *Generation {
-            self.mutex.lockUncancelable(self.io);
+            lock.lockUncancelable(&self.mutex, self.io);
             defer self.mutex.unlock(self.io);
 
+            self.table.lockUncancelable(self.io);
+            defer self.table.unlock(self.io);
             const old = self.generation;
             self.generation = generation;
             self.writer = next_writer;
@@ -549,14 +577,13 @@ pub fn Shard(comptime Device: type) type {
         }
 
         pub fn drain(self: *Self, generation: *Generation) void {
-            self.mutex.lockUncancelable(self.io);
+            lock.lockUncancelable(&self.mutex, self.io);
             defer self.mutex.unlock(self.io);
-
-            while (generation.readers != 0) self.idle.waitUncancelable(self.io, &self.mutex);
+            self.waitReaders(generation);
         }
 
         pub fn flush(self: *Self) !void {
-            try self.mutex.lock(self.io);
+            try lock.lock(&self.mutex, self.io);
             defer self.mutex.unlock(self.io);
 
             if (self.closed) return error.Closed;
@@ -565,13 +592,13 @@ pub fn Shard(comptime Device: type) type {
         }
 
         pub fn syncAppended(self: *Self) !void {
-            const device, const segment_id, const offset = blk: {
-                try self.mutex.lock(self.io);
+            const device, const header, const offset = blk: {
+                try lock.lock(&self.mutex, self.io);
                 defer self.mutex.unlock(self.io);
                 if (self.closed) return error.Closed;
                 if (self.writer.failed) return error.WriterFailed;
                 if (self.writer.synced_offset == self.writer.offset) return;
-                break :blk .{ self.writer.device, self.writer.header.segment_id, self.writer.offset };
+                break :blk .{ self.writer.device, self.writer.header, self.writer.offset };
             };
 
             const started: ?std.Io.Clock.Timestamp = if (self.options.stats != null) std.Io.Clock.Timestamp.now(self.io, .awake) else null;
@@ -581,39 +608,48 @@ pub fn Shard(comptime Device: type) type {
                 if (started) |t| _ = s.fsync_duration_ns.fetchAdd(@intCast(t.untilNow(self.io).raw.nanoseconds), .monotonic);
             }
 
-            self.mutex.lockUncancelable(self.io);
+            lock.lockUncancelable(&self.mutex, self.io);
             defer self.mutex.unlock(self.io);
             result catch |err| {
                 self.writer.failed = true;
                 return err;
             };
-            if (self.writer.header.segment_id == segment_id and offset > self.writer.synced_offset) self.writer.synced_offset = offset;
+            const same = self.writer.header.segment_id == header.segment_id and self.writer.header.generation == header.generation;
+            if (same and offset > self.writer.synced_offset) self.writer.synced_offset = offset;
         }
 
         pub fn close(self: *Self) !void {
-            self.mutex.lockUncancelable(self.io);
+            lock.lockUncancelable(&self.mutex, self.io);
             defer self.mutex.unlock(self.io);
 
             if (self.closed) return;
 
-            self.closing = true;
+            self.setClosing();
             const result = self.writer.flush();
             self.release();
             try result;
         }
 
         pub fn deinit(self: *Self) void {
-            self.mutex.lockUncancelable(self.io);
+            lock.lockUncancelable(&self.mutex, self.io);
             defer self.mutex.unlock(self.io);
 
             if (!self.closed) {
-                self.closing = true;
+                self.setClosing();
                 self.release();
             }
         }
 
+        fn setClosing(self: *Self) void {
+            self.table.lockUncancelable(self.io);
+            defer self.table.unlock(self.io);
+            self.closing = true;
+        }
+
         fn release(self: *Self) void {
-            while (self.generation.readers != 0) self.idle.waitUncancelable(self.io, &self.mutex);
+            self.waitReaders(self.generation);
+            self.table.lockUncancelable(self.io);
+            defer self.table.unlock(self.io);
             self.generation.destroy();
             self.allocator.free(self.scratch);
             for (self.spare.items) |buffer| self.allocator.free(buffer);

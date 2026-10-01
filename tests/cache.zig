@@ -176,3 +176,19 @@ test "newer versions and evictions reuse buffers without growing memory" {
         };
     }
 }
+
+test "a full cache still takes in keys that are read often" {
+    const budget = comptime 8 * db.cache.cost(16);
+    var cache = try db.cache.Cache.init(testing.allocator, .{ .bytes = budget, .shards = 1 });
+    defer cache.deinit();
+    var output: [16]u8 = undefined;
+    const value = "0123456789abcdef";
+
+    for (0..8) |x| cache.put(io, key(@intCast(x)), 1, value);
+    cache.put(io, key(100), 1, value);
+    try testing.expectEqual(null, cache.get(io, key(100), 1, &output));
+    for (0..3) |_| _ = cache.get(io, key(100), 1, &output);
+    cache.put(io, key(100), 1, value);
+    try testing.expect(cache.get(io, key(100), 1, &output) != null);
+    try testing.expect(cache.shards[0].used <= budget);
+}
