@@ -1,113 +1,116 @@
 const std = @import("std");
-const Crc32c = @import("crc.zig");
+const crc = @import("crc.zig");
 
-pub const encoded_len = 32;
+/// One chunk record: a 12-byte header, the stored value, then CRC-32C of both.
+///
+///   0  u16  bits 0-9 chunk slot, bit 10 delete, bits 11-12 compression
+///   2  u8   component tag
+///   3  i8   subchunk Y
+///   4  u32  stored length
+///   8  u32  raw length
+pub const header_len = 12;
+pub const overhead = header_len + 4;
 pub const max_value_len = 16 * 1024 * 1024;
 
-pub const Kind = enum(u8) {
-    put = 1,
-    delete = 2,
-    commit = 3,
-};
-
-pub const Compression = enum(u8) {
+pub const Compression = enum(u2) {
     none = 0,
     lz4 = 1,
 };
 
 pub const Error = error{
-    TruncatedHeader,
-    InvalidMagic,
-    UnsupportedVersion,
+    TruncatedRecord,
     ChecksumMismatch,
-    UnknownKind,
-    UnsupportedCompression,
     InvalidFlags,
+    UnsupportedCompression,
     InvalidLength,
-    InvalidBatchId,
 };
 
 pub const Header = struct {
-    kind: Kind,
+    slot: u10,
+    local: u16,
+    delete: bool = false,
     compression: Compression = .none,
     stored_len: u32 = 0,
     raw_len: u32 = 0,
-    batch_id: u64,
-
-    pub fn encode(self: Header) Error![encoded_len]u8 {
-        try self.validate();
-
-        var bytes = [_]u8{0} ** encoded_len;
-
-        @memcpy(bytes[0..4], "ZGRC");
-
-        bytes[4] = 1;
-        bytes[5] = @intFromEnum(self.kind);
-        bytes[6] = @intFromEnum(self.compression);
-
-        std.mem.writeInt(u32, bytes[8..12], self.stored_len, .little);
-        std.mem.writeInt(u32, bytes[12..16], self.raw_len, .little);
-        std.mem.writeInt(u64, bytes[16..24], self.batch_id, .little);
-
-        const checksum = Crc32c.hash(bytes[0..28]);
-        std.mem.writeInt(u32, bytes[28..32], checksum, .little);
-
-        return bytes;
-    }
-
-    pub fn decode(bytes: []const u8) Error!Header {
-        if (bytes.len < encoded_len) return error.TruncatedHeader;
-        if (!std.mem.eql(u8, bytes[0..4], "ZGRC")) return error.InvalidMagic;
-        if (bytes[4] != 1) return error.UnsupportedVersion;
-
-        const expected_checksum = std.mem.readInt(u32, bytes[28..32], .little);
-        const actual_checksum = Crc32c.hash(bytes[0..28]);
-
-        if (expected_checksum != actual_checksum) return error.ChecksumMismatch;
-
-        const reserved = std.mem.readInt(u32, bytes[24..28], .little);
-        if (bytes[7] != 0 or reserved != 0) return error.InvalidFlags;
-
-        const kind = std.enums.fromInt(Kind, bytes[5]) orelse return error.UnknownKind;
-        const compression = std.enums.fromInt(Compression, bytes[6]) orelse return error.UnsupportedCompression;
-
-        const header: Header = .{
-            .kind = kind,
-            .compression = compression,
-            .stored_len = std.mem.readInt(u32, bytes[8..12], .little),
-            .raw_len = std.mem.readInt(u32, bytes[12..16], .little),
-            .batch_id = std.mem.readInt(u64, bytes[16..24], .little),
-        };
-
-        try header.validate();
-
-        return header;
-    }
 
     pub fn validate(self: Header) Error!void {
-        if (self.batch_id == 0) return error.InvalidBatchId;
-
-        const value_too_large =
-            self.stored_len > max_value_len or
-            self.raw_len > max_value_len;
-
-        if (value_too_large) return error.InvalidLength;
-
-        if (self.kind != .put) {
-            const has_value = self.stored_len != 0 or self.raw_len != 0;
-            if (self.compression != .none or has_value) return error.InvalidLength;
-
+        if (self.stored_len > max_value_len or self.raw_len > max_value_len) return error.InvalidLength;
+        if (self.delete) {
+            if (self.stored_len != 0 or self.raw_len != 0 or self.compression != .none) return error.InvalidLength;
             return;
         }
-
         switch (self.compression) {
-            .none => {
-                if (self.stored_len != self.raw_len) return error.InvalidLength;
-            },
-            .lz4 => {
-                const invalid_length = self.stored_len == 0 or self.stored_len >= self.raw_len;
-                if (invalid_length) return error.InvalidLength;
-            },
+            .none => if (self.stored_len != self.raw_len) return error.InvalidLength,
+            .lz4 => if (self.stored_len == 0 or self.stored_len >= self.raw_len) return error.InvalidLength,
         }
     }
+
+    pub fn write(self: Header, bytes: *[header_len]u8) void {
+        const flags: u16 = @as(u16, self.slot) | @as(u16, @intFromBool(self.delete)) << 10 | @as(u16, @intFromEnum(self.compression)) << 11;
+        std.mem.writeInt(u16, bytes[0..2], flags, .little);
+        bytes[2] = @truncate(self.local >> 8);
+        bytes[3] = @as(u8, @truncate(self.local)) ^ 0x80;
+        std.mem.writeInt(u32, bytes[4..8], self.stored_len, .little);
+        std.mem.writeInt(u32, bytes[8..12], self.raw_len, .little);
+    }
+
+    pub fn read(bytes: *const [header_len]u8) Error!Header {
+        const flags = std.mem.readInt(u16, bytes[0..2], .little);
+        if (flags >> 13 != 0) return error.InvalidFlags;
+        const header: Header = .{
+            .slot = @truncate(flags),
+            .delete = flags & (1 << 10) != 0,
+            .compression = switch (@as(u2, @truncate(flags >> 11))) {
+                0 => .none,
+                1 => .lz4,
+                else => return error.UnsupportedCompression,
+            },
+            .local = @as(u16, bytes[2]) << 8 | (bytes[3] ^ 0x80),
+            .stored_len = std.mem.readInt(u32, bytes[4..8], .little),
+            .raw_len = std.mem.readInt(u32, bytes[8..12], .little),
+        };
+        // Only subchunks carry a Y.
+        if (bytes[2] != subchunk_tag and bytes[3] != 0) return error.InvalidFlags;
+        try header.validate();
+        return header;
+    }
 };
+
+const subchunk_tag = 0x2f;
+
+pub const Decoded = struct {
+    header: Header,
+    value: []const u8,
+    checksum: u32,
+    len: usize,
+};
+
+/// Checks one record at the start of `bytes`; the value borrows from it.
+pub fn decode(bytes: []const u8) Error!Decoded {
+    if (bytes.len < overhead) return error.TruncatedRecord;
+    const header = try Header.read(bytes[0..header_len]);
+    if (bytes.len - overhead < header.stored_len) return error.TruncatedRecord;
+    const end = header_len + header.stored_len;
+    const checksum = std.mem.readInt(u32, bytes[end..][0..4], .little);
+    if (checksum != crc.hash(bytes[0..end])) return error.ChecksumMismatch;
+    return .{ .header = header, .value = bytes[header_len..end], .checksum = checksum, .len = end + 4 };
+}
+
+/// Writes the trailing checksum over a record whose header and value are already in place.
+pub fn seal(bytes: []u8) u32 {
+    const end = bytes.len - 4;
+    const checksum = crc.hash(bytes[0..end]);
+    std.mem.writeInt(u32, bytes[end..][0..4], checksum, .little);
+    return checksum;
+}
+
+test "headers round trip and reject bad lengths" {
+    const header: Header = .{ .slot = 1023, .local = 0x2f7c, .compression = .lz4, .stored_len = 5, .raw_len = 9 };
+    var bytes: [header_len]u8 = undefined;
+    header.write(&bytes);
+    try std.testing.expectEqual(header, try Header.read(&bytes));
+
+    const bad: Header = .{ .slot = 0, .local = 0x2c80, .stored_len = 3, .raw_len = 4 };
+    bad.write(&bytes);
+    try std.testing.expectError(error.InvalidLength, Header.read(&bytes));
+}

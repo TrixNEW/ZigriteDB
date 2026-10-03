@@ -2,25 +2,31 @@ const std = @import("std");
 
 const lock = @import("../lock.zig");
 
-const WriteBatch = @import("../batch/write.zig").WriteBatch;
+const write_module = @import("../batch/write.zig");
+const WriteBatch = write_module.WriteBatch;
+const crc = @import("../format/crc.zig");
 const key_format = @import("../format/key.zig");
 const Key = key_format.Key;
 const KeyFilter = key_format.KeyFilter;
-const Entry = @import("../format/entry.zig").Entry;
-const Region = @import("../format/key.zig").Region;
-const segment = @import("../format/segment.zig");
-const store_module = @import("../shard/store.zig");
+const Region = key_format.Region;
+const manifest = @import("../format/manifest.zig");
+const store_module = @import("../region/store.zig");
 const Store = store_module.Store;
+const AppendResult = store_module.AppendResult;
 const Directory = @import("../storage/directory.zig").Directory;
-const AppendResult = @import("../storage/writer.zig").AppendResult;
+const File = @import("../io/file.zig").File;
 
 const cache_module = @import("../cache/value.zig");
 
 pub const Options = struct {
-    max_open_shards: usize = 16,
-    shard: store_module.Options = .{},
+    max_open_regions: usize = 16,
+    region: store_module.Options = .{},
     cache: cache_module.Options = .{},
 };
+
+/// World format marker: "ZGWD", u16 version, u16 zero, CRC-32C of the first 8 bytes.
+pub const format_file = "ZIGRITE";
+pub const format_version = 2;
 
 pub const Compactor = struct {
     context: *anyopaque,
@@ -30,6 +36,8 @@ pub const Compactor = struct {
 pub const ReadRequest = store_module.ReadRequest;
 pub const ReadStatus = store_module.ReadStatus;
 pub const ReadResult = store_module.ReadResult;
+pub const ChunkRecord = store_module.ChunkRecord;
+pub const ChunkResult = store_module.ChunkResult;
 
 pub const World = struct {
     allocator: std.mem.Allocator,
@@ -69,34 +77,47 @@ pub const World = struct {
     };
 
     pub fn open(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: Options) !World {
-        if (options.max_open_shards == 0 or options.max_open_shards > 1024) return error.InvalidShardLimit;
-        try options.shard.validate();
+        if (options.max_open_regions == 0 or options.max_open_regions > 1024) return error.InvalidRegionLimit;
+        try options.region.validate();
         var directory = try Directory.init(dir, io);
         errdefer directory.deinit();
-        const slots = try allocator.alloc(Slot, options.max_open_shards);
+        // Region directories a crashed process created may not be durable yet.
+        try directory.syncEntries();
+        try checkFormat(&directory);
+        const slots = try allocator.alloc(Slot, options.max_open_regions);
         errdefer allocator.free(slots);
 
         var result: World = .{ .allocator = allocator, .io = io, .directory = directory, .options = options, .slots = slots };
-        try result.positions.ensureTotalCapacity(allocator, @intCast(options.max_open_shards));
+        try result.positions.ensureTotalCapacity(allocator, @intCast(options.max_open_regions));
         errdefer result.positions.deinit(allocator);
         if (options.cache.bytes > 0) {
             const cache = try allocator.create(cache_module.Cache);
             errdefer allocator.destroy(cache);
             cache.* = try cache_module.Cache.init(allocator, options.cache);
-            cache.stats = options.shard.stats;
-            result.options.shard.cache = cache;
+            cache.stats = options.region.stats;
+            result.options.region.cache = cache;
         }
         return result;
     }
 
+    /// Writes one atomic batch; `batch.id` zero takes the region's next ID.
     pub fn write(self: *World, batch: WriteBatch) !AppendResult {
-        const size = try batch.size();
-        if (size > self.options.shard.batch_buffer_size) return error.BufferTooSmall;
-        if (size > self.options.shard.max_segment_size - segment.encoded_len) return error.BatchTooLarge;
-        const store = (try self.acquire(batch.entries[0].key.region(), true)).?;
+        const size = try batch.validate();
+        if (size > self.options.region.batch_buffer_size) return error.BufferTooSmall;
+        const store = (try self.acquire(batch.region(), true)).?;
         defer self.unpin(store);
         defer self.suggest(store);
         return store.write(batch);
+    }
+
+    /// A save barrier for one region: one append, durable on return.
+    pub fn writeGroup(self: *World, batches: []const WriteBatch) !AppendResult {
+        const size = try write_module.validateGroup(batches);
+        if (size > self.options.region.batch_buffer_size) return error.BufferTooSmall;
+        const store = (try self.acquire(batches[0].region(), true)).?;
+        defer self.unpin(store);
+        defer self.suggest(store);
+        return store.writeGroup(batches);
     }
 
     fn suggest(self: *World, store: *Store) void {
@@ -104,40 +125,15 @@ pub const World = struct {
         if (store.wantsCompaction()) compactor.submit(compactor.context, store.region);
     }
 
-    pub fn writeNext(self: *World, entries: []Entry) !AppendResult {
-        for (entries) |*item| item.header.batch_id = 1;
-        const batch: WriteBatch = .{ .entries = entries };
-        const size = try batch.size();
-        if (size > self.options.shard.batch_buffer_size) return error.BufferTooSmall;
-        if (size > self.options.shard.max_segment_size - segment.encoded_len) return error.BatchTooLarge;
-        const store = (try self.acquire(entries[0].key.region(), true)).?;
-        defer self.unpin(store);
-        defer self.suggest(store);
-        return store.writeNext(entries);
-    }
-
-    pub fn writeGroup(self: *World, batches: []const WriteBatch) !void {
-        try @import("../batch/group.zig").validate(batches);
-        for (batches) |batch| {
-            const size = try batch.size();
-            if (size > self.options.shard.batch_buffer_size) return error.BufferTooSmall;
-            if (size > self.options.shard.max_segment_size - segment.encoded_len) return error.BatchTooLarge;
-        }
-        const store = (try self.acquire(batches[0].entries[0].key.region(), true)).?;
-        defer self.unpin(store);
-        defer self.suggest(store);
-        try store.writeGroup(batches);
-    }
-
     pub fn get(self: *World, key: Key, output: []u8) !?[]const u8 {
-        _ = try key.encode();
+        try key.validate();
         const store = (try self.acquire(key.region(), false)) orelse return null;
         defer self.unpin(store);
         return store.get(key, output);
     }
 
     pub fn warm(self: *World, key: Key) !void {
-        if (self.options.shard.cache == null) return;
+        if (self.options.region.cache == null) return;
         const size = (try self.valueSize(key)) orelse return;
         const buffer = try self.allocator.alloc(u8, size);
         defer self.allocator.free(buffer);
@@ -146,7 +142,7 @@ pub const World = struct {
 
     pub fn getSized(self: *World, key: Key, output: []u8, required: *usize) !?[]const u8 {
         required.* = 0;
-        _ = try key.encode();
+        try key.validate();
         const store = (try self.acquire(key.region(), false)) orelse return null;
         defer self.unpin(store);
         return store.getSized(key, output, required);
@@ -154,7 +150,7 @@ pub const World = struct {
 
     pub fn getMany(self: *World, requests: []const ReadRequest, results: []ReadResult) !void {
         std.debug.assert(requests.len == results.len);
-        for (requests) |request| _ = try request.key.encode();
+        for (requests) |request| try request.key.validate();
         @memset(results, .{});
         if (requests.len == 0) return;
 
@@ -165,8 +161,16 @@ pub const World = struct {
         }
     }
 
-    // Kept small: ReleaseSafe fills undefined stack arrays.
     const read_chunk = 32;
+
+    /// Reads every component of one chunk in a single call; see `Store.getChunk`.
+    pub fn getChunk(self: *World, dimension: i32, chunk_x: i32, chunk_z: i32, buffer: []u8, records: []ChunkRecord, result: *ChunkResult) !void {
+        result.* = .{ .count = 0, .required = 0 };
+        const region: Region = .{ .dimension = dimension, .x = chunk_x >> 5, .z = chunk_z >> 5 };
+        const store = (try self.acquire(region, false)) orelse return;
+        defer self.unpin(store);
+        return store.getChunk(chunk_x, chunk_z, buffer, records, result);
+    }
 
     fn getManyChunk(self: *World, requests: []const ReadRequest, results: []ReadResult) !void {
         const first = requests[0].key.region();
@@ -266,7 +270,7 @@ pub const World = struct {
         return result;
     }
 
-    fn parseRegionName(name: []const u8) ?Region {
+    pub fn parseRegionName(name: []const u8) ?Region {
         if (name.len != 33 or name[8] != '-' or name[17] != '-' or !std.mem.endsWith(u8, name, ".region")) return null;
         var parts: [3]i32 = undefined;
         for (&parts, 0..) |*part, i| {
@@ -274,6 +278,59 @@ pub const World = struct {
             part.* = @bitCast(std.fmt.parseInt(u32, hex, 16) catch return null);
         }
         return .{ .dimension = parts[0], .x = parts[1], .z = parts[2] };
+    }
+
+    /// Creates the format marker in an empty world, and refuses v1 worlds that need migrating.
+    fn checkFormat(directory: *Directory) !void {
+        var bytes: [12]u8 = undefined;
+        const io = directory.io;
+        if (directory.dir.openFile(io, format_file, .{})) |file| {
+            defer file.close(io);
+            const device: File = .{ .handle = file, .io = io };
+            if (try device.length() != bytes.len) return error.InvalidFormatFile;
+            try device.readExact(&bytes, 0);
+            if (!std.mem.eql(u8, bytes[0..4], "ZGWD") or std.mem.readInt(u32, bytes[8..12], .little) != crc.hash(bytes[0..8])) return error.InvalidFormatFile;
+            const found = std.mem.readInt(u16, bytes[4..6], .little);
+            if (found < format_version) return error.NeedsMigration;
+            if (found > format_version) return error.UnsupportedVersion;
+            return;
+        } else |err| if (err != error.FileNotFound) return err;
+
+        // Without a marker, a region's manifest tells the format.
+        var iterator = directory.dir.iterate();
+        while (try iterator.next(io)) |entry| {
+            if (entry.kind != .directory or parseRegionName(entry.name) == null) continue;
+            const region_dir = directory.dir.openDir(io, entry.name, .{ .follow_symlinks = false }) catch continue;
+            defer region_dir.close(io);
+            const file = region_dir.openFile(io, "MANIFEST", .{}) catch continue;
+            defer file.close(io);
+            var head: [6]u8 = undefined;
+            (File{ .handle = file, .io = io }).readExact(&head, 0) catch continue;
+            const found = manifest.peekVersion(&head) orelse continue;
+            if (found < format_version) return error.NeedsMigration;
+            if (found > format_version) return error.UnsupportedVersion;
+        }
+        @memcpy(bytes[0..4], "ZGWD");
+        std.mem.writeInt(u16, bytes[4..6], format_version, .little);
+        std.mem.writeInt(u16, bytes[6..8], 0, .little);
+        std.mem.writeInt(u32, bytes[8..12], crc.hash(bytes[0..8]), .little);
+        const file = try directory.dir.createFile(io, format_file ++ ".tmp", .{ .truncate = true });
+        {
+            defer file.close(io);
+            const device: File = .{ .handle = file, .io = io };
+            try device.writeAll(&bytes, 0);
+            try device.sync();
+        }
+        try directory.dir.rename(format_file ++ ".tmp", directory.dir, format_file, io);
+        try directory.syncEntries();
+    }
+
+    pub fn regionName(buffer: *[40]u8, region: Region) []const u8 {
+        return std.fmt.bufPrint(buffer, "{x:0>8}-{x:0>8}-{x:0>8}.region", .{
+            @as(u32, @bitCast(region.dimension)),
+            @as(u32, @bitCast(region.x)),
+            @as(u32, @bitCast(region.z)),
+        }) catch unreachable;
     }
 
     fn regionLessThan(_: void, a: Region, b: Region) bool {
@@ -289,7 +346,7 @@ pub const World = struct {
     }
 
     pub fn valueSize(self: *World, key: Key) !?u32 {
-        _ = try key.encode();
+        try key.validate();
         const store = (try self.acquire(key.region(), false)) orelse return null;
         defer self.unpin(store);
         return store.valueSize(key);
@@ -558,11 +615,7 @@ pub const World = struct {
         }
 
         var name_buffer: [40]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buffer, "{x:0>8}-{x:0>8}-{x:0>8}.region", .{
-            @as(u32, @bitCast(region.dimension)),
-            @as(u32, @bitCast(region.x)),
-            @as(u32, @bitCast(region.z)),
-        });
+        const name = regionName(&name_buffer, region);
         var created = false;
         const dir = self.directory.dir.openDir(self.io, name, .{ .follow_symlinks = false }) catch |err| blk: {
             if (err != error.FileNotFound) return err;
@@ -577,17 +630,17 @@ pub const World = struct {
         opened.* = .{ .store = undefined };
         const store = &opened.store;
         store.* = if (created)
-            try Store.create(self.allocator, self.io, dir, region, self.options.shard)
+            try Store.create(self.allocator, self.io, dir, region, self.options.region)
         else
-            Store.open(self.allocator, self.io, dir, self.options.shard) catch |err| blk: {
+            Store.open(self.allocator, self.io, dir, self.options.region) catch |err| blk: {
                 if ((err != error.MissingManifest and err != error.NeedsRecovery) or !create) return err;
-                break :blk Store.create(self.allocator, self.io, dir, region, self.options.shard) catch |create_err| {
+                break :blk Store.create(self.allocator, self.io, dir, region, self.options.region) catch |create_err| {
                     if (create_err == error.DirectoryNotEmpty) return err;
                     return create_err;
                 };
             };
         errdefer store.deinit();
-        if (!std.meta.eql(store.shard.generation.index.region, region)) return error.RegionMismatch;
+        if (!store.region.eql(region)) return error.RegionMismatch;
         if (created) try self.directory.syncEntries();
         return opened;
     }
@@ -606,10 +659,10 @@ pub const World = struct {
     }
 
     fn release(self: *World) void {
-        if (self.options.shard.cache) |cache| {
+        if (self.options.region.cache) |cache| {
             cache.deinit();
             self.allocator.destroy(cache);
-            self.options.shard.cache = null;
+            self.options.region.cache = null;
         }
         self.table.lockUncancelable(self.io);
         defer self.table.unlock(self.io);

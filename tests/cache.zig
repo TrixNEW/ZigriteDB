@@ -2,11 +2,10 @@ const std = @import("std");
 const db = @import("zigritedb");
 const testing = std.testing;
 const io = testing.io;
-const item = @import("support/shard.zig").item;
-
-fn key(x: i32) db.Key {
-    return item(1, x, "").key;
-}
+const support = @import("support/region.zig");
+const key = support.key;
+const put = support.put;
+const batch = support.batch;
 
 test "hits only match the batch the index points at" {
     var stats: db.Stats = .{};
@@ -62,13 +61,13 @@ fn hammer(cache: *db.cache.Cache, seed: u64, failure: *std.atomic.Value(bool)) v
     var output: [8]u8 = undefined;
     for (0..20_000) |_| {
         const x = rng.random().intRangeLessThan(i32, 0, 64);
-        const batch = rng.random().intRangeLessThan(u64, 1, 4);
+        const id = rng.random().intRangeLessThan(u64, 1, 4);
         var value: [8]u8 = undefined;
         std.mem.writeInt(i32, value[0..4], x, .little);
-        std.mem.writeInt(u32, value[4..8], @intCast(batch), .little);
-        if (cache.get(io, key(x), batch, &output)) |hit| {
+        std.mem.writeInt(u32, value[4..8], @intCast(id), .little);
+        if (cache.get(io, key(x), id, &output)) |hit| {
             if (!std.mem.eql(u8, hit, &value)) failure.store(true, .monotonic);
-        } else cache.put(io, key(x), batch, &value);
+        } else cache.put(io, key(x), id, &value);
     }
 }
 
@@ -84,18 +83,17 @@ test "concurrent gets and puts never return another key's or batch's bytes" {
 }
 
 test "warm pulls a value into the cache so the next read hits" {
-    if (!db.directory.supported) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var stats: db.Stats = .{};
-    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .shard = .{ .stats = &stats }, .cache = .{ .bytes = 64 * 1024 } });
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .region = .{ .stats = &stats }, .cache = .{ .bytes = 64 * 1024 } });
     defer world.deinit();
-    const saved = item(1, 0, "saved");
-    _ = try world.write(.{ .entries = &.{saved} });
+    const saved = put(0, "saved");
+    _ = try world.write(batch(1, &.{saved}));
 
     try world.warm(saved.key);
-    try world.warm(item(1, 1, "").key);
-    try world.warm(item(1, 99 * 32, "").key);
+    try world.warm(key(1));
+    try world.warm(key(99 * 32));
     const hits = stats.cache_hits.load(.monotonic);
     var output: [16]u8 = undefined;
     try testing.expectEqualStrings("saved", (try world.get(saved.key, &output)).?);
@@ -104,40 +102,39 @@ test "warm pulls a value into the cache so the next read hits" {
 }
 
 test "world reads stay correct through overwrites, deletes, compaction and eviction" {
-    if (!db.directory.supported) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var stats: db.Stats = .{};
     var world = try db.World.open(testing.allocator, io, tmp.dir, .{
-        .max_open_shards = 1,
-        .shard = .{ .stats = &stats },
+        .max_open_regions = 1,
+        .region = .{ .stats = &stats },
         .cache = .{ .bytes = 64 * 1024 },
     });
     defer world.deinit();
     var output: [128]u8 = undefined;
-    const first = item(1, 0, "first");
+    const first = put(0, "first");
 
-    _ = try world.write(.{ .entries = &.{first} });
+    _ = try world.write(batch(1, &.{first}));
     try testing.expectEqualStrings("first", (try world.get(first.key, &output)).?);
     try testing.expectEqualStrings("first", (try world.get(first.key, &output)).?);
     try testing.expectEqual(@as(u64, 1), stats.cache_hits.load(.monotonic));
 
-    _ = try world.write(.{ .entries = &.{item(2, 0, "second")} });
+    _ = try world.write(batch(2, &.{put(0, "second")}));
     try testing.expectEqualStrings("second", (try world.get(first.key, &output)).?);
 
     _ = try world.compact(first.key.region());
     try testing.expectEqualStrings("second", (try world.get(first.key, &output)).?);
 
-    _ = try world.write(.{ .entries = &.{item(1, 32, "other")} });
+    _ = try world.write(batch(1, &.{put(32, "other")}));
     const hits = stats.cache_hits.load(.monotonic);
     try testing.expectEqualStrings("second", (try world.get(first.key, &output)).?);
     try testing.expectEqual(hits + 1, stats.cache_hits.load(.monotonic));
 
-    _ = try world.write(.{ .entries = &.{item(3, 0, null)} });
+    _ = try world.write(batch(3, &.{put(0, null)}));
     try testing.expectEqual(null, try world.get(first.key, &output));
 
     var results: [1]db.ReadResult = undefined;
-    _ = try world.write(.{ .entries = &.{item(4, 0, "fourth")} });
+    _ = try world.write(batch(4, &.{put(0, "fourth")}));
     try world.getMany(&.{.{ .key = first.key, .output = &output }}, &results);
     try testing.expectEqualStrings("fourth", results[0].value);
     try world.getMany(&.{.{ .key = first.key, .output = &output }}, &results);

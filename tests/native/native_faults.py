@@ -16,7 +16,10 @@ class Options(c.Structure):
     _fields_ = [(name, c.c_uint32) for name in (
         "version", "struct_size", "max_open_shards", "max_keys", "max_segments", "batch_buffer_size"
     )] + [("max_segment_size", c.c_uint64), ("buffered", c.c_uint32), ("compression_threshold", c.c_uint32),
-          ("cache_bytes", c.c_uint64), ("cache_shards", c.c_uint32), ("skip_unchanged", c.c_uint32)]
+          ("cache_bytes", c.c_uint64), ("cache_shards", c.c_uint32), ("skip_unchanged", c.c_uint32),
+          ("compact_min_bytes", c.c_uint64), ("compact_live_percent", c.c_uint32), ("reserved", c.c_uint32)]
+
+VERSION, SUBCHUNK, ALL_COMPONENTS = 0x2c, 0x2f, 0xffffffff
 
 
 class Key(c.Structure):
@@ -88,7 +91,7 @@ class API:
     def write(self, handle, batch, values):
         buffers = [c.create_string_buffer(value) for value in values]
         operations = (Operation * len(values))(*[
-            Operation(Key(0, i, 0, 0, 5), 0, c.cast(buf, c.c_void_p), len(value))
+            Operation(Key(0, i, 0, 0, VERSION), 0, c.cast(buf, c.c_void_p), len(value))
             for i, (buf, value) in enumerate(zip(buffers, values))
         ])
         return self.lib.zg_write(handle, batch, operations, len(operations))
@@ -96,7 +99,7 @@ class API:
     def write_group(self, handle):
         buffers = [c.create_string_buffer(value) for value in (b"new0", b"new1", b"next0", b"next1")]
         operations = (Operation * 4)(*[
-            Operation(Key(0, i % 2, 0, 0, 5), 0, c.cast(buffer, c.c_void_p), len(buffer) - 1)
+            Operation(Key(0, i % 2, 0, 0, VERSION), 0, c.cast(buffer, c.c_void_p), len(buffer) - 1)
             for i, buffer in enumerate(buffers)
         ])
         batches = (Batch * 2)(
@@ -106,7 +109,7 @@ class API:
         return self.lib.zg_write_group(handle, batches, 2)
 
     def read(self, handle, index):
-        key, length = Key(0, index, 0, 0, 5), c.c_size_t()
+        key, length = Key(0, index, 0, 0, VERSION), c.c_size_t()
         status = self.lib.zg_get(handle, c.byref(key), None, 0, c.byref(length))
         if status != 3:
             return status, b""
@@ -253,7 +256,7 @@ def group_workload(api, path, ack):
             for sequence in range(1, GROUP_ROUNDS + 1):
                 value = group_value(x, sequence)
                 buffer = c.create_string_buffer(value)
-                operation = Operation(Key(0, x, 0, 0, 5), 0, c.cast(buffer, c.c_void_p), len(value))
+                operation = Operation(Key(0, x, 0, 0, VERSION), 0, c.cast(buffer, c.c_void_p), len(value))
                 result = api.lib.zg_write(handle, 0, c.byref(operation), 1)
                 assert result in (0, 7, 8, 12, 14, 15), ("unexpected injected result", result)
                 if result == 0:
@@ -340,7 +343,7 @@ def verify(api, path, recovered, acknowledged):
         handle = api.open(recovered)
         first = api.read(handle, 0)
     second = api.read(handle, 1)
-    assert first[0] == second[0] == 0, (first, second)
+    assert first[0] == second[0] == 0, (path, first, second)
     allowed = [(b"base0", b"base1"), (b"new0", b"new1")]
     if api.grouped:
         allowed.append((b"next0", b"next1"))
@@ -383,14 +386,14 @@ def check_concurrency(library, root, shard_limit=16):
         for batch in range(1, 101):
             value = b"x" * (16 if batch % 2 else 512)
             buffer = c.create_string_buffer(value)
-            operation = Operation(Key(0, x, 0, 0, 5), 0, c.cast(buffer, c.c_void_p), len(value))
+            operation = Operation(Key(0, x, 0, 0, VERSION), 0, c.cast(buffer, c.c_void_p), len(value))
             assert api.lib.zg_write(handle, batch, c.byref(operation), 1) == 0
 
     def reader():
         start.wait()
         for _ in range(300):
             for x in (0, 32):
-                key, required = Key(0, x, 0, 0, 5), c.c_size_t()
+                key, required = Key(0, x, 0, 0, VERSION), c.c_size_t()
                 output = c.create_string_buffer(128)
                 result = api.lib.zg_get(handle, c.byref(key), output, len(output), c.byref(required))
                 if result == 0:
@@ -459,7 +462,7 @@ def check_stats(library, root):
         assert batch_id.value == 2, batch_id.value
         assert api.read(handle, 0) == (0, b"next")
 
-        keys = (Key * 3)(Key(0, 0, 0, 0, 5), Key(0, 0, 0, 0, 5), Key(0, 1, 0, 0, 5))
+        keys = (Key * 3)(Key(0, 0, 0, 0, VERSION), Key(0, 0, 0, 0, VERSION), Key(0, 1, 0, 0, VERSION))
         assert api.lib.zg_prefetch(handle, keys, 3) == 0
         assert api.lib.zg_prefetch(handle, None, 0) == 0
         assert api.lib.zg_prefetch(handle, None, 1) == 2
@@ -470,9 +473,9 @@ def check_stats(library, root):
         assert api.lib.zg_list_regions(handle, regions, 1, c.byref(count)) == 0
         assert (regions[0].dimension, regions[0].x, regions[0].z) == (0, 0, 0)
         keys = (Key * 2)()
-        assert api.lib.zg_list_keys(handle, 0, 0, 0, 0x3f, keys, 2, c.byref(count)) == 0 and count.value == 2
-        assert [(k.x, k.component) for k in keys] == [(0, 5), (1, 5)]
-        assert api.lib.zg_list_keys(handle, 0, 0, 0, 0x1f, keys, 2, c.byref(count)) == 0 and count.value == 0
+        assert api.lib.zg_list_keys(handle, 0, 0, 0, ALL_COMPONENTS, keys, 2, c.byref(count)) == 0 and count.value == 2
+        assert [(k.x, k.component) for k in keys] == [(0, VERSION), (1, VERSION)]
+        assert api.lib.zg_list_keys(handle, 0, 0, 0, SUBCHUNK, keys, 2, c.byref(count)) == 0 and count.value == 0
         assert api.read(handle, 0) == (0, b"next")
     finally:
         assert api.lib.zg_close(handle) == 0

@@ -44,7 +44,7 @@ pub fn build(b: *std.Build) void {
         .name = "zigritedb_native",
         .linkage = .dynamic,
         .root_module = native_module,
-        .version = .{ .major = 2, .minor = 0, .patch = 0 },
+        .version = .{ .major = 3, .minor = 0, .patch = 0 },
     });
     b.installArtifact(native);
     b.installFile("include/zigritedb.h", "include/zigritedb.h");
@@ -68,6 +68,25 @@ pub fn build(b: *std.Build) void {
         const bench_concurrency = addBenchExecutable(b, target, optimize, native, "tests/bench/native_concurrency.c", "native_bench_concurrency", true);
         benchmark.dependOn(&b.addInstallArtifact(bench_concurrency, .{}).step);
     }
+
+    const tool_module = b.createModule(.{
+        .root_source_file = b.path("src/tool/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zigritedb", .module = module }},
+    });
+    const tool = b.addExecutable(.{ .name = "zigrite", .root_module = tool_module });
+    b.installArtifact(tool);
+
+    const micro_module = b.createModule(.{
+        .root_source_file = b.path("tests/bench/micro.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zigritedb", .module = module }},
+    });
+    const micro = b.addRunArtifact(b.addExecutable(.{ .name = "micro", .root_module = micro_module }));
+    if (b.args) |args| micro.addArgs(args);
+    b.step("micro", "Run component micro-benchmarks").dependOn(&micro.step);
 
     const unit_tests = b.addTest(.{ .root_module = module });
     const run_unit_tests = b.addRunArtifact(unit_tests);

@@ -3,13 +3,14 @@ const std = @import("std");
 const Region = @import("../format/key.zig").Region;
 const manifest = @import("../format/manifest.zig");
 const File = @import("../io/file.zig").File;
+const Store = @import("../region/store.zig").Store;
 const Directory = @import("../storage/directory.zig").Directory;
 const files = @import("../storage/files.zig");
+const scan = @import("scan.zig");
 
-const Scanner = @import("file_scan.zig").Scanner(File);
+const Scanner = scan.FileScanner(File);
 
 pub const Options = struct {
-    max_segments: usize = 64,
     max_segment_size: u64 = 256 * 1024 * 1024,
     max_directory_entries: usize = 8192,
 };
@@ -32,36 +33,23 @@ pub const Report = struct {
     orphans: []const Orphan = &.{},
 };
 
-/// Scratch holds one batch plus its segment header. Orphans use the supplied buffer.
+/// Reports what a region directory holds without changing it. `scratch` holds one frame.
 pub fn inspect(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: Options, scratch: []u8, orphans: []Orphan) !Report {
-    if (options.max_segments == 0 or options.max_segments > manifest.max_segments) return error.InvalidOptions;
-
     var directory = try Directory.init(dir, io);
     defer directory.deinit();
     var report: Report = .{};
-    const ids = try allocator.alloc(u64, options.max_segments);
+    const ids = try allocator.alloc(u64, manifest.max_segments);
     defer allocator.free(ids);
     var segments: []const u64 = &.{};
 
-    const handle = files.openManifest(directory.dir, io) catch |err| switch (err) {
-        error.MissingManifest => null,
-        else => return err,
-    };
-    if (handle) |opened| {
-        defer opened.close(io);
-        const file: File = .{ .handle = opened, .io = io };
-        const length = try file.length();
-        if (length > manifest.max_encoded_len) return error.ManifestTooLarge;
-
-        const bytes = try allocator.alloc(u8, @intCast(length));
+    if (Store.readManifest(allocator, io, directory.dir, ids)) |found| {
+        const metadata, const bytes = found;
         defer allocator.free(bytes);
-        try file.readExact(bytes, 0);
-        const metadata = try manifest.decode(bytes, ids);
         segments = metadata.segments;
         report.generation = metadata.generation;
         report.region = metadata.region;
         report.segment_count = segments.len;
-
+        var order: scan.Order = .{ .last_batch_id = metadata.base_batch_id };
         for (segments, 0..) |id, position| {
             const segment_file = try files.openSegment(directory.dir, io, metadata.generation, id, false);
             defer segment_file.close(io);
@@ -69,16 +57,15 @@ pub fn inspect(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, option
                 .generation = metadata.generation,
                 .segment_id = id,
                 .region = metadata.region,
-            }, if (position == segments.len - 1) .active else .sealed, report.last_batch_id, options.max_segment_size);
-
-            while (try scanner.next(scratch)) |_| {
-                report.committed_batches = try std.math.add(u64, report.committed_batches, 1);
-            }
-            report.last_batch_id = scanner.last_batch_id;
+                .salt = metadata.salt,
+            }, if (position == segments.len - 1) .active else .sealed, order, options.max_segment_size);
+            while (try scanner.next(scratch)) |_| report.committed_batches += 1;
+            order = scanner.order;
             report.active_offset = scanner.offset;
             report.has_tail = scanner.has_tail;
         }
-    }
+        report.last_batch_id = order.last_batch_id;
+    } else |err| if (err != error.MissingManifest) return err;
 
     var iterator = directory.dir.iterate();
     var count: usize = 0;
@@ -86,7 +73,7 @@ pub fn inspect(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, option
     while (try iterator.next(io)) |entry| {
         if (count == options.max_directory_entries) return error.TooManyDirectoryEntries;
         count += 1;
-        if (std.mem.eql(u8, entry.name, "MANIFEST")) continue;
+        if (std.mem.eql(u8, entry.name, "MANIFEST") or std.mem.startsWith(u8, entry.name, "INDEX")) continue;
         if (std.mem.eql(u8, entry.name, "MANIFEST.tmp")) {
             report.temporary_manifest = true;
             continue;

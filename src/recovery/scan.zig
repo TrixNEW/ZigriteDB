@@ -1,125 +1,193 @@
 const std = @import("std");
 
-const commit = @import("../batch/commit.zig");
-const entry = @import("../format/entry.zig");
+const frame = @import("../format/frame.zig");
 const record = @import("../format/record.zig");
 const segment = @import("../format/segment.zig");
 
-pub const Error = commit.Error || segment.Error || error{
+pub const Error = frame.Error || segment.Error || error{
     IncompleteBatch,
     BatchOrder,
+    BufferTooSmall,
+    SegmentTooLarge,
 };
 
-/// Active segments may end with an incomplete batch, sealed segments may not
-pub const Mode = enum {
-    sealed,
-    active,
-};
+/// Active segments may end in a torn tail; anything unreadable in a sealed segment is corruption.
+pub const Mode = enum { sealed, active };
 
 pub const Batch = struct {
-    id: u64,
-    records: []const u8,
-    end_offset: usize,
+    header: frame.Header,
+    /// The whole frame, header included.
+    bytes: []const u8,
+    /// Segment offset of the frame's first byte.
+    offset: u64,
+
+    pub fn end(self: Batch) u64 {
+        return self.offset + self.bytes.len;
+    }
+
+    pub fn body(self: Batch) []const u8 {
+        return self.bytes[frame.header_len..];
+    }
 };
 
+/// Ordering carried from one segment of a generation to the next.
+pub const Order = struct {
+    /// Starts at the manifest's base batch ID.
+    last_batch_id: u64 = 0,
+    /// Base frames, which all carry the base ID, may only open a generation.
+    seen_batch: bool = false,
+
+    pub fn accept(self: *Order, header: frame.Header) Error!void {
+        switch (header.kind) {
+            .base => if (self.seen_batch or header.batch_id != self.last_batch_id) return error.BatchOrder,
+            .batch => {
+                if (header.batch_id <= self.last_batch_id) return error.BatchOrder;
+                self.seen_batch = true;
+                self.last_batch_id = header.batch_id;
+            },
+        }
+    }
+};
+
+const Step = union(enum) {
+    batch: Batch,
+    end,
+    /// The frame runs past the bytes available.
+    truncated,
+    invalid: anyerror,
+};
+
+fn noop(_: void, _: usize, _: record.Header, _: []const u8) void {}
+
+fn step(bytes: []const u8, base_offset: u64, salt: u64, order: *Order) Step {
+    if (bytes.len == 0) return .end;
+    const header = frame.verify(bytes, salt, {}, noop) catch |err| return switch (err) {
+        error.TruncatedFrame => .truncated,
+        else => .{ .invalid = err },
+    };
+    var next_order = order.*;
+    next_order.accept(header) catch |err| return .{ .invalid = err };
+    order.* = next_order;
+    return .{ .batch = .{ .header = header, .bytes = bytes[0..header.len()], .offset = base_offset } };
+}
+
+/// Scans a segment that is fully in memory.
 pub const Scanner = struct {
     bytes: []const u8,
     header: segment.Header,
     mode: Mode,
     offset: usize = segment.encoded_len,
-    last_batch_id: u64,
+    order: Order,
     finished: bool = false,
     has_tail: bool = false,
 
-    /// `last_batch_id` is the previous segment's final batch ID, or zero for the first segment
-    pub fn init(bytes: []const u8, expected: segment.Header, mode: Mode, last_batch_id: u64) Error!Scanner {
+    pub fn init(bytes: []const u8, expected: segment.Header, mode: Mode, order: Order) Error!Scanner {
         const header = try segment.Header.decode(bytes);
         try header.checkIdentity(expected);
-
-        return .{
-            .bytes = bytes,
-            .header = header,
-            .mode = mode,
-            .last_batch_id = last_batch_id,
-        };
+        return .{ .bytes = bytes, .header = header, .mode = mode, .order = order };
     }
 
-    /// On error, the scanners committed position remains unchanged
+    /// Errors leave the scanner where it was.
     pub fn next(self: *Scanner) Error!?Batch {
         if (self.finished) return null;
-
-        if (self.offset == self.bytes.len) {
-            self.finished = true;
-            return null;
+        switch (step(self.bytes[self.offset..], self.offset, self.header.salt, &self.order)) {
+            .batch => |batch| {
+                self.offset += batch.bytes.len;
+                return batch;
+            },
+            .end => {
+                self.finished = true;
+                return null;
+            },
+            .truncated => return self.tail(error.IncompleteBatch),
+            .invalid => |err| return self.tail(err),
         }
-
-        var position = self.offset;
-        var count: usize = 0;
-        var batch_id: u64 = 0;
-        var digest = std.crypto.hash.sha2.Sha256.init(.{});
-
-        while (position < self.bytes.len) {
-            const remaining = self.bytes[position..];
-
-            const header = record.Header.decode(remaining) catch |err| switch (err) {
-                error.TruncatedHeader => return self.tail(),
-                else => return err,
-            };
-
-            if (header.kind == .commit) {
-                if (count == 0) return error.InvalidCommit;
-                if (remaining.len < commit.commit_len) return self.tail();
-
-                const records = self.bytes[self.offset..position];
-                try commit.check(remaining[0..commit.commit_len], batch_id, @intCast(count), records.len, digest.finalResult());
-
-                const end = std.math.add(usize, position, commit.commit_len) catch return error.InvalidLength;
-
-                self.offset = end;
-                self.last_batch_id = batch_id;
-
-                return .{
-                    .id = batch_id,
-                    .records = records,
-                    .end_offset = end,
-                };
-            }
-
-            if (count == commit.max_records) return error.BatchTooLarge;
-            if (header.batch_id <= self.last_batch_id) return error.BatchOrder;
-            if (count != 0 and header.batch_id != batch_id) return error.BatchIdMismatch;
-
-            const decoded = entry.decode(remaining) catch |err| switch (err) {
-                error.TruncatedRecord => return self.tail(),
-                else => return err,
-            };
-
-            const region = decoded.entry.key.region();
-            const same_region =
-                region.dimension == self.header.region.dimension and
-                region.x == self.header.region.x and
-                region.z == self.header.region.z;
-
-            if (!same_region) return error.RegionMismatch;
-
-            batch_id = header.batch_id;
-            digest.update(remaining[0..decoded.consumed]);
-            position = std.math.add(usize, position, decoded.consumed) catch return error.BatchTooLarge;
-
-            if (position - self.offset > commit.max_bytes) return error.BatchTooLarge;
-
-            count += 1;
-        }
-
-        return self.tail();
     }
 
-    fn tail(self: *Scanner) Error!?Batch {
-        if (self.mode == .sealed) return error.IncompleteBatch;
-
+    fn tail(self: *Scanner, err: anyerror) Error!?Batch {
+        if (self.mode == .sealed) return @errorCast(err);
         self.has_tail = true;
         self.finished = true;
-
         return null;
     }
 };
+
+/// Scans a segment file through a window of the caller's scratch buffer.
+pub fn FileScanner(comptime Device: type) type {
+    return struct {
+        device: Device,
+        header: segment.Header,
+        mode: Mode,
+        length: u64,
+        offset: u64,
+        order: Order,
+        finished: bool = false,
+        has_tail: bool = false,
+        window: []u8 = &.{},
+        window_start: u64 = 0,
+        window_len: usize = 0,
+
+        const Self = @This();
+
+        pub fn init(device: Device, expected: segment.Header, mode: Mode, order: Order, max_size: u64) !Self {
+            const length = try device.length();
+            if (length > max_size) return error.SegmentTooLarge;
+            if (length < segment.encoded_len) return error.TruncatedHeader;
+            var bytes: [segment.encoded_len]u8 = undefined;
+            try device.readExact(&bytes, 0);
+            const header = try segment.Header.decode(&bytes);
+            try header.checkIdentity(expected);
+            return .{ .device = device, .header = header, .mode = mode, .length = length, .offset = segment.encoded_len, .order = order };
+        }
+
+        /// Starts scanning at `offset`, e.g. after a checkpoint.
+        pub fn seek(self: *Self, offset: u64) !void {
+            if (offset < segment.encoded_len or offset > self.length) return error.InvalidOffset;
+            self.offset = offset;
+        }
+
+        /// Batches borrow `scratch` until the next call, which must pass the same buffer.
+        pub fn next(self: *Self, scratch: []u8) !?Batch {
+            if (self.finished) return null;
+            if (scratch.len < frame.header_len) return error.BufferTooSmall;
+            while (true) {
+                const reusable = scratch.ptr == self.window.ptr and scratch.len == self.window.len and
+                    self.offset >= self.window_start and self.offset <= self.window_start + self.window_len;
+                if (!reusable) try self.refill(scratch);
+                const start: usize = @intCast(self.offset - self.window_start);
+                const bytes = scratch[start..self.window_len];
+                switch (step(bytes, self.offset, self.header.salt, &self.order)) {
+                    .batch => |batch| {
+                        self.offset += batch.bytes.len;
+                        return batch;
+                    },
+                    .end => if (self.offset == self.length) {
+                        self.finished = true;
+                        return null;
+                    } else try self.refill(scratch),
+                    .truncated => {
+                        if (self.window_start + self.window_len == self.length) return self.tail(error.IncompleteBatch);
+                        if (start == 0) return error.BufferTooSmall;
+                        try self.refill(scratch);
+                    },
+                    .invalid => |err| return self.tail(err),
+                }
+            }
+        }
+
+        fn refill(self: *Self, scratch: []u8) !void {
+            const len: usize = @intCast(@min(scratch.len, self.length - self.offset));
+            try self.device.readExact(scratch[0..len], self.offset);
+            self.window = scratch;
+            self.window_start = self.offset;
+            self.window_len = len;
+        }
+
+        fn tail(self: *Self, err: anyerror) !?Batch {
+            if (self.mode == .sealed) return err;
+            self.has_tail = true;
+            self.finished = true;
+            return null;
+        }
+    };
+}

@@ -1,7 +1,6 @@
 const std = @import("std");
 const db = @import("zigritedb");
 const testing = std.testing;
-const item = @import("support/shard.zig").item;
 
 test "lz4 handles literals, long matches and window boundaries" {
     var encoder: db.lz4.Encoder = .{};
@@ -34,46 +33,42 @@ test "lz4 rejects bad offsets, lengths and truncated blocks" {
     try testing.expectError(error.BufferTooSmall, encoder.compress("hello", output[0..2]));
 }
 
-test "compressed entries fall back to raw and validate their payload" {
-    var encoder: db.lz4.Encoder = .{};
-    var scratch: [2048]u8 = undefined;
-    const raw = [_]u8{'a'} ** 1024;
-    const compressed = try item(1, 0, &raw).compress(&encoder, &scratch);
-    try testing.expectEqual(db.record.Compression.lz4, compressed.header.compression);
-    var encoded: [2048]u8 = undefined;
-    const bytes = try compressed.encode(&encoded);
-    _ = try db.entry.decode(bytes);
-    const payload = db.record.encoded_len + db.Key.encoded_len;
-    bytes[payload + 2] = 0;
-    bytes[payload + 3] = 0;
-    const checksum = bytes.len - 4;
-    std.mem.writeInt(u32, bytes[checksum..][0..4], std.hash.crc.Crc32Iscsi.hash(bytes[0..checksum]), .little);
-    try testing.expectError(error.InvalidCompressedData, db.entry.decode(bytes));
-    const small = try item(2, 1, "hello").compress(&encoder, &scratch);
-    try testing.expectEqual(db.record.Compression.none, small.header.compression);
-    try testing.expectEqualStrings("hello", small.value);
-}
-
-test "compressed values survive reopen and compaction" {
-    if (!db.directory.supported) return error.SkipZigTest;
+test "compressed records survive reopen and compaction, and damaged streams fail on read" {
     const io = testing.io;
+    const support = @import("support/region.zig");
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var encoder: db.lz4.Encoder = .{};
-    var scratch: [2048]u8 = undefined;
     const raw = [_]u8{'x'} ** 1024;
-    const compressed = try item(1, 0, &raw).compress(&encoder, &scratch);
-    var store = try db.Store.create(testing.allocator, io, tmp.dir, @import("support/shard.zig").header.region, .{ .batch_buffer_size = 256 });
-    defer store.deinit();
-    _ = try store.write(.{ .entries = &.{compressed} });
-    try store.close();
-    var reopened = try db.Store.open(testing.allocator, io, tmp.dir, .{ .batch_buffer_size = 256 });
+    {
+        var store = try db.Store.create(testing.allocator, io, tmp.dir, support.region, .{ .batch_buffer_size = 2048 });
+        defer store.deinit();
+        _ = try store.write(support.batch(1, &.{support.put(0, &raw)}));
+        try store.close();
+    }
+    var reopened = try db.Store.open(testing.allocator, io, tmp.dir, .{ .batch_buffer_size = 2048 });
     defer reopened.deinit();
     var output: [1024]u8 = undefined;
-    try testing.expectEqualSlices(u8, &raw, (try reopened.get(compressed.key, &output)).?);
-    try testing.expectError(error.BufferTooSmall, reopened.get(compressed.key, output[0..10]));
+    try testing.expectEqualSlices(u8, &raw, (try reopened.get(support.key(0), &output)).?);
+    try testing.expectError(error.BufferTooSmall, reopened.get(support.key(0), output[0..10]));
     _ = try reopened.compact();
-    try testing.expectEqualSlices(u8, &raw, (try reopened.get(compressed.key, &output)).?);
+    try testing.expectEqualSlices(u8, &raw, (try reopened.get(support.key(0), &output)).?);
+
+    // Break the LZ4 stream but keep the record checksum valid.
+    const file = try support.openFile(tmp.dir, "0000000000000002-0000000000000001.segment");
+    defer file.handle.close(io);
+    const start = db.segment.encoded_len + db.frame.header_len;
+    var header: [db.record.header_len]u8 = undefined;
+    try file.readExact(&header, start);
+    const stored = std.mem.readInt(u32, header[4..8], .little);
+    try testing.expect(stored < raw.len);
+    var record: [64]u8 = undefined;
+    const len = db.record.overhead + stored;
+    try file.readExact(record[0..len], start);
+    record[db.record.header_len + 2] = 0;
+    record[db.record.header_len + 3] = 0;
+    _ = db.record.seal(record[0..len]);
+    try file.writeAll(record[0..len], start);
+    try testing.expectError(error.InvalidCompressedData, reopened.get(support.key(0), &output));
     try reopened.close();
 }
 

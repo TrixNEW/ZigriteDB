@@ -7,8 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-_Static_assert(ZG_ABI_VERSION == 2u, "zg_options grew in ABI 2");
-_Static_assert(sizeof(zg_options) == 56, "zg_options layout changed; bump ZG_ABI_VERSION");
+_Static_assert(ZG_ABI_VERSION == 3u, "ABI 3 added compaction thresholds and Bedrock component tags");
+_Static_assert(sizeof(zg_options) == 72, "zg_options layout changed; bump ZG_ABI_VERSION");
 
 int main(int argc, char **argv) {
     assert(argc == 2);
@@ -20,7 +20,8 @@ int main(int argc, char **argv) {
     zg_key key;
     assert(zg_key_init(&key, 1, -32, 64, ZG_SUBCHUNK, -4) == ZG_OK);
     assert(key.dimension == 1 && key.chunk_x == -32 && key.chunk_z == 64 && key.subchunk_y == -4);
-    assert(zg_key_init(&key, 0, 0, 0, ZG_METADATA, 1) == ZG_INVALID_ARGUMENT);
+    assert(zg_key_init(&key, 0, 0, 0, ZG_VERSION, 1) == ZG_INVALID_ARGUMENT);
+    assert(zg_key_init(&key, 0, 0, 0, ZG_SUBCHUNK, 128) == ZG_INVALID_ARGUMENT);
     assert(key.component == ZG_SUBCHUNK && key.subchunk_y == -4);
     assert(zg_key_init(&key, 0, 0, 0, UINT32_MAX, 0) == ZG_INVALID_ARGUMENT);
     assert(zg_key_validate(&key) == ZG_OK);
@@ -41,6 +42,16 @@ int main(int argc, char **argv) {
     options.buffered = 2;
     assert(zg_options_validate(&options) == ZG_INVALID_ARGUMENT);
     options.buffered = ZG_SYNC;
+    assert(options.compact_min_bytes == 16u * 1024u * 1024u && options.compact_live_percent == 50);
+    options.compact_live_percent = 101;
+    assert(zg_options_validate(&options) == ZG_INVALID_ARGUMENT);
+    options.compact_live_percent = 0;
+    assert(zg_options_validate(&options) == ZG_OK);
+    options.compact_live_percent = 50;
+    options.reserved = 1;
+    assert(zg_options_validate(&options) == ZG_INVALID_ARGUMENT);
+    options.reserved = 0;
+    assert(strcmp(zg_status_message(ZG_NEEDS_MIGRATION), "World uses an older format; run zigrite migrate") == 0);
     assert(strcmp(zg_status_message(ZG_NO_SPACE), "Disk full or quota exceeded") == 0);
     assert(strcmp(zg_status_message(ZG_READ_ONLY), "Read-only filesystem") == 0);
     assert(options.version == zg_abi_version() && options.struct_size == sizeof(options));
@@ -54,11 +65,11 @@ int main(int argc, char **argv) {
     assert(zg_open((uint8_t *)argv[1], strlen(argv[1]), &options, &handle) == ZG_INVALID_ARGUMENT);
     assert(handle == NULL);
     options.version = ZG_ABI_VERSION;
-    uint32_t *legacy = malloc(40);
+    uint32_t *legacy = malloc(56);
     assert(legacy != NULL);
-    memcpy(legacy, &options, 40);
-    legacy[0] = 1;
-    legacy[1] = 40;
+    memcpy(legacy, &options, 56);
+    legacy[0] = 2;
+    legacy[1] = 56;
     assert(zg_options_validate((const zg_options *)legacy) == ZG_INVALID_ARGUMENT);
     assert(zg_open((uint8_t *)argv[1], strlen(argv[1]), (const zg_options *)legacy, &handle) == ZG_INVALID_ARGUMENT);
     legacy[0] = ZG_ABI_VERSION;
@@ -71,8 +82,8 @@ int main(int argc, char **argv) {
     uint8_t value[1024], output[1024];
     memset(value, 'x', sizeof(value));
     zg_operation operations[2] = {
-        {{0, 0, 0, 0, 5}, ZG_PUT, value, sizeof(value)},
-        {{0, 1, 0, 0, 5}, ZG_PUT, (uint8_t *)"small", 5}
+        {{0, 0, 0, 0, ZG_VERSION}, ZG_PUT, value, sizeof(value)},
+        {{0, 1, 0, 0, ZG_VERSION}, ZG_PUT, (uint8_t *)"small", 5}
     };
     assert(zg_write(handle, 1, operations, ZG_MAX_BATCH_RECORDS + 1) == ZG_LIMIT);
     operations[0].value_len = ZG_MAX_VALUE_SIZE + 1;
@@ -114,7 +125,7 @@ int main(int argc, char **argv) {
     zg_read_request many_requests[4] = {
         {operations[0].key, many_out0, sizeof(many_out0)},
         {operations[1].key, many_out1, sizeof(many_out1)},
-        {{0, 99, 0, 0, 5}, many_out2, sizeof(many_out2)},
+        {{0, 99, 0, 0, ZG_VERSION}, many_out2, sizeof(many_out2)},
         {operations[1].key, many_out3, sizeof(many_out3)},
     };
     zg_read_result many_results[4];
@@ -128,6 +139,31 @@ int main(int argc, char **argv) {
     assert(many_results[2].status == ZG_NOT_FOUND);
     assert(many_results[3].status == ZG_OK && many_results[3].required == 5);
     assert(memcmp(many_out3, "small", 5) == 0);
+
+    zg_operation chunk_ops[3] = {
+        {{0, 1, 0, 3, ZG_SUBCHUNK}, ZG_PUT, (uint8_t *)"s3", 2},
+        {{0, 1, 0, -2, ZG_SUBCHUNK}, ZG_PUT, (uint8_t *)"s-2", 3},
+        {{0, 1, 0, 0, ZG_BLOCK_ENTITIES}, ZG_PUT, (uint8_t *)"tile", 4},
+    };
+    assert(zg_write(handle, 0, chunk_ops, 3) == ZG_OK);
+    uint8_t chunk_buffer[64];
+    zg_chunk_record records[8];
+    size_t count = 0;
+    assert(zg_get_chunk(handle, 0, 1, 0, chunk_buffer, 4, records, 8, &count, &required) == ZG_BUFFER_TOO_SMALL);
+    assert(count == 4 && required == 5 + 2 + 3 + 4);
+    assert(zg_get_chunk(handle, 0, 1, 0, chunk_buffer, sizeof(chunk_buffer), records, 8, &count, &required) == ZG_OK);
+    assert(records[0].component == ZG_VERSION && records[0].length == 5);
+    assert(records[1].component == ZG_SUBCHUNK && records[1].subchunk_y == -2);
+    assert(memcmp(chunk_buffer + records[1].offset, "s-2", 3) == 0);
+    assert(records[2].subchunk_y == 3 && records[3].component == ZG_BLOCK_ENTITIES);
+    assert(memcmp(chunk_buffer + records[3].offset, "tile", 4) == 0);
+    assert(zg_get_chunk(handle, 0, 9, 9, chunk_buffer, sizeof(chunk_buffer), records, 8, &count, &required) == ZG_NOT_FOUND);
+    assert(count == 0);
+    zg_key keys[8];
+    assert(zg_list_keys(handle, 0, 0, 0, ZG_SUBCHUNK, keys, 8, &count) == ZG_OK && count == 2);
+    assert(keys[0].subchunk_y == -2 && keys[1].subchunk_y == 3);
+    assert(zg_list_keys(handle, 0, 0, 0, ZG_ALL_COMPONENTS, keys, 1, &count) == ZG_BUFFER_TOO_SMALL);
+    assert(zg_list_keys(handle, 0, 0, 0, 256, keys, 8, &count) == ZG_INVALID_ARGUMENT);
     assert(zg_flush(handle) == ZG_OK);
     zg_stats stats;
     assert(zg_stats_get(NULL, &stats) == ZG_INVALID_ARGUMENT);
@@ -145,9 +181,9 @@ int main(int argc, char **argv) {
     assert(zg_open((uint8_t *)argv[1], strlen(argv[1]), &options, &handle) == ZG_OK);
     zg_operation large[65];
     for (int i = 0; i < 65; ++i)
-        large[i] = (zg_operation){{0, i % 32, i / 32, 0, ZG_METADATA}, ZG_PUT, value, sizeof(value)};
-    assert(zg_write(handle, 6, large, 65) == ZG_OK);
-    zg_batch large_group[2] = {{7, large, 33}, {8, large + 33, 32}};
+        large[i] = (zg_operation){{0, i % 32, i / 32, 0, ZG_VERSION}, ZG_PUT, value, sizeof(value)};
+    assert(zg_write(handle, 0, large, 65) == ZG_OK);
+    zg_batch large_group[2] = {{0, large, 33}, {0, large + 33, 32}};
     assert(zg_write_group(handle, large_group, 2) == ZG_OK);
     assert(zg_get(handle, &large[64].key, output, sizeof(output), &required) == ZG_OK);
     assert(required == sizeof(value) && memcmp(output, value, required) == 0);

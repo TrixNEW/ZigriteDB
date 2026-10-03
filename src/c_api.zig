@@ -3,7 +3,7 @@ const allocator = std.heap.c_allocator;
 
 const db = @import("root.zig");
 
-const abi_version: u32 = 2;
+const abi_version: u32 = 3;
 const max_path_length: usize = 4096;
 
 pub export fn zg_abi_version() u32 {
@@ -31,6 +31,7 @@ pub const Status = enum(c_int) {
     permission_denied,
     no_space,
     read_only,
+    needs_migration,
 };
 
 pub export fn zg_status_message(code: c_int) [*:0]const u8 {
@@ -52,8 +53,10 @@ pub export fn zg_status_message(code: c_int) [*:0]const u8 {
         .permission_denied => "Permission denied",
         .no_space => "Disk full or quota exceeded",
         .read_only => "Read-only filesystem",
+        .needs_migration => "World uses an older format; run zigrite migrate",
     };
 }
+
 pub const Options = extern struct {
     version: u32 = abi_version,
     struct_size: u32 = @sizeOf(Options),
@@ -67,6 +70,9 @@ pub const Options = extern struct {
     cache_bytes: u64 = 0,
     cache_shards: u32 = 16,
     skip_unchanged: u32 = 0,
+    compact_min_bytes: u64 = 16 * 1024 * 1024,
+    compact_live_percent: u32 = 50,
+    reserved: u32 = 0,
 
     fn read(options: *const Options) !Options {
         const prefix: *const [2]u32 = @ptrCast(options);
@@ -75,17 +81,21 @@ pub const Options = extern struct {
     }
 
     fn native(self: Options) !db.WorldOptions {
-        if (self.version != abi_version or self.struct_size != @sizeOf(Options) or self.buffered > 1 or self.skip_unchanged > 1) return error.InvalidArgument;
+        if (self.version != abi_version or self.struct_size != @sizeOf(Options) or self.buffered > 1 or
+            self.skip_unchanged > 1 or self.compact_live_percent > 100 or self.reserved != 0) return error.InvalidArgument;
         if (self.compression_threshold > db.record.max_value_len) return error.InvalidArgument;
         const result: db.WorldOptions = .{
-            .max_open_shards = self.max_open_shards,
-            .shard = .{
+            .max_open_regions = self.max_open_shards,
+            .region = .{
                 .max_keys = self.max_keys,
                 .max_segments = self.max_segments,
                 .batch_buffer_size = self.batch_buffer_size,
                 .max_segment_size = self.max_segment_size,
                 .durability = if (self.buffered == 1) .buffered else .sync,
+                .compression_threshold = self.compression_threshold,
                 .skip_unchanged = self.skip_unchanged == 1,
+                .compact_min_bytes = self.compact_min_bytes,
+                .compact_live_percent = @intCast(self.compact_live_percent),
             },
             .cache = .{
                 .bytes = std.math.cast(usize, self.cache_bytes) orelse return error.InvalidArgument,
@@ -93,18 +103,20 @@ pub const Options = extern struct {
             },
         };
         if (result.cache.shards == 0 or result.cache.shards > 1024) return error.InvalidArgument;
-        if (result.max_open_shards == 0 or result.max_open_shards > 1024) return error.InvalidArgument;
-        result.shard.validate() catch return error.InvalidArgument;
+        if (result.max_open_regions == 0 or result.max_open_regions > 1024) return error.InvalidArgument;
+        result.region.validate() catch return error.InvalidArgument;
         return result;
     }
 };
 
 comptime {
-    std.debug.assert(@sizeOf(Options) == 56);
+    std.debug.assert(@sizeOf(Options) == 72);
     std.debug.assert(@offsetOf(Options, "struct_size") == 4);
     std.debug.assert(@offsetOf(Options, "compression_threshold") == 36);
     std.debug.assert(@offsetOf(Options, "cache_bytes") == 40);
     std.debug.assert(@offsetOf(Options, "skip_unchanged") == 52);
+    std.debug.assert(@offsetOf(Options, "compact_min_bytes") == 56);
+    std.debug.assert(@offsetOf(Options, "compact_live_percent") == 64);
 }
 
 pub const Key = extern struct {
@@ -121,10 +133,20 @@ pub const Key = extern struct {
             .chunk_x = self.chunk_x,
             .chunk_z = self.chunk_z,
             .subchunk_y = self.subchunk_y,
-            .component = std.enums.fromInt(db.Component, @as(u8, @intCast(self.component))) orelse return error.InvalidArgument,
+            .component = @enumFromInt(@as(u8, @intCast(self.component))),
         };
-        _ = try result.encode();
+        try result.validate();
         return result;
+    }
+
+    fn from(key: db.Key) Key {
+        return .{
+            .dimension = key.dimension,
+            .chunk_x = key.chunk_x,
+            .chunk_z = key.chunk_z,
+            .subchunk_y = key.subchunk_y,
+            .component = @intFromEnum(key.component),
+        };
     }
 };
 
@@ -141,100 +163,44 @@ pub const Operation = extern struct {
     value_len: usize,
 };
 
+pub const Batch = extern struct {
+    id: u64,
+    operations: ?[*]const Operation,
+    count: usize,
+};
+
+const Maintenance = @import("world/maintenance.zig");
+
 pub const Handle = struct {
     threaded: std.Io.Threaded,
     world: db.World,
-    maintenance: @import("world/maintenance.zig").Queue(db.World, compactRegion),
+    maintenance: Maintenance.Queue(db.World, compactRegion),
     // Stale regions found by writes; dropped on close.
-    compaction: @import("world/maintenance.zig").WorkQueue(db.World, db.Region, 16, false, compactStale),
-    prefetch: @import("world/maintenance.zig").WorkQueue(db.World, db.Key, 256, false, warmKey),
-    mutex: std.Io.Mutex = .init,
-    available: std.Io.Condition = .init,
-    writers: [16]?WriteContext = .{null} ** 16,
-    writer_limit: usize,
-    threshold: u32,
+    compaction: Maintenance.WorkQueue(db.World, db.Region, 16, false, compactStale),
+    prefetch: Maintenance.WorkQueue(db.World, db.Key, 256, false, warmKey),
     stats: db.Stats = .{},
-
-    fn acquireWriter(self: *Handle) !*WriteContext {
-        const io = self.threaded.io();
-        try self.mutex.lock(io);
-        defer self.mutex.unlock(io);
-        while (true) {
-            for (self.writers[0..self.writer_limit]) |*slot| {
-                if (slot.* == null) slot.* = try WriteContext.init(self.threshold, self.world.options.shard.batch_buffer_size);
-                const context = &slot.*.?;
-                if (context.busy) continue;
-                context.busy = true;
-                return context;
-            }
-            try self.available.wait(io, &self.mutex);
-        }
-    }
-
-    fn releaseWriter(self: *Handle, context: *WriteContext) void {
-        const io = self.threaded.io();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        context.busy = false;
-        self.available.signal(io);
-    }
-};
-
-const WriteContext = struct {
-    entries: []db.entry.Entry,
-    compression: []u8,
-    encoder: db.lz4.Encoder = .{},
-    threshold: u32,
-    busy: bool = false,
-
-    fn init(threshold: u32, size: usize) !WriteContext {
-        const entries = try allocator.alloc(db.entry.Entry, 64);
-        errdefer allocator.free(entries);
-        return .{
-            .entries = entries,
-            .compression = try allocator.alloc(u8, if (threshold == 0) 0 else @min(size, 64 * 1024)),
-            .threshold = threshold,
-        };
-    }
-
-    fn reserve(self: *WriteContext, count: usize, compression_size: usize, max_size: usize) !void {
-        if (count > self.entries.len) self.entries = try allocator.realloc(self.entries, count);
-        const needed = @min(compression_size, max_size);
-        if (needed > self.compression.len) self.compression = try allocator.realloc(self.compression, needed);
-    }
-
-    fn deinit(self: *WriteContext) void {
-        allocator.free(self.compression);
-        allocator.free(self.entries);
-    }
 };
 
 pub export fn zg_key_init(out: ?*Key, dimension: i32, x: i32, z: i32, component: u32, subchunk_y: i32) Status {
     const target = out orelse return .invalid_argument;
-    const key: Key = .{
-        .dimension = dimension,
-        .chunk_x = x,
-        .chunk_z = z,
-        .component = component,
-        .subchunk_y = subchunk_y,
-    };
+    const key: Key = .{ .dimension = dimension, .chunk_x = x, .chunk_z = z, .component = component, .subchunk_y = subchunk_y };
     _ = key.native() catch |err| return status(err);
     target.* = key;
     return .ok;
 }
+
 pub export fn zg_key_validate(key: ?*const Key) Status {
-    const value = key orelse return .invalid_argument;
-    _ = value.native() catch |err| return status(err);
+    _ = (key orelse return .invalid_argument).native() catch |err| return status(err);
     return .ok;
 }
 
 pub export fn zg_key_region(key: ?*const Key, out: ?*Region) Status {
     const target = out orelse return .invalid_argument;
-    const value = (key orelse return .invalid_argument).native() catch |err| return status(err);
-    const region = value.region();
+    const region = ((key orelse return .invalid_argument).native() catch |err| return status(err)).region();
     target.* = .{ .dimension = region.dimension, .x = region.x, .z = region.z };
     return .ok;
 }
+
 pub export fn zg_options_init(out: ?*Options) Status {
     (out orelse return .invalid_argument).* = .{};
     return .ok;
@@ -245,6 +211,7 @@ pub export fn zg_options_validate(options: ?*const Options) Status {
     _ = (Options.read(value) catch |err| return status(err)).native() catch |err| return status(err);
     return .ok;
 }
+
 pub export fn zg_open(path: ?[*]const u8, length: usize, options: ?*const Options, out: ?*?*Handle) Status {
     const target = out orelse return .invalid_argument;
     target.* = null;
@@ -259,23 +226,17 @@ fn open(path: ?[*]const u8, length: usize, options: Options) !*Handle {
     const handle = try allocator.create(Handle);
     errdefer allocator.destroy(handle);
     handle.stats = .{};
-    config.shard.stats = &handle.stats;
+    config.region.stats = &handle.stats;
     handle.threaded = std.Io.Threaded.init(allocator, .{});
     errdefer handle.threaded.deinit();
     const io = handle.threaded.io();
     const dir = try std.Io.Dir.cwd().openDir(io, name, .{ .follow_symlinks = false });
     defer dir.close(io);
     handle.world = try db.World.open(allocator, io, dir, config);
-    errdefer handle.world.deinit();
     handle.maintenance = .{ .io = io, .context = &handle.world };
     handle.compaction = .{ .io = io, .context = &handle.world };
     handle.world.compactor = .{ .context = handle, .submit = submitCompaction };
     handle.prefetch = .{ .io = io, .context = &handle.world };
-    handle.mutex = .init;
-    handle.available = .init;
-    handle.writers = .{null} ** 16;
-    handle.writer_limit = 16;
-    handle.threshold = options.compression_threshold;
     return handle;
 }
 
@@ -285,7 +246,6 @@ pub export fn zg_close(optional: ?*Handle) Status {
     handle.compaction.close() catch {};
     const maintenance_result = handle.maintenance.close();
     const result = handle.world.close();
-    for (&handle.writers) |*slot| if (slot.*) |*context| context.deinit();
     handle.threaded.deinit();
     allocator.destroy(handle);
     result catch |err| return status(err);
@@ -293,94 +253,55 @@ pub export fn zg_close(optional: ?*Handle) Status {
     return .ok;
 }
 
+// Most saves are a handful of records; larger ones use the heap.
+const inline_entries = 64;
+
+fn entries(operations: []const Operation, buffer: []db.Entry) ![]db.Entry {
+    for (operations, buffer[0..operations.len]) |operation, *entry| {
+        if (operation.remove > 1) return error.InvalidArgument;
+        if (operation.value_len > db.record.max_value_len) return error.BatchTooLarge;
+        if (operation.value_len != 0 and (operation.value == null or operation.remove == 1)) return error.InvalidArgument;
+        entry.* = .{
+            .key = try operation.key.native(),
+            .value = if (operation.remove == 1) null else if (operation.value) |ptr| ptr[0..operation.value_len] else &.{},
+        };
+    }
+    return buffer[0..operations.len];
+}
+
 pub export fn zg_write(optional: ?*Handle, id: u64, operations: ?[*]const Operation, count: usize) Status {
     const handle = optional orelse return .invalid_argument;
     if (operations == null or count == 0) return .invalid_argument;
-    if (count > db.batch.max_records) return .limit;
-    var compression_size: usize = 0;
-    for (operations.?[0..count]) |operation| {
-        const bound = compressionBound(handle.threshold, operation) catch |err| return status(err);
-        compression_size = std.math.add(usize, compression_size, bound) catch return .limit;
-    }
-    const context = handle.acquireWriter() catch |err| return status(err);
-    defer handle.releaseWriter(context);
-    context.reserve(count, compression_size, handle.world.options.shard.batch_buffer_size) catch |err| return status(err);
-    _ = prepare(context, if (id == 0) 1 else id, operations.?[0..count], 0, 0) catch |err| return status(err);
-    const entries = context.entries[0..count];
-    _ = (if (id == 0) handle.world.writeNext(entries) else handle.world.write(.{ .entries = entries })) catch |err| return status(err);
+    if (count > db.frame.max_records) return .limit;
+    var stack: [inline_entries]db.Entry = undefined;
+    const buffer = if (count <= stack.len) stack[0..count] else allocator.alloc(db.Entry, count) catch return .out_of_memory;
+    defer if (count > stack.len) allocator.free(buffer);
+    const list = entries(operations.?[0..count], buffer) catch |err| return status(err);
+    _ = handle.world.write(.{ .id = id, .entries = list }) catch |err| return status(err);
     return .ok;
 }
-
-pub const Batch = extern struct {
-    id: u64,
-    operations: ?[*]const Operation,
-    count: usize,
-};
 
 pub export fn zg_write_group(optional: ?*Handle, input: ?[*]const Batch, count: usize) Status {
     const handle = optional orelse return .invalid_argument;
     if (input == null or count == 0) return .invalid_argument;
-    if (count > @import("batch/group.zig").max_batches) return .limit;
+    if (count > db.write.max_group_batches) return .limit;
     var total: usize = 0;
-    var raw_bytes: usize = 0;
-    var compression_size: usize = 0;
     for (input.?[0..count]) |batch| {
-        if (batch.operations == null or batch.count == 0 or batch.id == 0) return .invalid_argument;
+        if (batch.operations == null or batch.count == 0) return .invalid_argument;
         total = std.math.add(usize, total, batch.count) catch return .limit;
-        if (total > db.batch.max_records) return .limit;
-        for (batch.operations.?[0..batch.count]) |operation| {
-            const bound = compressionBound(handle.threshold, operation) catch |err| return status(err);
-            compression_size = std.math.add(usize, compression_size, bound) catch return .limit;
-            raw_bytes = std.math.add(usize, raw_bytes, operation.value_len) catch return .limit;
-            raw_bytes = std.math.add(usize, raw_bytes, db.entry.overhead) catch return .limit;
-            if (raw_bytes > db.batch.max_bytes) return .limit;
-        }
+        if (total > db.frame.max_records) return .limit;
     }
-    const context = handle.acquireWriter() catch |err| return status(err);
-    defer handle.releaseWriter(context);
-    context.reserve(total, compression_size, handle.world.options.shard.batch_buffer_size) catch |err| return status(err);
-    var batches: [@import("batch/group.zig").max_batches]db.WriteBatch = undefined;
+    const buffer = allocator.alloc(db.Entry, total) catch return .out_of_memory;
+    defer allocator.free(buffer);
+    var batches: [db.write.max_group_batches]db.WriteBatch = undefined;
     var offset: usize = 0;
-    var used: usize = 0;
-    for (input.?[0..count], 0..) |batch, i| {
-        used = prepare(context, batch.id, batch.operations.?[0..batch.count], offset, used) catch |err| return status(err);
-        batches[i] = .{ .entries = context.entries[offset .. offset + batch.count] };
+    for (input.?[0..count], batches[0..count]) |batch, *native| {
+        const list = entries(batch.operations.?[0..batch.count], buffer[offset..]) catch |err| return status(err);
+        native.* = .{ .id = batch.id, .entries = list };
         offset += batch.count;
     }
-    handle.world.writeGroup(batches[0..count]) catch |err| return status(err);
+    _ = handle.world.writeGroup(batches[0..count]) catch |err| return status(err);
     return .ok;
-}
-
-fn compressionBound(threshold: u32, operation: Operation) !usize {
-    if (operation.value_len > db.record.max_value_len) return error.BatchTooLarge;
-    if (threshold == 0 or operation.remove != 0 or operation.value_len < threshold) return 0;
-    return db.lz4.bound(operation.value_len);
-}
-
-fn prepare(context: *WriteContext, id: u64, operations: []const Operation, offset: usize, compression_offset: usize) !usize {
-    var total: usize = 0;
-    var used = compression_offset;
-    for (operations, 0..) |operation, i| {
-        if (operation.remove > 1) return error.InvalidArgument;
-        if (operation.value_len > db.record.max_value_len) return error.BatchTooLarge;
-        if (operation.value_len != 0 and (operation.value == null or operation.remove == 1)) return error.InvalidArgument;
-        const value = if (operation.value) |ptr| ptr[0..operation.value_len] else &.{};
-        total = try std.math.add(usize, total, db.entry.overhead + value.len);
-        if (total > db.batch.max_bytes) return error.BatchTooLarge;
-        var item: db.entry.Entry = .{
-            .key = try operation.key.native(),
-            .header = .{ .kind = if (operation.remove == 1) .delete else .put, .batch_id = id, .stored_len = @intCast(value.len), .raw_len = @intCast(value.len) },
-            .value = value,
-        };
-        if (context.threshold != 0 and value.len >= context.threshold and
-            try db.lz4.bound(value.len) <= context.compression.len - used)
-        {
-            item = try item.compress(&context.encoder, context.compression[used..]);
-            if (item.header.compression == .lz4) used += item.value.len;
-        }
-        context.entries[offset + i] = item;
-    }
-    return used;
 }
 
 pub export fn zg_get(optional: ?*Handle, key: ?*const Key, output: ?[*]u8, capacity: usize, required: ?*usize) Status {
@@ -406,17 +327,17 @@ pub const ReadResult = extern struct {
 };
 
 const max_c_batch = db.World.max_read_batch;
+// Kept small: ReleaseSafe fills undefined stack arrays.
+const read_chunk = 32;
 
 pub export fn zg_get_many(optional: ?*Handle, requests: ?[*]const ReadRequest, results: ?[*]ReadResult, count: usize) Status {
     const handle = optional orelse return .invalid_argument;
     if (requests == null or results == null or count == 0) return .invalid_argument;
     if (count > max_c_batch) return .limit;
-
     for (requests.?[0..count]) |request| {
         _ = request.key.native() catch |err| return status(err);
         if (request.output == null and request.capacity != 0) return .invalid_argument;
     }
-
     var start: usize = 0;
     while (start < count) : (start += read_chunk) {
         const end = @min(count, start + read_chunk);
@@ -426,9 +347,7 @@ pub export fn zg_get_many(optional: ?*Handle, requests: ?[*]const ReadRequest, r
             const bytes: []u8 = if (request.output) |ptr| ptr[0..request.capacity] else &.{};
             native.* = .{ .key = request.key.native() catch unreachable, .output = bytes };
         }
-
         handle.world.getMany(native_requests[0 .. end - start], native_results[0 .. end - start]) catch |err| return status(err);
-
         for (native_results[0 .. end - start], results.?[start..end]) |result, *target| {
             target.* = .{
                 .status = switch (result.status) {
@@ -443,8 +362,57 @@ pub export fn zg_get_many(optional: ?*Handle, requests: ?[*]const ReadRequest, r
     return .ok;
 }
 
-// Kept small: ReleaseSafe fills undefined stack arrays.
-const read_chunk = 32;
+pub const ChunkRecord = extern struct {
+    component: u32,
+    subchunk_y: i32,
+    offset: usize,
+    length: usize,
+};
+
+const inline_chunk_records = 64;
+
+/// Reads a whole chunk: values are packed into `buffer`, described by `records`.
+pub export fn zg_get_chunk(
+    optional: ?*Handle,
+    dimension: i32,
+    chunk_x: i32,
+    chunk_z: i32,
+    buffer: ?[*]u8,
+    capacity: usize,
+    records: ?[*]ChunkRecord,
+    record_capacity: usize,
+    count: ?*usize,
+    required: ?*usize,
+) Status {
+    const total = count orelse return .invalid_argument;
+    const bytes_needed = required orelse return .invalid_argument;
+    total.* = 0;
+    bytes_needed.* = 0;
+    const handle = optional orelse return .invalid_argument;
+    if ((buffer == null and capacity != 0) or (records == null and record_capacity != 0)) return .invalid_argument;
+    var stack: [inline_chunk_records]db.ChunkRecord = undefined;
+    const native = if (record_capacity <= stack.len) stack[0..record_capacity] else allocator.alloc(db.ChunkRecord, record_capacity) catch return .out_of_memory;
+    defer if (record_capacity > stack.len) allocator.free(native);
+    const output: []u8 = if (buffer) |ptr| ptr[0..capacity] else &.{};
+    var result: db.ChunkResult = undefined;
+    handle.world.getChunk(dimension, chunk_x, chunk_z, output, native, &result) catch |err| {
+        total.* = result.count;
+        bytes_needed.* = result.required;
+        return status(err);
+    };
+    total.* = result.count;
+    bytes_needed.* = result.required;
+    if (result.count == 0) return .not_found;
+    for (native[0..result.count], records.?[0..result.count]) |record, *target| {
+        target.* = .{
+            .component = @intFromEnum(record.component),
+            .subchunk_y = record.subchunk_y,
+            .offset = @intFromPtr(record.value.ptr) - @intFromPtr(output.ptr),
+            .length = record.value.len,
+        };
+    }
+    return .ok;
+}
 
 pub export fn zg_flush(optional: ?*Handle) Status {
     const handle = optional orelse return .invalid_argument;
@@ -542,23 +510,22 @@ pub export fn zg_list_regions(optional: ?*Handle, out: ?[*]Region, capacity: usi
     return if (found.len > capacity) .buffer_too_small else .ok;
 }
 
-pub export fn zg_list_keys(optional: ?*Handle, dimension: i32, x: i32, z: i32, components: u32, out: ?[*]Key, capacity: usize, count: ?*usize) Status {
+/// `component` filters to one component; ZG_ALL_COMPONENTS keeps every key.
+pub export fn zg_list_keys(optional: ?*Handle, dimension: i32, x: i32, z: i32, component: u32, out: ?[*]Key, capacity: usize, count: ?*usize) Status {
     const handle = optional orelse return .invalid_argument;
     const total = count orelse return .invalid_argument;
     if (capacity != 0 and out == null) return .invalid_argument;
+    const filter: db.KeyFilter = if (component == std.math.maxInt(u32))
+        .{}
+    else if (component <= std.math.maxInt(u8))
+        .only(&.{@enumFromInt(@as(u8, @intCast(component)))})
+    else
+        return .invalid_argument;
     const region: db.Region = .{ .dimension = dimension, .x = x, .z = z };
-    const found = handle.world.keys(region, allocator, .{ .components = @truncate(components) }) catch |err| return status(err);
+    const found = handle.world.keys(region, allocator, filter) catch |err| return status(err);
     defer allocator.free(found);
     total.* = found.len;
-    for (found[0..@min(found.len, capacity)], 0..) |key, i| {
-        out.?[i] = .{
-            .dimension = key.dimension,
-            .chunk_x = key.chunk_x,
-            .chunk_z = key.chunk_z,
-            .subchunk_y = key.subchunk_y,
-            .component = @intFromEnum(key.component),
-        };
-    }
+    for (found[0..@min(found.len, capacity)], 0..) |key, i| out.?[i] = .from(key);
     return if (found.len > capacity) .buffer_too_small else .ok;
 }
 
@@ -598,9 +565,9 @@ fn recover(source: ?[*]const u8, source_len: usize, destination: ?[*]const u8, d
     const output = try std.Io.Dir.cwd().openDir(io, target_path, .{ .follow_symlinks = false });
     defer output.close(io);
     _ = try db.recovery_copy.recoverTo(allocator, io, input, output, .{
-        .max_segments = config.shard.max_segments,
-        .max_segment_size = config.shard.max_segment_size,
-        .batch_buffer_size = config.shard.batch_buffer_size,
+        .max_segments = config.region.max_segments,
+        .max_segment_size = config.region.max_segment_size,
+        .batch_buffer_size = config.region.batch_buffer_size,
     });
 }
 
@@ -623,11 +590,12 @@ fn status(err: anyerror) Status {
         error.DirectoryBusy, error.QueueFull, error.AlreadyQueued => .busy,
         error.CleanupPending => .cleanup_pending,
         error.NeedsRecovery, error.MissingManifest => .needs_recovery,
+        error.NeedsMigration => .needs_migration,
         error.BatchOrder => .batch_order,
         error.BatchTooLarge, error.IndexFull, error.TooManySegments, error.SegmentFull, error.GenerationExhausted, error.SegmentIdExhausted, error.TooManyKeys => .limit,
-        error.InvalidArgument, error.InvalidSubchunkY, error.RegionMismatch, error.InvalidBufferSize, error.InvalidShardLimit => .invalid_argument,
-        error.InvalidMagic, error.ChecksumMismatch, error.InvalidCompressedData, error.TruncatedHeader, error.TruncatedRecord, error.TruncatedManifest, error.InvalidLength, error.InvalidCommit, error.BatchMismatch, error.IdentityMismatch, error.IncompleteBatch, error.InvalidGeneration, error.InvalidSegmentCount, error.InvalidSegmentId, error.InvalidSegmentOrder, error.InvalidActiveSegment, error.InvalidBatchId, error.InvalidCommitCount, error.IndexMismatch, error.MissingSegment => .corruption,
-        error.UnsupportedVersion, error.UnsupportedCompression, error.InvalidFlags, error.UnknownKind => .unsupported,
+        error.InvalidArgument, error.InvalidSubchunkY, error.RegionMismatch, error.InvalidBufferSize, error.InvalidRegionLimit, error.InvalidSegmentSize, error.EmptyBatch => .invalid_argument,
+        error.InvalidMagic, error.ChecksumMismatch, error.InvalidCompressedData, error.TruncatedHeader, error.TruncatedRecord, error.TruncatedFrame, error.TruncatedManifest, error.InvalidLength, error.InvalidFrame, error.BatchMismatch, error.IdentityMismatch, error.IncompleteBatch, error.InvalidGeneration, error.InvalidSegmentCount, error.InvalidSegmentId, error.InvalidSegmentOrder, error.InvalidActiveSegment, error.IndexMismatch, error.MissingSegment, error.InvalidFormatFile => .corruption,
+        error.UnsupportedVersion, error.UnsupportedCompression, error.InvalidFlags => .unsupported,
         else => .io_error,
     };
 }

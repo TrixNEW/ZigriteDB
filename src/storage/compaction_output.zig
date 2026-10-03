@@ -5,62 +5,67 @@ const segment = @import("../format/segment.zig");
 const File = @import("../io/file.zig").File;
 const files = @import("files.zig");
 
+/// Segments of a generation being written by compaction or recovery.
 pub const CompactionOutput = struct {
     io: std.Io,
     dir: std.Io.Dir,
     generation: u64,
     region: Region,
+    salt: u64,
     max_size: u64,
     ids: []u64,
+    devices: []File,
     count: usize = 0,
-    file: ?File = null,
     offset: u64 = 0,
     bytes: u64 = 0,
+    synced: usize = 0,
 
+    /// Closes every file still owned here; a published generation takes them over first.
     pub fn deinit(self: *CompactionOutput) void {
-        if (self.file) |file| file.handle.close(self.io);
-        self.file = null;
+        for (self.devices[0..self.count]) |device| device.handle.close(self.io);
+        self.count = 0;
+    }
+
+    /// Removes the files of an unpublished generation.
+    pub fn discard(self: *CompactionOutput) void {
+        const count = self.count;
+        self.deinit();
+        for (self.ids[0..count]) |id| files.removeSegment(self.dir, self.io, self.generation, id) catch {};
     }
 
     pub const Placed = struct {
         position: usize,
-        end: u64,
+        offset: u64,
     };
 
-    pub fn append(self: *CompactionOutput, batch: []const u8) !?Placed {
-        if (batch.len == 0) return null;
-        if (batch.len > self.max_size - segment.encoded_len) return error.BatchTooLarge;
-        if (self.file == null or batch.len > self.max_size - self.offset) try self.rotate();
-        try self.file.?.writeAll(batch, self.offset);
-        self.offset += batch.len;
-        self.bytes = try std.math.add(u64, self.bytes, batch.len);
-        return .{ .position = self.count - 1, .end = self.offset };
+    pub fn append(self: *CompactionOutput, bytes: []const u8) !Placed {
+        if (bytes.len > self.max_size - segment.encoded_len) return error.BatchTooLarge;
+        if (self.count == 0 or bytes.len > self.max_size - self.offset) try self.rotate();
+        const offset = self.offset;
+        try self.devices[self.count - 1].writeAll(bytes, offset);
+        self.offset += bytes.len;
+        self.bytes += bytes.len;
+        return .{ .position = self.count - 1, .offset = offset };
     }
 
-    pub fn finish(self: *CompactionOutput) !void {
-        if (self.file == null) try self.rotate();
-        try self.file.?.sync();
+    /// Syncs every segment written since the last call, creating one if none exist yet.
+    pub fn sync(self: *CompactionOutput) !void {
+        if (self.count == 0) try self.rotate();
+        for (self.devices[self.synced..self.count]) |device| try device.sync();
+        self.synced = self.count - 1;
     }
 
     fn rotate(self: *CompactionOutput) !void {
         if (self.count == self.ids.len) return error.TooManySegments;
-        if (self.file) |file| {
-            try file.sync();
-            file.handle.close(self.io);
-            self.file = null;
-        }
         const id = self.count + 1;
         const handle = try files.createSegment(self.dir, self.io, self.generation, id);
-        self.file = .{ .handle = handle, .io = self.io };
-        const header = try (segment.Header{
-            .generation = self.generation,
-            .segment_id = id,
-            .region = self.region,
-        }).encode();
-        try self.file.?.writeAll(&header, 0);
+        const device: File = .{ .handle = handle, .io = self.io };
+        self.devices[self.count] = device;
         self.ids[self.count] = id;
         self.count += 1;
+        const header = try (segment.Header{ .generation = self.generation, .segment_id = id, .region = self.region, .salt = self.salt }).encode();
+        try device.writeAll(&header, 0);
         self.offset = segment.encoded_len;
-        self.bytes = try std.math.add(u64, self.bytes, segment.encoded_len);
+        self.bytes += segment.encoded_len;
     }
 };

@@ -6,7 +6,7 @@ import signal
 import sys
 import tempfile
 
-from native_faults import API, Key, Operation, Stats
+from native_faults import API, Key, Operation, Stats, VERSION
 
 
 def check(library, path):
@@ -45,7 +45,7 @@ def check(library, path):
                     [b"", rng.randbytes(40), bytes([batch % 256]) * 512])
                 buffer = c.create_string_buffer(value or b"")
                 buffers.append(buffer)
-                operations.append(Operation(Key(0, x, 0, 0, 5), int(value is None),
+                operations.append(Operation(Key(0, x, 0, 0, VERSION), int(value is None),
                                             c.cast(buffer, c.c_void_p), len(value or b"")))
                 changes.append((x, value))
             array = (Operation * len(operations))(*operations)
@@ -81,13 +81,16 @@ def check(library, path):
 def check_damaged_files(library):
     api = API(library)
     segment = "0000000000000001-0000000000000001.segment"
+    # Damage at the end of the active segment looks like a torn write, so it needs recovery.
     cases = (("MANIFEST", "missing", 8), (segment, "missing", 6),
-             (segment, "truncated", 8), (segment, "corrupt", 6), ("MANIFEST", "corrupt", 6))
+             (segment, "truncated", 8), (segment, "corrupt", 8), ("MANIFEST", "corrupt", 6))
     for name, damage, expected_status in cases:
         with tempfile.TemporaryDirectory(prefix="zigritedb-damaged-") as path:
             handle = api.open(path)
             assert api.write(handle, 1, [b"saved"]) == 0
             assert api.lib.zg_close(handle) == 0
+            # Without INDEX, open replays and checks every frame.
+            (Path(path) / "00000000-00000000-00000000.region" / "INDEX").unlink()
             source = Path(path) / "00000000-00000000-00000000.region" / name
             if damage == "missing":
                 saved = source.with_suffix(".saved")
