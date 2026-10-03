@@ -7,7 +7,7 @@ const WriteBatch = @import("../batch/write.zig").WriteBatch;
 const Entry = @import("../batch/write.zig").Entry;
 const frame = @import("../format/frame.zig");
 const World = @import("../world/world.zig").World;
-const aux = @import("../world/aux.zig");
+const aux = @import("../world/auxiliary.zig");
 const stage = @import("../tool/stage.zig");
 const leveldb = @import("leveldb.zig");
 
