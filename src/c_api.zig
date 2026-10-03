@@ -412,6 +412,34 @@ pub export fn zg_get_chunk(
     return .ok;
 }
 
+pub export fn zg_aux_get(optional: ?*Handle, key: ?[*]const u8, key_len: usize, output: ?[*]u8, capacity: usize, required: ?*usize) Status {
+    const length = required orelse return .invalid_argument;
+    length.* = 0;
+    const handle = optional orelse return .invalid_argument;
+    if (key == null or (output == null and capacity != 0)) return .invalid_argument;
+    const value = (db.aux.get(&handle.world, allocator, key.?[0..key_len]) catch |err| return status(err)) orelse return .not_found;
+    defer allocator.free(value);
+    length.* = value.len;
+    if (capacity < value.len) return .buffer_too_small;
+    @memcpy(output.?[0..value.len], value);
+    return .ok;
+}
+
+pub export fn zg_aux_put(optional: ?*Handle, key: ?[*]const u8, key_len: usize, value: ?[*]const u8, value_len: usize) Status {
+    const handle = optional orelse return .invalid_argument;
+    if (key == null or (value == null and value_len != 0)) return .invalid_argument;
+    const bytes: []const u8 = if (value) |v| v[0..value_len] else &.{};
+    db.aux.put(&handle.world, allocator, key.?[0..key_len], bytes) catch |err| return status(err);
+    return .ok;
+}
+
+pub export fn zg_aux_delete(optional: ?*Handle, key: ?[*]const u8, key_len: usize) Status {
+    const handle = optional orelse return .invalid_argument;
+    if (key == null) return .invalid_argument;
+    db.aux.put(&handle.world, allocator, key.?[0..key_len], null) catch |err| return status(err);
+    return .ok;
+}
+
 pub export fn zg_flush(optional: ?*Handle) Status {
     const handle = optional orelse return .invalid_argument;
     handle.world.flush() catch |err| return status(err);
@@ -499,8 +527,14 @@ pub export fn zg_list_regions(optional: ?*Handle, out: ?[*]Region, capacity: usi
     const handle = optional orelse return .invalid_argument;
     const total = count orelse return .invalid_argument;
     if (capacity != 0 and out == null) return .invalid_argument;
-    const found = handle.world.regions(allocator) catch |err| return status(err);
-    defer allocator.free(found);
+    const all = handle.world.regions(allocator) catch |err| return status(err);
+    defer allocator.free(all);
+    var kept: usize = 0;
+    for (all) |region| if (!db.aux.isAux(region)) {
+        all[kept] = region;
+        kept += 1;
+    };
+    const found = all[0..kept];
     total.* = found.len;
     for (found[0..@min(found.len, capacity)], 0..) |region, i| {
         out.?[i] = .{ .dimension = region.dimension, .x = region.x, .z = region.z };

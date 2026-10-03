@@ -47,7 +47,7 @@ pub fn recoverTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, d
     const metadata, const bytes = try Store.readManifest(allocator, io, input.dir, ids);
     defer allocator.free(bytes);
     if (metadata.segments.len > options.max_segments) return error.InvalidSegmentCount;
-    const scratch = try allocator.alloc(u8, options.batch_buffer_size);
+    var scratch = try allocator.alloc(u8, options.batch_buffer_size);
     defer allocator.free(scratch);
 
     var result: Result = .{ .segment_count = metadata.segments.len };
@@ -71,7 +71,7 @@ pub fn recoverTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, d
         const target: File = .{ .handle = copy, .io = io };
         try target.writeAll(&(try scanner.header.encode()), 0);
         var offset: u64 = segment.encoded_len;
-        while (try scanner.next(scratch)) |batch| {
+        while (try scanner.nextGrowing(allocator, &scratch)) |batch| {
             try target.writeAll(batch.bytes, offset);
             offset += batch.bytes.len;
             result.committed_batches += 1;

@@ -16,6 +16,11 @@ fn check(_: void, smith: *std.testing.Smith) !void {
     _ = db.segment.Header.decode(bytes) catch {};
     if (bytes.len >= db.checkpoint.header_len) _ = db.checkpoint.Header.read(bytes[0..db.checkpoint.header_len]) catch {};
     if (bytes.len >= db.checkpoint.entry_len + 4) _ = db.checkpoint.readEntry(bytes, true) catch {};
+    var log: db.leveldb.LogReader = .{ .bytes = bytes };
+    defer log.deinit(std.testing.allocator);
+    while (log.next(std.testing.allocator) catch null) |_| {}
+    var entries: db.aux.Entries = .{ .bytes = bytes };
+    while (entries.next() catch null) |_| {}
     var ids: [db.manifest.max_segments]u64 = undefined;
     _ = db.manifest.decode(bytes, &ids) catch {};
     var output: [4096]u8 = undefined;

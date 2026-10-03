@@ -38,6 +38,9 @@ pub const World = world.World;
 pub const WorldOptions = world.Options;
 pub const OverlayWorld = @import("world/overlay.zig").OverlayWorld;
 pub const migrate = @import("tool/migrate.zig");
+pub const aux = @import("world/aux.zig");
+pub const leveldb = @import("bedrock/leveldb.zig");
+pub const bedrock = @import("bedrock/convert.zig");
 pub const stage = @import("tool/stage.zig");
 
 test {

@@ -336,9 +336,9 @@ pub const Store = struct {
         const start: Cover = covered orelse .{ .generation = metadata.generation, .segments = 1, .offset = segment.encoded_len };
         const active = generation.devices[generation.count - 1];
         const end = if (start.segments == generation.count and start.offset == try active.length()) start.offset else blk: {
-            const scratch = try allocator.alloc(u8, options.batch_buffer_size);
+            var scratch = try allocator.alloc(u8, options.batch_buffer_size);
             defer allocator.free(scratch);
-            break :blk try replay(&generation.index, generation.devices[0..generation.count], metadata, options, scratch, start.segments - 1, start.offset);
+            break :blk try replay(allocator, &generation.index, generation.devices[0..generation.count], metadata, options, &scratch, start.segments - 1, start.offset);
         };
         if (try active.length() != end) return error.FileChanged;
         // An exact INDEX means the last close synced everything.
@@ -535,7 +535,7 @@ pub const Store = struct {
     };
 
     /// Returns the active segment's end.
-    fn replay(index: *Index, devices: []const File, metadata: manifest.Manifest, options: Options, scratch: []u8, position: usize, offset: u64) !u64 {
+    fn replay(allocator: std.mem.Allocator, index: *Index, devices: []const File, metadata: manifest.Manifest, options: Options, scratch: *[]u8, position: usize, offset: u64) !u64 {
         var end: u64 = offset;
         for (devices[position..], metadata.segments[position..], position..) |device, id, at| {
             const active = at == devices.len - 1;
@@ -546,7 +546,7 @@ pub const Store = struct {
                 .salt = metadata.salt,
             }, if (active) .active else .sealed, index.order, options.max_segment_size);
             if (at == position) try scanner.seek(offset);
-            while (try scanner.next(scratch)) |batch| try index.apply(batch, at);
+            while (try scanner.nextGrowing(allocator, scratch)) |batch| try index.apply(batch, at);
             if (scanner.has_tail) return error.NeedsRecovery;
             end = scanner.offset;
         }
@@ -1244,18 +1244,18 @@ pub const Store = struct {
         var published = false;
         defer if (!published) output.discard();
 
-        const scratch = try self.allocator.alloc(u8, self.options.batch_buffer_size);
+        var scratch = try self.allocator.alloc(u8, self.options.batch_buffer_size);
         defer self.allocator.free(scratch);
-        const staging = try self.allocator.alloc(u8, self.options.batch_buffer_size);
+        var staging = try self.allocator.alloc(u8, self.options.batch_buffer_size);
         defer self.allocator.free(staging);
         var source_bytes: u64 = 0;
-        self.writeBase(old, live.items, &output, &index, snapshot.last_batch_id, scratch, staging, &source_bytes) catch |err|
+        self.writeBase(old, live.items, &output, &index, snapshot.last_batch_id, &scratch, &staging, &source_bytes) catch |err|
             return if (isSourceError(err)) self.sourceFailure(err) else err;
         try output.sync();
 
         var tail: Tail = .{ .position = snapshot.position, .offset = snapshot.offset };
         for (0..4) |_| {
-            const copied = try self.copyTail(old, &tail, &output, &index, scratch, false);
+            const copied = try self.copyTail(old, &tail, &output, &index, &scratch, false);
             source_bytes += copied;
             if (copied <= catch_up_bytes) break;
         }
@@ -1265,7 +1265,7 @@ pub const Store = struct {
             defer self.writer.unlock(self.io);
             if (self.closed) return error.Closed;
             if (self.failed) return error.WriterFailed;
-            source_bytes += try self.copyTail(old, &tail, &output, &index, scratch, true);
+            source_bytes += try self.copyTail(old, &tail, &output, &index, &scratch, true);
             try output.sync();
 
             var buffer: [manifest.max_encoded_len]u8 = undefined;
@@ -1372,8 +1372,7 @@ pub const Store = struct {
         };
     }
 
-    fn writeBase(self: *Store, old: *Generation, live: []const Live, output: *CompactionOutput, index: *Index, base_id: u64, scratch: []u8, staging: []u8, source_bytes: *u64) !void {
-        var builder = frame.Builder.init(staging);
+    fn writeBase(self: *Store, old: *Generation, live: []const Live, output: *CompactionOutput, index: *Index, base_id: u64, scratch: *[]u8, staging: *[]u8, source_bytes: *u64) !void {
         var reads: std.ArrayListUnmanaged(u32) = .empty;
         defer reads.deinit(self.allocator);
         const places = try self.allocator.alloc(usize, frame.max_records);
@@ -1381,6 +1380,9 @@ pub const Store = struct {
 
         var first: usize = 0;
         while (first < live.len) {
+            const largest = frame.header_len + live[first].location.recordLen();
+            if (largest > staging.len) staging.* = try self.allocator.realloc(staging.*, largest);
+            if (largest > scratch.len) scratch.* = try self.allocator.realloc(scratch.*, largest);
             var last = first;
             var size: usize = frame.header_len;
             while (last < live.len and last - first < frame.max_records) : (last += 1) {
@@ -1389,8 +1391,8 @@ pub const Store = struct {
                 places[last - first] = size;
                 size += len;
             }
-            if (last == first) return error.BatchTooLarge;
             const window = live[first..last];
+            var builder = frame.Builder.init(staging.*);
 
             // Read in file order, then place each record in chunk order.
             reads.clearRetainingCapacity();
@@ -1407,7 +1409,7 @@ pub const Store = struct {
                     if (next.segment != head.segment or next.offset > end + 64 * 1024 or next_end - head.offset > scratch.len) break;
                     end = @max(end, next_end);
                 }
-                const bytes = scratch[0..@intCast(end - head.offset)];
+                const bytes = scratch.*[0..@intCast(end - head.offset)];
                 try old.devices[head.segment].readExact(bytes, head.offset);
                 source_bytes.* += bytes.len;
                 for (reads.items[i..j]) |w| {
@@ -1415,15 +1417,14 @@ pub const Store = struct {
                     const from: usize = @intCast(item.location.offset - head.offset);
                     const record_bytes = bytes[from..][0..item.location.recordLen()];
                     _ = try checkRecord(record_bytes, item.location, item.slot, item.local);
-                    @memcpy(staging[places[w]..][0..record_bytes.len], record_bytes);
+                    @memcpy(staging.*[places[w]..][0..record_bytes.len], record_bytes);
                 }
                 i = j;
             }
 
-            builder.reset();
             for (window) |item| {
                 const len = item.location.recordLen();
-                builder.checksums = crc.update(builder.checksums, staging[builder.len + len - 4 ..][0..4]);
+                builder.checksums = crc.update(builder.checksums, staging.*[builder.len + len - 4 ..][0..4]);
                 builder.len += len;
                 builder.count += 1;
             }
@@ -1448,7 +1449,7 @@ pub const Store = struct {
     };
 
     /// `locked` means the writer lock is held.
-    fn copyTail(self: *Store, old: *Generation, tail: *Tail, output: *CompactionOutput, index: *Index, scratch: []u8, locked: bool) !u64 {
+    fn copyTail(self: *Store, old: *Generation, tail: *Tail, output: *CompactionOutput, index: *Index, scratch: *[]u8, locked: bool) !u64 {
         const end_position, const end_offset = if (locked) .{ old.count - 1, self.offset } else blk: {
             try lock.lock(&self.writer, self.io);
             defer self.writer.unlock(self.io);
@@ -1466,7 +1467,7 @@ pub const Store = struct {
             }, .sealed, index.order, std.math.maxInt(u64)) catch |err| return self.sourceFailure(err);
             if (last) scanner.length = end_offset;
             scanner.seek(tail.offset) catch |err| return self.sourceFailure(err);
-            while (scanner.next(scratch) catch |err| return self.sourceFailure(err)) |batch| {
+            while (scanner.nextGrowing(self.allocator, scratch) catch |err| return self.sourceFailure(err)) |batch| {
                 const placed = try output.append(batch.bytes);
                 var moved = batch;
                 moved.offset = placed.offset;

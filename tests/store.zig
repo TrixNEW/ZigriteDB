@@ -1065,3 +1065,32 @@ test "many writers in one region get unique IDs and every acknowledged write sur
     }
     try store.close();
 }
+
+test "frames larger than the reader's buffer still replay, compact and recover" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const big = try testing.allocator.alloc(u8, 3 * 1024 * 1024);
+    defer testing.allocator.free(big);
+    var prng = std.Random.DefaultPrng.init(9);
+    prng.random().bytes(big);
+    {
+        var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{ .batch_buffer_size = 4 * 1024 * 1024 });
+        defer store.deinit();
+        _ = try store.write(batch(1, &.{ put(0, big), put(1, "small") }));
+        try store.close();
+    }
+    try tmp.dir.deleteFile(io, "INDEX");
+    var store = try db.Store.open(testing.allocator, io, tmp.dir, .{});
+    defer store.deinit();
+    const output = try testing.allocator.alloc(u8, big.len);
+    defer testing.allocator.free(output);
+    try testing.expectEqualSlices(u8, big, (try store.get(key(0), output)).?);
+    _ = try store.write(batch(2, &.{put(1, "newer")}));
+    _ = try store.compact();
+    try testing.expectEqualSlices(u8, big, (try store.get(key(0), output)).?);
+    try store.close();
+
+    var copy = testing.tmpDir(.{});
+    defer copy.cleanup();
+    _ = try db.recovery_copy.recoverTo(testing.allocator, io, tmp.dir, copy.dir, .{});
+}

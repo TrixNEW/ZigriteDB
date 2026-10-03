@@ -168,6 +168,17 @@ pub fn FileScanner(comptime Device: type) type {
             }
         }
 
+        pub fn nextGrowing(self: *Self, allocator: std.mem.Allocator, scratch: *[]u8) !?Batch {
+            while (true) {
+                return self.next(scratch.*) catch |err| {
+                    const limit = frame.max_bytes + frame.header_len;
+                    if (err != error.BufferTooSmall or scratch.len >= limit) return err;
+                    scratch.* = try allocator.realloc(scratch.*, @min(scratch.len * 2, limit));
+                    continue;
+                };
+            }
+        }
+
         fn refill(self: *Self, scratch: []u8) !void {
             const len: usize = @intCast(@min(scratch.len, self.length - self.offset));
             try self.device.readExact(scratch[0..len], self.offset);

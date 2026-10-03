@@ -1,4 +1,5 @@
 test {
+    _ = @import("bedrock.zig");
     _ = @import("cache.zig");
     _ = @import("checkpoint.zig");
     _ = @import("compaction.zig");

@@ -164,6 +164,15 @@ int main(int argc, char **argv) {
     assert(keys[0].subchunk_y == -2 && keys[1].subchunk_y == 3);
     assert(zg_list_keys(handle, 0, 0, 0, ZG_ALL_COMPONENTS, keys, 1, &count) == ZG_BUFFER_TOO_SMALL);
     assert(zg_list_keys(handle, 0, 0, 0, 256, keys, 8, &count) == ZG_INVALID_ARGUMENT);
+    uint8_t aux_out[16];
+    assert(zg_aux_get(handle, (const uint8_t *)"~local_player", 13, aux_out, sizeof(aux_out), &required) == ZG_NOT_FOUND);
+    assert(zg_aux_put(handle, (const uint8_t *)"~local_player", 13, (const uint8_t *)"nbt", 3) == ZG_OK);
+    assert(zg_aux_get(handle, (const uint8_t *)"~local_player", 13, NULL, 0, &required) == ZG_BUFFER_TOO_SMALL && required == 3);
+    assert(zg_aux_get(handle, (const uint8_t *)"~local_player", 13, aux_out, sizeof(aux_out), &required) == ZG_OK);
+    assert(memcmp(aux_out, "nbt", 3) == 0);
+    assert(zg_list_regions(handle, NULL, 0, &count) == ZG_BUFFER_TOO_SMALL && count == 1);
+    assert(zg_aux_delete(handle, (const uint8_t *)"~local_player", 13) == ZG_OK);
+    assert(zg_aux_get(handle, (const uint8_t *)"~local_player", 13, aux_out, sizeof(aux_out), &required) == ZG_NOT_FOUND);
     assert(zg_flush(handle) == ZG_OK);
     zg_stats stats;
     assert(zg_stats_get(NULL, &stats) == ZG_INVALID_ARGUMENT);

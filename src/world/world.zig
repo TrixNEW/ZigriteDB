@@ -57,6 +57,7 @@ pub const World = struct {
     hand: usize = 0,
     compactor: ?Compactor = null,
     waiters: std.atomic.Value(usize) = .init(0),
+    aux_mutex: std.Io.Mutex = .init,
 
     const Opened = struct {
         store: Store,

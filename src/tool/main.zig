@@ -4,6 +4,9 @@ const db = @import("zigritedb");
 const usage =
     \\usage: zigrite <command> ...
     \\
+    \\  import <bedrock world> <new world>     convert a Bedrock LevelDB world
+    \\  export <world> <new bedrock world>     write a standalone Bedrock LevelDB world
+    \\  compare <bedrock db> <bedrock db>      check two LevelDB directories hold the same keys
     \\  migrate <format-1 world> <new world>   convert a world written before format 2
     \\  verify <world>                         check every frame of every region
     \\  compact <world>                        compact every region
@@ -29,6 +32,17 @@ pub fn main(init: std.process.Init) !u8 {
         try out.writeAll("\n");
         return 0;
     }
+    if (std.mem.eql(u8, command, "import") and args.len == 4) {
+        const result = try db.bedrock.import(allocator, io, cwd, args[2], args[3]);
+        try out.print("imported {} chunk records and {} other records, {} bytes\n", .{ result.chunk_records, result.aux_records, result.bytes });
+        return 0;
+    }
+    if (std.mem.eql(u8, command, "export") and args.len == 4) {
+        const result = try db.bedrock.exportWorld(allocator, io, cwd, args[2], args[3], .zlib_raw);
+        try out.print("exported {} chunk records and {} other records, {} bytes\n", .{ result.chunk_records, result.aux_records, result.bytes });
+        return 0;
+    }
+    if (std.mem.eql(u8, command, "compare") and args.len == 4) return compare(allocator, io, cwd, args[2], args[3], out);
     if (std.mem.eql(u8, command, "verify") and args.len == 3) return verify(allocator, io, cwd, args[2], out);
     if (std.mem.eql(u8, command, "compact") and args.len == 3) {
         const dir = try cwd.openDir(io, args[2], .{ .follow_symlinks = false });
@@ -49,6 +63,31 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
     return fail(out, usage);
+}
+
+fn compare(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, a: []const u8, b: []const u8, out: *std.Io.Writer) !u8 {
+    const dir_a = try cwd.openDir(io, a, .{ .iterate = true });
+    defer dir_a.close(io);
+    const dir_b = try cwd.openDir(io, b, .{ .iterate = true });
+    defer dir_b.close(io);
+    var left = try db.leveldb.Reader.open(allocator, io, dir_a);
+    defer left.deinit();
+    var right = try db.leveldb.Reader.open(allocator, io, dir_b);
+    defer right.deinit();
+    var count: u64 = 0;
+    while (true) {
+        const x = try left.next();
+        const y = try right.next();
+        if (x == null and y == null) break;
+        const same = x != null and y != null and std.mem.eql(u8, x.?[0], y.?[0]) and std.mem.eql(u8, x.?[1], y.?[1]);
+        if (!same) {
+            try out.print("differ after {} matching keys at {x}\n", .{ count, if (x) |e| e[0] else y.?[0] });
+            return 1;
+        }
+        count += 1;
+    }
+    try out.print("{} keys match\n", .{count});
+    return 0;
 }
 
 fn fail(out: *std.Io.Writer, message: []const u8) !u8 {
