@@ -159,7 +159,7 @@ def reap(pid):
             return
 
 
-def trace(api, path, target=0, mode="baseline", work=workload, exact=True):
+def trace(api, path, target=0, mode="baseline", work=workload, exact=True, exits=(0,)):
     ack_read, ack_write = os.pipe()
     pid = os.fork()
     if pid == 0:
@@ -191,7 +191,7 @@ def trace(api, path, target=0, mode="baseline", work=workload, exact=True):
                     continue
                 if os.WIFSIGNALED(state):
                     raise AssertionError(("unexpected termination", os.WTERMSIG(state)))
-                assert os.WEXITSTATUS(state) == 0
+                assert os.WEXITSTATUS(state) in exits, os.WEXITSTATUS(state)
                 break
             stopped = os.WSTOPSIG(state)
             if stopped != signal.SIGTRAP | 0x80:

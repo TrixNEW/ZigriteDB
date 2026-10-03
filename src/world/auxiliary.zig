@@ -8,6 +8,7 @@ const Key = key_format.Key;
 const Region = key_format.Region;
 const record = @import("../format/record.zig");
 const World = @import("world.zig").World;
+const parseKey = @import("../bedrock/convert.zig").parseKey;
 
 pub const dimension = std.math.minInt(i32);
 
@@ -69,7 +70,9 @@ fn readBucket(world: *World, allocator: std.mem.Allocator, key: Key) !?[]u8 {
     }
 }
 
+/// Chunk-shaped keys are chunk records.
 pub fn get(world: *World, allocator: std.mem.Allocator, key: []const u8) !?[]u8 {
+    if (parseKey(key)) |chunk| return readBucket(world, allocator, chunk);
     const bytes = (try readBucket(world, allocator, bucket(key))) orelse return null;
     defer allocator.free(bytes);
     var entries: Entries = .{ .bytes = bytes };
@@ -82,6 +85,10 @@ pub fn get(world: *World, allocator: std.mem.Allocator, key: []const u8) !?[]u8 
 /// Null deletes the key.
 pub fn put(world: *World, allocator: std.mem.Allocator, key: []const u8, value: ?[]const u8) !void {
     if (key.len > std.math.maxInt(u32)) return error.InvalidArgument;
+    if (parseKey(key)) |chunk| {
+        _ = try world.write(.{ .entries = &.{.{ .key = chunk, .value = value }} });
+        return;
+    }
     const target = bucket(key);
     lock.lockUncancelable(&world.aux_mutex, world.io);
     defer world.aux_mutex.unlock(world.io);
@@ -158,5 +165,22 @@ test "keys share buckets without losing each other" {
     var count: Count = .{};
     try each(&world, allocator, &count, Count.visit);
     try std.testing.expectEqual(@as(usize, 200), count.n);
+    try world.close();
+}
+
+test "chunk-shaped keys go to their chunk record" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const allocator = std.testing.allocator;
+    var world = try World.open(allocator, std.testing.io, tmp.dir, .{});
+    defer world.deinit();
+    try put(&world, allocator, "player_10", "nbt");
+    const found = (try get(&world, allocator, "player_10")).?;
+    defer allocator.free(found);
+    try std.testing.expectEqualStrings("nbt", found);
+    var output: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("nbt", (try world.get(parseKey("player_10").?, &output)).?);
+    try put(&world, allocator, "player_10", null);
+    try std.testing.expectEqual(null, try get(&world, allocator, "player_10"));
     try world.close();
 }

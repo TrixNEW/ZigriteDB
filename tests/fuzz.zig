@@ -19,6 +19,11 @@ fn check(_: void, smith: *std.testing.Smith) !void {
     var log: db.leveldb.LogReader = .{ .bytes = bytes };
     defer log.deinit(std.testing.allocator);
     while (log.next(std.testing.allocator) catch null) |_| {}
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    db.leveldb.parse(arena.allocator(), bytes);
+    var inflated: std.ArrayListUnmanaged(u8) = .empty;
+    db.leveldb.decompress(arena.allocator(), if (length % 2 == 0) 2 else 4, bytes, &inflated) catch {};
     var entries: db.aux.Entries = .{ .bytes = bytes };
     while (entries.next() catch null) |_| {}
     var ids: [db.manifest.max_segments]u64 = undefined;

@@ -168,3 +168,20 @@ test "checkpoints span rotated segments" {
     try testing.expectEqualStrings("new", (try reopened.get(key(3), &output)).?);
     try reopened.close();
 }
+
+test "a leftover INDEX.tmp from a crash is ignored and replaced" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try populate(tmp.dir, .{});
+    try tmp.dir.writeFile(io, .{ .sub_path = "INDEX.tmp", .data = "half written" });
+    var store = try db.Store.open(testing.allocator, io, tmp.dir, .{});
+    defer store.deinit();
+    try expectPopulated(&store);
+    _ = try store.write(batch(0, &.{put(2, "x")}));
+    try store.close();
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "INDEX.tmp", .{}));
+    var scratch: [4096]u8 = undefined;
+    var orphans: [4]db.inspection.Orphan = undefined;
+    const report = try db.inspection.inspect(testing.allocator, io, tmp.dir, .{}, &scratch, &orphans);
+    try testing.expectEqual(@as(usize, 0), report.unknown_entries);
+}

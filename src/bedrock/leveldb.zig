@@ -129,6 +129,16 @@ pub const LogWriter = struct {
     }
 };
 
+pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) void {
+    var version: Version = .{};
+    version.apply(allocator, bytes) catch {};
+    var key: std.ArrayListUnmanaged(u8) = .empty;
+    defer key.deinit(allocator);
+    const end = TableIterator.restartsStart(bytes) catch return;
+    var at: usize = 0;
+    while (at < end) _ = TableIterator.entry(bytes, &at, &key, allocator) catch return;
+}
+
 const FileMeta = struct {
     level: u32,
     number: u64,
@@ -156,7 +166,7 @@ const Version = struct {
                     _ = self.files.swapRemove(try varint(edit, &at));
                 },
                 7 => {
-                    const level: u32 = @intCast(try varint(edit, &at));
+                    const level = std.math.cast(u32, try varint(edit, &at)) orelse return error.Corrupt;
                     const number = try varint(edit, &at);
                     _ = try varint(edit, &at);
                     const smallest = try allocator.dupe(u8, try slice(edit, &at));
@@ -170,7 +180,7 @@ const Version = struct {
     }
 };
 
-fn decompress(allocator: std.mem.Allocator, kind: u8, data: []const u8, out: *std.ArrayListUnmanaged(u8)) !void {
+pub fn decompress(allocator: std.mem.Allocator, kind: u8, data: []const u8, out: *std.ArrayListUnmanaged(u8)) !void {
     out.clearRetainingCapacity();
     const container: flate.Container = switch (kind) {
         0 => return out.appendSlice(allocator, data),

@@ -129,6 +129,9 @@ test "import and export keep every key, value and world file" {
         defer testing.allocator.free(player);
         try testing.expectEqualSlices(u8, expected.get("~local_player").?, player);
         try testing.expectEqual(null, try db.aux.get(&world, testing.allocator, "deleted_or_never_there"));
+        const digest = (try db.aux.get(&world, testing.allocator, chunkKey(31, 5, 1, 0x80, null, &buffer))).?;
+        defer testing.allocator.free(digest);
+        try testing.expectEqualSlices(u8, expected.get(chunkKey(31, 5, 1, 0x80, null, &buffer)).?, digest);
         var records: [16]db.ChunkRecord = undefined;
         var result: db.ChunkResult = undefined;
         try world.getChunk(1, 31, 5, output, &records, &result);
