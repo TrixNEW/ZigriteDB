@@ -22,9 +22,8 @@ pub const Entry = struct {
     }
 };
 
-/// An atomic set of changes inside one region.
 pub const WriteBatch = struct {
-    /// Zero takes the region's next ID; otherwise it must exceed the last one.
+    /// Zero takes the next ID.
     id: u64 = 0,
     entries: []const Entry,
 
@@ -32,7 +31,6 @@ pub const WriteBatch = struct {
         return self.entries[0].key.region();
     }
 
-    /// Checks the batch and returns its uncompressed frame size.
     pub fn validate(self: WriteBatch) !usize {
         if (self.entries.len == 0) return error.EmptyBatch;
         if (self.entries.len > frame.max_records) return error.BatchTooLarge;
@@ -49,7 +47,6 @@ pub const WriteBatch = struct {
         return size;
     }
 
-    /// Room for encoding, including LZ4's worst case.
     pub fn bound(self: WriteBatch) usize {
         var size: usize = frame.header_len;
         for (self.entries) |entry| size += frame.Builder.bound(if (entry.value) |value| value.len else 0);
@@ -57,7 +54,6 @@ pub const WriteBatch = struct {
     }
 };
 
-/// Checks a group of batches written with one sync; returns the uncompressed size of all frames.
 pub fn validateGroup(batches: []const WriteBatch) !usize {
     if (batches.len == 0 or batches.len > max_group_batches) return error.InvalidArgument;
     var size: usize = 0;

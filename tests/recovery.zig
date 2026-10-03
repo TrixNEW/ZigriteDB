@@ -17,7 +17,6 @@ fn frameAt(buffer: []u8, kind: db.frame.Kind, id: u64, x: u10) ![]u8 {
     return builder.finish(kind, id, header.salt);
 }
 
-/// A segment with the given frames back to back; returns the end of each frame.
 fn segmentWith(bytes: []u8, frames: []const struct { kind: db.frame.Kind, id: u64 }, ends: []usize) !usize {
     @memcpy(bytes[0..db.segment.encoded_len], &(try header.encode()));
     var at: usize = db.segment.encoded_len;
@@ -84,7 +83,6 @@ test "frames from another region's salt are never accepted" {
 test "batch order and base frames are enforced" {
     var bytes: [2048]u8 = undefined;
     var ends: [3]usize = undefined;
-    // Base frames carry the manifest's base ID and must come first.
     var end = try segmentWith(&bytes, &.{ .{ .kind = .base, .id = 5 }, .{ .kind = .base, .id = 5 }, .{ .kind = .batch, .id = 6 } }, &ends);
     var scanner = try db.recovery.Scanner.init(bytes[0..end], header, .sealed, .{ .last_batch_id = 5 });
     for (0..3) |_| _ = (try scanner.next()).?;

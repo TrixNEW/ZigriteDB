@@ -143,7 +143,7 @@ test "worlds written before the format marker need migration" {
         var store = try db.Store.create(testing.allocator, io, region_dir, support.region, .{});
         try store.close();
     }
-    // A bare region with a current manifest, e.g. a recovered one, is adopted.
+    // A bare region with a current manifest is adopted.
     {
         var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
         try world.close();

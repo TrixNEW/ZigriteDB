@@ -56,7 +56,7 @@ fn fail(out: *std.Io.Writer, message: []const u8) !u8 {
     return 2;
 }
 
-/// Scans every region with full checksums, ignoring INDEX files, without changing anything.
+/// Read-only full check that ignores INDEX files.
 fn verify(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []const u8, out: *std.Io.Writer) !u8 {
     const dir = try cwd.openDir(io, path, .{ .iterate = true, .follow_symlinks = false });
     defer dir.close(io);

@@ -34,7 +34,7 @@ test "a clean close leaves an INDEX that reopens without replaying" {
     try populate(tmp.dir, .{});
     _ = try tmp.dir.statFile(io, "INDEX", .{});
 
-    // Damage a covered record: the checkpoint skips verification on open, reads still check it.
+    // Open trusts INDEX; reads still verify.
     const file = try support.openFile(tmp.dir, support.segment_name);
     defer file.handle.close(io);
     var store = try db.Store.open(testing.allocator, io, tmp.dir, .{});
@@ -72,7 +72,6 @@ test "damaged checkpoints are ignored and rebuilt from segments" {
         defer store.deinit();
         try expectPopulated(&store);
     }
-    // A truncated checkpoint is ignored too.
     const truncated = try support.openFile(tmp.dir, "INDEX");
     try truncated.handle.setLength(io, length / 2);
     truncated.handle.close(io);
@@ -90,7 +89,7 @@ test "writes after the checkpoint are replayed when the session never closed" {
         defer store.deinit();
         _ = try store.write(batch(41, &.{ put(0, "after"), put(1, null) }));
         try store.flush();
-        // No close: the INDEX still describes the earlier state.
+        // No close, so INDEX is stale.
     }
     var store = try db.Store.open(testing.allocator, io, tmp.dir, .{});
     defer store.deinit();
@@ -140,7 +139,7 @@ test "checkpoints from older generations and other options are ignored" {
     try testing.expectEqual(@as(u64, 2), store.generation.index.generation);
     try store.close();
 
-    // An INDEX without fingerprints cannot serve skip_unchanged, so it is rebuilt.
+    // INDEX without fingerprints can't serve skip_unchanged.
     var stats: db.Stats = .{};
     var skipping = try db.Store.open(testing.allocator, io, tmp.dir, .{ .skip_unchanged = true, .stats = &stats });
     defer skipping.deinit();

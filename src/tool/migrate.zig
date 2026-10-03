@@ -1,4 +1,4 @@
-//! One-time conversion of format 1 worlds. Only this file knows the old layout.
+//! One-time conversion of format 1 worlds.
 const std = @import("std");
 
 const crc = @import("../format/crc.zig");
@@ -16,11 +16,9 @@ pub const Result = struct {
     regions: usize = 0,
     batches: u64 = 0,
     records: u64 = 0,
-    /// Bytes of torn active tails that were left out, as recovery would.
     omitted_tail_bytes: u64 = 0,
 };
 
-/// Format 1 components were Zigrite's own; they map onto the Bedrock tags they carried.
 pub fn component(old: u8) !Component {
     return switch (old) {
         0 => .subchunk,
@@ -33,8 +31,7 @@ pub fn component(old: u8) !Component {
     };
 }
 
-/// Converts the world in `source` into a new world at `destination` beside it. The source is
-/// only read; the destination appears only once complete.
+/// The source is only read; the destination appears once complete.
 pub fn migrate(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, source: []const u8, destination: []const u8) !Result {
     const input = try parent.openDir(io, source, .{ .iterate = true, .follow_symlinks = false });
     defer input.close(io);
@@ -43,7 +40,6 @@ pub fn migrate(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, sou
 
     var result: Result = .{};
     {
-        // Old batches may be as large as format 1 allowed.
         var world = try World.open(allocator, io, staged.dir, .{ .region = .{ .batch_buffer_size = @import("../format/frame.zig").max_bytes + @import("../format/frame.zig").header_len, .compact_live_percent = 0 } });
         defer world.deinit();
         var iterator = input.iterate();
@@ -118,7 +114,7 @@ fn checkSegment(bytes: []const u8, generation: u64, id: u64, region: Region) !vo
     if (!same) return error.IdentityMismatch;
 }
 
-/// Reads committed format 1 batches; stops before a torn or damaged tail.
+/// Stops at a torn or damaged tail.
 const Reader = struct {
     bytes: []const u8,
     offset: usize,

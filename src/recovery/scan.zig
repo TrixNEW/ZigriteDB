@@ -11,14 +11,12 @@ pub const Error = frame.Error || segment.Error || error{
     SegmentTooLarge,
 };
 
-/// Active segments may end in a torn tail; anything unreadable in a sealed segment is corruption.
+/// Only the active segment may end in a torn tail.
 pub const Mode = enum { sealed, active };
 
 pub const Batch = struct {
     header: frame.Header,
-    /// The whole frame, header included.
     bytes: []const u8,
-    /// Segment offset of the frame's first byte.
     offset: u64,
 
     pub fn end(self: Batch) u64 {
@@ -30,11 +28,10 @@ pub const Batch = struct {
     }
 };
 
-/// Ordering carried from one segment of a generation to the next.
 pub const Order = struct {
     /// Starts at the manifest's base batch ID.
     last_batch_id: u64 = 0,
-    /// Base frames, which all carry the base ID, may only open a generation.
+    /// Base frames may only open a generation.
     seen_batch: bool = false,
 
     pub fn accept(self: *Order, header: frame.Header) Error!void {
@@ -52,7 +49,6 @@ pub const Order = struct {
 const Step = union(enum) {
     batch: Batch,
     end,
-    /// The frame runs past the bytes available.
     truncated,
     invalid: anyerror,
 };
@@ -71,7 +67,6 @@ fn step(bytes: []const u8, base_offset: u64, salt: u64, order: *Order) Step {
     return .{ .batch = .{ .header = header, .bytes = bytes[0..header.len()], .offset = base_offset } };
 }
 
-/// Scans a segment that is fully in memory.
 pub const Scanner = struct {
     bytes: []const u8,
     header: segment.Header,
@@ -112,7 +107,6 @@ pub const Scanner = struct {
     }
 };
 
-/// Scans a segment file through a window of the caller's scratch buffer.
 pub fn FileScanner(comptime Device: type) type {
     return struct {
         device: Device,
@@ -140,13 +134,12 @@ pub fn FileScanner(comptime Device: type) type {
             return .{ .device = device, .header = header, .mode = mode, .length = length, .offset = segment.encoded_len, .order = order };
         }
 
-        /// Starts scanning at `offset`, e.g. after a checkpoint.
         pub fn seek(self: *Self, offset: u64) !void {
             if (offset < segment.encoded_len or offset > self.length) return error.InvalidOffset;
             self.offset = offset;
         }
 
-        /// Batches borrow `scratch` until the next call, which must pass the same buffer.
+        /// Batches borrow `scratch` until the next call.
         pub fn next(self: *Self, scratch: []u8) !?Batch {
             if (self.finished) return null;
             if (scratch.len < frame.header_len) return error.BufferTooSmall;

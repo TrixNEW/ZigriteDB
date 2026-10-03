@@ -253,7 +253,6 @@ pub export fn zg_close(optional: ?*Handle) Status {
     return .ok;
 }
 
-// Most saves are a handful of records; larger ones use the heap.
 const inline_entries = 64;
 
 fn entries(operations: []const Operation, buffer: []db.Entry) ![]db.Entry {
@@ -371,7 +370,6 @@ pub const ChunkRecord = extern struct {
 
 const inline_chunk_records = 64;
 
-/// Reads a whole chunk: values are packed into `buffer`, described by `records`.
 pub export fn zg_get_chunk(
     optional: ?*Handle,
     dimension: i32,
@@ -510,7 +508,6 @@ pub export fn zg_list_regions(optional: ?*Handle, out: ?[*]Region, capacity: usi
     return if (found.len > capacity) .buffer_too_small else .ok;
 }
 
-/// `component` filters to one component; ZG_ALL_COMPONENTS keeps every key.
 pub export fn zg_list_keys(optional: ?*Handle, dimension: i32, x: i32, z: i32, component: u32, out: ?[*]Key, capacity: usize, count: ?*usize) Status {
     const handle = optional orelse return .invalid_argument;
     const total = count orelse return .invalid_argument;

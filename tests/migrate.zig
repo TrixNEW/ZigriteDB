@@ -5,7 +5,7 @@ const io = testing.io;
 
 const crc = db.crc;
 
-/// Minimal format 1 writer, enough to build worlds for migration tests.
+/// Minimal format 1 writer.
 const V1 = struct {
     bytes: std.ArrayListUnmanaged(u8) = .empty,
     batch_start: usize = 0,
@@ -166,7 +166,6 @@ test "a failed migration leaves no destination and the source untouched" {
     defer old.close(io);
     const region = try old.openDir(io, "00000000-00000000-00000000.region", .{});
     defer region.close(io);
-    // Damage a committed record in the sealed segment.
     const file = try region.openFile(io, "0000000000000001-0000000000000001.segment", .{ .mode = .read_write });
     defer file.close(io);
     try file.writePositionalAll(io, "X", 48 + 32 + 17);

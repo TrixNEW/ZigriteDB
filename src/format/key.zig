@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// Bedrock chunk record tags. Any other tag byte is stored as-is.
+/// Bedrock chunk record tags; unknown tags are stored as-is.
 pub const Component = enum(u8) {
     data3d = 0x2b,
     version = 0x2c,
@@ -26,7 +26,7 @@ pub const Component = enum(u8) {
     blending_data = 0x40,
     actor_digest_version = 0x41,
     legacy_version = 0x76,
-    /// Bedrock keeps this outside chunk keys as "digp"; Zigrite stores it with the chunk.
+    /// Bedrock's "digp" record, stored with its chunk.
     actor_digest = 0x80,
     _,
 };
@@ -42,7 +42,6 @@ pub const Region = struct {
 };
 
 pub const KeyFilter = struct {
-    /// Bit `i` keeps component `i`; all set by default.
     components: [8]u32 = @splat(0xffff_ffff),
     min_chunk_x: i32 = std.math.minInt(i32),
     max_chunk_x: i32 = std.math.maxInt(i32),
@@ -79,7 +78,7 @@ pub const Key = struct {
 
     pub const Error = error{InvalidSubchunkY};
 
-    /// Only subchunks have a Y, which Bedrock stores as one signed byte.
+    /// Only subchunks have a Y.
     pub fn validate(self: Key) Error!void {
         const ok = if (self.component == .subchunk)
             self.subchunk_y >= std.math.minInt(i8) and self.subchunk_y <= std.math.maxInt(i8)
@@ -96,12 +95,11 @@ pub const Key = struct {
         };
     }
 
-    /// Chunk position inside its region, 0..1023.
     pub fn slot(self: Key) u10 {
         return @intCast((self.chunk_z & 31) * 32 + (self.chunk_x & 31));
     }
 
-    /// Orders by component, then signed Y. Assumes a validated key.
+    /// Component, then signed Y.
     pub fn local(self: Key) u16 {
         return localKey(self.component, @intCast(self.subchunk_y));
     }

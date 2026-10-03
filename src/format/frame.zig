@@ -3,27 +3,14 @@ const crc = @import("crc.zig");
 const lz4 = @import("../compression/lz4.zig");
 const record = @import("record.zig");
 
-/// A frame holds one atomic batch of records from a single region.
-///
-///   0  u32  body length
-///   4  u16  record count
-///   6  u8   kind
-///   7  u8   zero
-///   8  u64  batch ID
-///  16  u32  CRC-32C over the records' own checksums, in order
-///  20  u32  CRC-32C of the region salt and bytes 0..20
-///
-/// A frame counts only when its header and every record verify, so torn or
-/// partial writes are never applied. The salt rejects stale frames left by
-/// other regions' deleted files.
+// One atomic batch of records. The salt rejects stale frames from other regions' old files.
 pub const header_len = 24;
 pub const max_records = 4096;
 pub const max_bytes = 64 * 1024 * 1024;
 
 pub const Kind = enum(u8) {
-    /// An atomic write.
     batch = 1,
-    /// Compaction output; every base frame of a generation shares one ID.
+    /// Compaction output; all base frames share one ID.
     base = 2,
 };
 
@@ -76,8 +63,7 @@ fn headerChecksum(salt: u64, bytes: *const [20]u8) u32 {
     return ~crc.update(crc.update(0xffff_ffff, &salt_bytes), bytes);
 }
 
-/// Checks a whole frame at the start of `bytes`, calling `visit(context, offset, decoded)`
-/// for each record only after all of them verified. Returns the frame length.
+/// Calls `visit` per record only once the whole frame verified.
 pub fn verify(bytes: []const u8, salt: u64, context: anytype, comptime visit: anytype) (Error || VisitError(@TypeOf(visit)))!Header {
     if (bytes.len < header_len) return error.TruncatedFrame;
     const header = try Header.read(bytes[0..header_len], salt);
@@ -98,7 +84,6 @@ pub fn verify(bytes: []const u8, salt: u64, context: anytype, comptime visit: an
     return header;
 }
 
-/// Walks records that were already verified, or that this process encoded.
 pub fn each(body: []const u8, context: anytype, comptime visit: anytype) VisitError(@TypeOf(visit))!void {
     var offset: usize = 0;
     while (offset < body.len) {
@@ -114,8 +99,7 @@ fn VisitError(comptime Visit: type) type {
     return if (result == .error_union) result.error_union.error_set else error{};
 }
 
-/// Encodes records straight into a caller buffer, compressing values on the way.
-/// The header is written last by `finish`, so the batch ID can be picked under a lock.
+/// The header is written last, so the batch ID can be picked under the lock.
 pub const Builder = struct {
     buffer: []u8,
     len: usize = header_len,
@@ -126,7 +110,6 @@ pub const Builder = struct {
         return .{ .buffer = buffer };
     }
 
-    /// Worst-case bytes `add` needs for a value of `len`.
     pub fn bound(len: usize) usize {
         return record.overhead + (lz4.bound(len) catch len);
     }
@@ -160,7 +143,6 @@ pub const Builder = struct {
         if (self.len - header_len > max_bytes) return error.BatchTooLarge;
     }
 
-    /// Copies an already sealed record, keeping its checksum.
     pub fn copy(self: *Builder, bytes: []const u8) error{ BatchTooLarge, BufferTooSmall }!void {
         if (self.count == max_records or self.len - header_len + bytes.len > max_bytes) return error.BatchTooLarge;
         if (self.buffer.len - self.len < bytes.len) return error.BufferTooSmall;

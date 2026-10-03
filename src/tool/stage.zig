@@ -1,5 +1,4 @@
-//! Builds a directory under a temporary name and renames it into place once complete,
-//! so an interrupted conversion never leaves something that looks finished.
+//! Builds a directory under a temporary name so an interrupted run never looks finished.
 const std = @import("std");
 
 const File = @import("../io/file.zig").File;
@@ -15,7 +14,7 @@ pub const Staged = struct {
     dir: std.Io.Dir,
     published: bool = false,
 
-    /// The destination must not exist; leftovers of an earlier interrupted run are removed.
+    /// Removes leftovers of an interrupted run.
     pub fn begin(io: std.Io, parent: std.Io.Dir, destination: []const u8) !Staged {
         if (parent.statFile(io, destination, .{ .follow_symlinks = false })) |_| {
             return error.PathAlreadyExists;
@@ -33,11 +32,10 @@ pub const Staged = struct {
         return self.temporary[0..self.temporary_len];
     }
 
-    /// Syncs everything written, then makes the destination appear in one rename.
     pub fn publish(self: *Staged) !void {
         try syncTree(self.io, self.dir);
         try self.parent.rename(self.name(), self.parent, self.destination, self.io);
-        // The caller's handle may be path-only, which cannot be synced.
+        // The caller's handle may be path-only.
         const parent = try self.parent.openDir(self.io, ".", .{ .iterate = true });
         defer parent.close(self.io);
         try (File{ .handle = .{ .handle = parent.handle, .flags = .{ .nonblocking = false } }, .io = self.io }).sync();
@@ -50,7 +48,6 @@ pub const Staged = struct {
     }
 };
 
-/// Fsyncs every file and directory below `dir`, and `dir` itself.
 pub fn syncTree(io: std.Io, dir: std.Io.Dir) !void {
     var iterator = dir.iterate();
     while (try iterator.next(io)) |entry| switch (entry.kind) {

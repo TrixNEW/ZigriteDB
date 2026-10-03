@@ -36,10 +36,10 @@ pub const Options = struct {
     max_keys: u32 = 65536,
     max_segments: usize = 64,
     max_segment_size: u64 = 256 * 1024 * 1024,
-    /// Largest frame, uncompressed; also the replay window.
+    /// Largest uncompressed frame.
     batch_buffer_size: usize = 1024 * 1024,
     durability: Durability = .buffered,
-    /// Values at least this long are LZ4 compressed when that saves space; 0 disables it.
+    /// 0 disables compression.
     compression_threshold: u32 = 256,
     stats: ?*Stats = null,
     cache: ?*Cache = null,
@@ -85,9 +85,7 @@ pub const ChunkRecord = struct {
 };
 
 pub const ChunkResult = struct {
-    /// Records the chunk holds.
     count: usize,
-    /// Buffer bytes their values need.
     required: usize,
 };
 
@@ -119,7 +117,7 @@ const Generation = struct {
     }
 };
 
-// Scratch for one call. Arrays live here rather than on the stack, which ReleaseSafe fills on every call.
+// Arrays live here because ReleaseSafe fills stack arrays on every call.
 const Buffer = struct {
     bytes: []u8 = &.{},
     encoder: lz4.Encoder = .{},
@@ -132,7 +130,6 @@ const Buffer = struct {
     targets: [Store.inline_records]u16 = undefined,
 };
 
-/// One 32x32 region: an append-only generation of segments plus its dense index.
 pub const Store = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -142,17 +139,17 @@ pub const Store = struct {
     options: Options,
     base_batch_id: u64,
 
-    // Serializes appends and guards everything below up to `table`.
+    // Serializes appends and guards the fields below.
     writer: std.Io.Mutex = .init,
     segment_id: u64,
     offset: u64,
     synced_offset: u64,
-    // Bumped whenever the active segment changes.
+    // Bumped when the active segment changes.
     epoch: u64 = 0,
     failed: bool = false,
     closed: bool = false,
 
-    // Shared by readers; exclusive to change the index or swap generations.
+    // Exclusive to change the index or swap generations.
     table: std.Io.RwLock = .init,
     generation: *Generation,
     closing: bool = false,
@@ -175,10 +172,11 @@ pub const Store = struct {
     pool_mutex: std.Io.Mutex = .init,
     pool: std.ArrayListUnmanaged(*Buffer) = .empty,
 
-    // What the INDEX file on disk covers, so a clean close only rewrites it after changes.
+    // What INDEX covers, so close only rewrites it after changes.
     checkpointed: Cover = .{},
 
     const pool_limit = 8;
+    const prefetch_limit = 64 * 1024 * 1024;
     const max_pooled_len = 1024 * 1024;
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, region: Region, options: Options) !Store {
@@ -239,7 +237,7 @@ pub const Store = struct {
         };
     }
 
-    /// The caller hands over `index` only after this succeeds.
+    /// Callers set `index` afterwards.
     fn newGeneration(allocator: std.mem.Allocator, io: std.Io, capacity: usize) !*Generation {
         const devices = try allocator.alloc(File, capacity);
         errdefer allocator.free(devices);
@@ -273,8 +271,7 @@ pub const Store = struct {
         if (has_segment or has_temporary) try directory.syncEntries();
     }
 
-    /// Removes segments no manifest names: a compaction that never published leaves the next
-    /// generation's files, and a rotation that never published leaves a newer segment.
+    /// Removes segments left by an unfinished compaction or rotation.
     fn discardUnfinished(directory: *Directory, current: u64, active: u64) !void {
         var removed = false;
         var iterator = directory.dir.iterate();
@@ -344,15 +341,23 @@ pub const Store = struct {
             break :blk try replay(&generation.index, generation.devices[0..generation.count], metadata, options, scratch, start.segments - 1, start.offset);
         };
         if (try active.length() != end) return error.FileChanged;
-        // A checkpoint that ends exactly at the active tail proves the last close synced everything,
-        // including the directory; otherwise a crashed writer may have left unsynced state.
+        // An exact INDEX means the last close synced everything.
         const clean = if (covered) |c| c.segments == generation.count and c.offset == end else false;
         if (!clean) {
             try directory.syncEntries();
             try active.sync();
         }
-        // A checkpointed open read none of the data; nearby chunks are usually wanted next.
-        if (covered != null) for (generation.devices[0..generation.count]) |device| device.willNeed();
+        // Nothing was read, so prefetch like a replay would.
+        if (covered != null) {
+            var budget: u64 = prefetch_limit;
+            var i = generation.count;
+            while (i > 0 and budget > 0) {
+                i -= 1;
+                const len = @min(budget, try generation.devices[i].length());
+                generation.devices[i].willNeed(len);
+                budget -= len;
+            }
+        }
         var pool: std.ArrayListUnmanaged(*Buffer) = try .initCapacity(allocator, pool_limit);
         errdefer pool.deinit(allocator);
 
@@ -379,8 +384,7 @@ pub const Store = struct {
         offset: u64 = 0,
     };
 
-    /// Loads INDEX into an empty index when it matches the manifest and segments; any doubt
-    /// leaves the index empty so the caller replays everything instead.
+    /// Any doubt leaves the index empty for a full replay.
     fn loadCheckpoint(allocator: std.mem.Allocator, io: std.Io, directory: *Directory, index: *Index, devices: []const File, metadata: manifest.Manifest, options: Options) !?Cover {
         const cover = readCheckpoint(allocator, io, directory, index, devices, metadata, options) catch |err| switch (err) {
             error.OutOfMemory => return err,
@@ -454,7 +458,7 @@ pub const Store = struct {
         return .{ .generation = header.generation, .segments = header.segments, .offset = header.offset };
     }
 
-    /// Writes INDEX for the current, fully synced state. Failure only costs a slower next open.
+    /// Failure only costs a slower open.
     fn writeCheckpoint(self: *Store) void {
         const generation = self.generation;
         const cover: Cover = .{ .generation = generation.index.generation, .segments = generation.count, .offset = self.offset };
@@ -483,7 +487,7 @@ pub const Store = struct {
         const handle = try self.directory.dir.createFile(self.io, checkpoint.name ++ ".tmp", .{ .truncate = true });
         defer handle.close(self.io);
         const file: File = .{ .handle = handle, .io = self.io };
-        // A stack buffer keeps close free of allocations.
+        // Keeps close free of allocations.
         var buffer: [16 * 1024]u8 = undefined;
         var writer: Spill = .{ .file = file, .buffer = &buffer, .offset = checkpoint.header_len };
         for (self.generation.segment_ids[0..cover.segments]) |id| try writer.int(u64, id);
@@ -505,7 +509,6 @@ pub const Store = struct {
         try self.directory.dir.rename(checkpoint.name ++ ".tmp", self.directory.dir, checkpoint.name, self.io);
     }
 
-    /// Buffered sequential writes with a running CRC.
     const Spill = struct {
         file: File,
         buffer: []u8,
@@ -531,7 +534,7 @@ pub const Store = struct {
         }
     };
 
-    /// Applies every frame from (`position`, `offset`) onwards; returns the active segment's end.
+    /// Returns the active segment's end.
     fn replay(index: *Index, devices: []const File, metadata: manifest.Manifest, options: Options, scratch: []u8, position: usize, offset: u64) !u64 {
         var end: u64 = offset;
         for (devices[position..], metadata.segments[position..], position..) |device, id, at| {
@@ -550,20 +553,18 @@ pub const Store = struct {
         return end;
     }
 
-    // Writes
-
-    /// Appends one atomic batch; it is durable on return only with `.sync` durability.
+    /// Durable on return only with `.sync`.
     pub fn write(self: *Store, batch: WriteBatch) !AppendResult {
         return self.commit(&.{batch}, self.options.durability == .sync);
     }
 
-    /// A save barrier: batches share one append and are durable on return, whatever the durability.
+    /// Durable on return whatever the durability.
     pub fn writeGroup(self: *Store, batches: []const WriteBatch) !AppendResult {
         return self.commit(batches, true);
     }
 
     fn commit(self: *Store, batches: []const WriteBatch, durable: bool) !AppendResult {
-        // Callers must not race close; this only rejects use after it.
+        // Callers must not race close.
         if (self.closed) return error.Closed;
         const size = try write_module.validateGroup(batches);
         if (size > self.options.batch_buffer_size) return error.BufferTooSmall;
@@ -599,7 +600,6 @@ pub const Store = struct {
             if (durable) try self.commitBarrier();
             return result;
         }
-        // Builders wrote back to back, so the frames form one contiguous span.
         for (builders[1..kept], builders[0 .. kept - 1]) |*next, previous| {
             std.debug.assert(next.buffer.ptr == previous.buffer.ptr + previous.len);
         }
@@ -641,11 +641,11 @@ pub const Store = struct {
                 self.generation.index.publish(prepared);
             }
             self.offset = start + span.len;
-            self.countWrites(builders);
             self.checkStale();
             const ticket = if (durable) self.nextTicket() else null;
             break :blk .{ .{ .batch_id = last, .start = start, .end = self.offset, .synced = false }, ticket };
         };
+        self.countWrites(builders);
         var done = result;
         if (ticket) |t| {
             try self.waitDurable(t);
@@ -677,7 +677,7 @@ pub const Store = struct {
         if (self.options.stats) |s| _ = s.unchanged_write_skips.fetchAdd(skipped, .monotonic);
     }
 
-    /// A key written twice in one batch is always kept so the later value wins.
+    /// Repeated keys are kept so the last one wins.
     fn repeated(_: *Store, builder: *const frame.Builder, header: record.Header) bool {
         var seen: usize = 0;
         var offset: usize = frame.header_len;
@@ -736,19 +736,19 @@ pub const Store = struct {
         return self.compaction_hint.swap(false, .monotonic);
     }
 
-    /// Starts a new segment; the writer lock must be held.
+    /// Writer lock held.
     fn rotate(self: *Store) !void {
         const generation = self.generation;
         if (generation.count == self.options.max_segments) return error.TooManySegments;
         const id = std.math.add(u64, self.segment_id, 1) catch return error.SegmentIdExhausted;
         try self.syncActive();
 
-        // Rotation failures stop writes, like any other failed append.
+        // Failures stop writes.
         errdefer self.failed = true;
         const handle = try files.createSegment(self.directory.dir, self.io, generation.index.generation, id);
         const device: File = .{ .handle = handle, .io = self.io };
         errdefer handle.close(self.io);
-        // Before publication starts the new file is unreferenced; after, the manifest may name it.
+        // Once publishing starts the manifest may name the file.
         var publishing = false;
         errdefer if (!publishing) files.removeSegment(self.directory.dir, self.io, generation.index.generation, id) catch {};
         const header = try (segment.Header{ .segment_id = id, .generation = generation.index.generation, .region = self.region, .salt = self.salt }).encode();
@@ -782,7 +782,7 @@ pub const Store = struct {
         return (manifest.Manifest{ .generation = generation, .region = self.region, .segments = ids, .base_batch_id = base, .salt = self.salt }).encode(buffer);
     }
 
-    /// Syncs the active segment; the writer lock must be held.
+    /// Writer lock held.
     fn syncActive(self: *Store) !void {
         if (self.synced_offset == self.offset) return;
         self.timedSync(self.generation.devices[self.generation.count - 1]) catch |err| {
@@ -800,8 +800,6 @@ pub const Store = struct {
             if (started) |t| _ = s.fsync_duration_ns.fetchAdd(@intCast(t.untilNow(self.io).raw.nanoseconds), .monotonic);
         }
     }
-
-    // Durability
 
     fn nextTicket(self: *Store) u64 {
         lock.lockUncancelable(&self.commit_mutex, self.io);
@@ -831,7 +829,7 @@ pub const Store = struct {
         }
     }
 
-    /// Syncs without holding the writer lock, so appends continue meanwhile.
+    /// Appends continue during the fsync.
     fn syncAppended(self: *Store) !void {
         const device, const epoch, const offset = blk: {
             try lock.lock(&self.writer, self.io);
@@ -871,8 +869,6 @@ pub const Store = struct {
         return self.commitBarrier();
     }
 
-    // Reads
-
     const Pinned = struct {
         generation: *Generation,
         location: Location,
@@ -889,8 +885,7 @@ pub const Store = struct {
         return .{ .generation = generation, .location = location };
     }
 
-    // Readers and drainers each update their own counter before reading the other's,
-    // so at least one side sees the other: either no wait starts or the unpin wakes it.
+    // Each side updates its counter before reading the other's, so no wakeup is missed.
     fn unpin(self: *Store, generation: *Generation) void {
         if (generation.readers.fetchSub(1, .seq_cst) != 1 or self.drainers.load(.seq_cst) == 0) return;
         lock.lockUncancelable(&self.idle_mutex, self.io);
@@ -898,7 +893,6 @@ pub const Store = struct {
         self.idle.broadcast(self.io);
     }
 
-    /// Blocks until no reader holds `generation`.
     fn waitReaders(self: *Store, generation: *Generation) void {
         _ = self.drainers.fetchAdd(1, .seq_cst);
         defer _ = self.drainers.fetchSub(1, .seq_cst);
@@ -1008,7 +1002,6 @@ pub const Store = struct {
     const max_gap = 4096;
     const max_span = 256 * 1024;
 
-    /// Reads wanted records with as few preads as nearby records allow.
     fn readWanted(self: *Store, generation: *Generation, wants: []Want, scratch: *Buffer) !void {
         const order = if (wants.len <= scratch.order.len) scratch.order[0..wants.len] else try self.allocator.alloc(u16, wants.len);
         defer if (wants.len > scratch.order.len) self.allocator.free(order);
@@ -1114,8 +1107,8 @@ pub const Store = struct {
         }
     }
 
-    /// Reads every record of one chunk, values packed into `buffer` in component order.
-    /// Returns error.BufferTooSmall with `result` filled when `buffer` or `records` is short.
+    /// Values are packed into `buffer` in key order.
+    /// BufferTooSmall fills `result` for a retry.
     pub fn getChunk(self: *Store, chunk_x: i32, chunk_z: i32, buffer: []u8, records: []ChunkRecord, result: *ChunkResult) !void {
         const probe: Key = .{ .dimension = self.region.dimension, .chunk_x = chunk_x, .chunk_z = chunk_z, .component = .version };
         if (!probe.region().eql(self.region)) return error.RegionMismatch;
@@ -1138,7 +1131,7 @@ pub const Store = struct {
                 break :blk .{ generation, count };
             };
             if (count > entries.len) {
-                // Rare: more components than fit on the stack.
+                // Rare: too many to fit on the stack.
                 if (heap) |bytes| self.allocator.free(bytes);
                 heap = null;
                 const capacity = count + 16;
@@ -1213,16 +1206,13 @@ pub const Store = struct {
         return location.raw_len;
     }
 
-    // Compaction
-
-    /// Rewrites live records chunk by chunk into a new generation while reads and writes go on.
     /// Writers only wait for the final tail copy, its fsync and the manifest swap.
     pub fn compact(self: *Store) !CompactionResult {
         try lock.lock(&self.compact_mutex, self.io);
         defer self.compact_mutex.unlock(self.io);
         const started: ?std.Io.Clock.Timestamp = if (self.options.stats != null) std.Io.Clock.Timestamp.now(self.io, .awake) else null;
 
-        // Close waits for compact_mutex, so the old generation lives until we retire it.
+        // Close waits on compact_mutex, so `old` stays alive.
         var live: std.ArrayListUnmanaged(Live) = .empty;
         defer live.deinit(self.allocator);
         const old, const snapshot = try self.takeSnapshot(&live);
@@ -1263,7 +1253,6 @@ pub const Store = struct {
             return if (isSourceError(err)) self.sourceFailure(err) else err;
         try output.sync();
 
-        // Catch up with writes made meanwhile, then finish under the writer lock.
         var tail: Tail = .{ .position = snapshot.position, .offset = snapshot.offset };
         for (0..4) |_| {
             const copied = try self.copyTail(old, &tail, &output, &index, scratch, false);
@@ -1286,8 +1275,7 @@ pub const Store = struct {
             index_owned = false;
             @memcpy(fresh.devices[0..output.count], devices[0..output.count]);
             @memcpy(fresh.segment_ids[0..output.count], ids[0..output.count]);
-            // Once publication starts the manifest may name the new files, so they must never be
-            // deleted here: a failure keeps both generations on disk and stops writes.
+            // The manifest may name the new files once publishing starts, so keep them.
             published = true;
             {
                 lock.lockUncancelable(&self.directory_mutex, self.io);
@@ -1300,7 +1288,6 @@ pub const Store = struct {
                     return err;
                 };
             }
-            // The new generation owns the output files from here.
             fresh.count = output.count;
             output.count = 0;
             @memcpy(old_ids[0..old.count], old.segment_ids[0..old.count]);
@@ -1362,7 +1349,7 @@ pub const Store = struct {
         defer self.writer.unlock(self.io);
         if (self.closed) return error.Closed;
         if (self.failed) return error.WriterFailed;
-        // Only appends change the index, and they hold the writer lock.
+        // Only appends change the index, under the writer lock.
         const generation = self.generation;
         try live.ensureTotalCapacity(self.allocator, generation.index.count);
         const Collect = struct {
@@ -1385,7 +1372,6 @@ pub const Store = struct {
         };
     }
 
-    /// Copies live records in chunk order into base frames, checking each against the index.
     fn writeBase(self: *Store, old: *Generation, live: []const Live, output: *CompactionOutput, index: *Index, base_id: u64, scratch: []u8, staging: []u8, source_bytes: *u64) !void {
         var builder = frame.Builder.init(staging);
         var reads: std.ArrayListUnmanaged(u32) = .empty;
@@ -1395,7 +1381,6 @@ pub const Store = struct {
 
         var first: usize = 0;
         while (first < live.len) {
-            // A run of records in chunk order that fills one frame.
             var last = first;
             var size: usize = frame.header_len;
             while (last < live.len and last - first < frame.max_records) : (last += 1) {
@@ -1407,7 +1392,7 @@ pub const Store = struct {
             if (last == first) return error.BatchTooLarge;
             const window = live[first..last];
 
-            // Read in file order, coalescing nearby records, and drop each into its place.
+            // Read in file order, then place each record in chunk order.
             reads.clearRetainingCapacity();
             for (0..window.len) |i| try reads.append(self.allocator, @intCast(i));
             std.mem.sort(u32, reads.items, window, liveLessThan);
@@ -1462,7 +1447,7 @@ pub const Store = struct {
         offset: u64,
     };
 
-    /// Copies frames written after the snapshot, verifying them; `locked` means the writer lock is held.
+    /// `locked` means the writer lock is held.
     fn copyTail(self: *Store, old: *Generation, tail: *Tail, output: *CompactionOutput, index: *Index, scratch: []u8, locked: bool) !u64 {
         const end_position, const end_offset = if (locked) .{ old.count - 1, self.offset } else blk: {
             try lock.lock(&self.writer, self.io);
@@ -1495,7 +1480,6 @@ pub const Store = struct {
         }
     }
 
-    /// Retries removing a retired generation's segments after a cleanup failure.
     pub fn reclaim(self: *Store, generation: u64, ids: []const u64) !reclamation.Result {
         try lock.lock(&self.writer, self.io);
         defer self.writer.unlock(self.io);
@@ -1514,8 +1498,6 @@ pub const Store = struct {
         }
         return err;
     }
-
-    // Lifecycle
 
     pub fn close(self: *Store) !void {
         lock.lockUncancelable(&self.compact_mutex, self.io);

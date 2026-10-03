@@ -25,7 +25,6 @@ pub const OverlayWorld = struct {
     const present = 1;
     const inline_len = 8192;
 
-    /// Opens or creates the overlay directory.
     pub fn open(allocator: std.mem.Allocator, io: std.Io, base: *World, parent: std.Io.Dir, name: []const u8, options: world_module.Options) !OverlayWorld {
         return .{
             .allocator = allocator,
@@ -61,7 +60,6 @@ pub const OverlayWorld = struct {
         self.overlay = try openOverlay(self.allocator, self.io, self.parent, self.name, self.options);
     }
 
-    /// Looks up a value in the overlay.
     pub fn lookup(self: *OverlayWorld, key: Key, output: []u8) !Lookup {
         var stack: [inline_len]u8 = undefined;
         var heap: []u8 = &.{};
@@ -102,7 +100,6 @@ pub const OverlayWorld = struct {
         };
     }
 
-    /// Writes changes as one batch with the overlay's next batch ID.
     pub fn write(self: *OverlayWorld, entries: []const Entry) !void {
         if (entries.len == 0) return error.EmptyBatch;
         var total: usize = 0;

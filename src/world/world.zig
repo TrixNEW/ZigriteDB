@@ -24,7 +24,6 @@ pub const Options = struct {
     cache: cache_module.Options = .{},
 };
 
-/// World format marker: "ZGWD", u16 version, u16 zero, CRC-32C of the first 8 bytes.
 pub const format_file = "ZIGRITE";
 pub const format_version = 2;
 
@@ -81,7 +80,7 @@ pub const World = struct {
         try options.region.validate();
         var directory = try Directory.init(dir, io);
         errdefer directory.deinit();
-        // Region directories a crashed process created may not be durable yet.
+        // Region directories from a crash may not be durable yet.
         try directory.syncEntries();
         try checkFormat(&directory);
         const slots = try allocator.alloc(Slot, options.max_open_regions);
@@ -100,7 +99,6 @@ pub const World = struct {
         return result;
     }
 
-    /// Writes one atomic batch; `batch.id` zero takes the region's next ID.
     pub fn write(self: *World, batch: WriteBatch) !AppendResult {
         const size = try batch.validate();
         if (size > self.options.region.batch_buffer_size) return error.BufferTooSmall;
@@ -110,7 +108,7 @@ pub const World = struct {
         return store.write(batch);
     }
 
-    /// A save barrier for one region: one append, durable on return.
+    /// Durable on return.
     pub fn writeGroup(self: *World, batches: []const WriteBatch) !AppendResult {
         const size = try write_module.validateGroup(batches);
         if (size > self.options.region.batch_buffer_size) return error.BufferTooSmall;
@@ -163,7 +161,6 @@ pub const World = struct {
 
     const read_chunk = 32;
 
-    /// Reads every component of one chunk in a single call; see `Store.getChunk`.
     pub fn getChunk(self: *World, dimension: i32, chunk_x: i32, chunk_z: i32, buffer: []u8, records: []ChunkRecord, result: *ChunkResult) !void {
         result.* = .{ .count = 0, .required = 0 };
         const region: Region = .{ .dimension = dimension, .x = chunk_x >> 5, .z = chunk_z >> 5 };
@@ -280,7 +277,7 @@ pub const World = struct {
         return .{ .dimension = parts[0], .x = parts[1], .z = parts[2] };
     }
 
-    /// Creates the format marker in an empty world, and refuses v1 worlds that need migrating.
+    /// Refuses format 1 worlds.
     fn checkFormat(directory: *Directory) !void {
         var bytes: [12]u8 = undefined;
         const io = directory.io;
@@ -296,7 +293,7 @@ pub const World = struct {
             return;
         } else |err| if (err != error.FileNotFound) return err;
 
-        // Without a marker, a region's manifest tells the format.
+        // No marker yet: check a region's manifest.
         var iterator = directory.dir.iterate();
         while (try iterator.next(io)) |entry| {
             if (entry.kind != .directory or parseRegionName(entry.name) == null) continue;

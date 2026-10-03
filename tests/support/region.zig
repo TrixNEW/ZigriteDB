@@ -17,7 +17,6 @@ pub fn batch(id: u64, entries: []const db.Entry) db.WriteBatch {
     return .{ .id = id, .entries = entries };
 }
 
-/// Segment size that holds exactly the given batches.
 pub fn segmentFor(batches: []const db.WriteBatch) !u64 {
     var size: u64 = db.segment.encoded_len;
     for (batches) |b| size += try b.validate();
@@ -32,7 +31,6 @@ pub fn segmentLength(dir: std.Io.Dir) !u64 {
     return (try dir.statFile(std.testing.io, segment_name, .{})).size;
 }
 
-/// Turns on test fault injection for the rest of the scope.
 pub fn inject(faults: *db.storage.Faults) void {
     db.storage.faults = faults;
 }

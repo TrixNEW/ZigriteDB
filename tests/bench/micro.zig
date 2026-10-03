@@ -1,6 +1,4 @@
-//! Micro-benchmarks for single components: CRC dispatch, LZ4 on real values, and the
-//! dense region index against the v1-style hash map. Run with
-//! `zig build micro -Doptimize=ReleaseFast -- [dataset.zgds]`.
+//! zig build micro -Doptimize=ReleaseFast -- [dataset.zgds]
 const std = @import("std");
 const db = @import("zigritedb");
 
@@ -139,7 +137,6 @@ fn indexBench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer) !vo
         sink +%= map.get(@as(u64, k.slot) << 16 | k.local).?.stored_len;
     }
     const map_lookup = t.seconds();
-    // A chunk read in v1 looks up each component it wants.
     t = Timer.begin(io);
     for (0..lookups / per_chunk) |i| {
         const slot: u64 = @as(u10, @truncate(i));
@@ -162,7 +159,6 @@ fn indexBench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer) !vo
     });
 }
 
-/// Tracks the peak bytes held, to compare index memory.
 const CountingAllocator = struct {
     parent: std.mem.Allocator,
     held: usize = 0,

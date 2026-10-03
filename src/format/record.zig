@@ -1,13 +1,7 @@
 const std = @import("std");
 const crc = @import("crc.zig");
 
-/// One chunk record: a 12-byte header, the stored value, then CRC-32C of both.
-///
-///   0  u16  bits 0-9 chunk slot, bit 10 delete, bits 11-12 compression
-///   2  u8   component tag
-///   3  i8   subchunk Y
-///   4  u32  stored length
-///   8  u32  raw length
+// A 12-byte header, the value, then CRC-32C of both.
 pub const header_len = 12;
 pub const overhead = header_len + 4;
 pub const max_value_len = 16 * 1024 * 1024;
@@ -69,7 +63,6 @@ pub const Header = struct {
             .stored_len = std.mem.readInt(u32, bytes[4..8], .little),
             .raw_len = std.mem.readInt(u32, bytes[8..12], .little),
         };
-        // Only subchunks carry a Y.
         if (bytes[2] != subchunk_tag and bytes[3] != 0) return error.InvalidFlags;
         try header.validate();
         return header;
@@ -85,7 +78,7 @@ pub const Decoded = struct {
     len: usize,
 };
 
-/// Checks one record at the start of `bytes`; the value borrows from it.
+/// The value borrows from `bytes`.
 pub fn decode(bytes: []const u8) Error!Decoded {
     if (bytes.len < overhead) return error.TruncatedRecord;
     const header = try Header.read(bytes[0..header_len]);
@@ -96,7 +89,6 @@ pub fn decode(bytes: []const u8) Error!Decoded {
     return .{ .header = header, .value = bytes[header_len..end], .checksum = checksum, .len = end + 4 };
 }
 
-/// Writes the trailing checksum over a record whose header and value are already in place.
 pub fn seal(bytes: []u8) u32 {
     const end = bytes.len - 4;
     const checksum = crc.hash(bytes[0..end]);

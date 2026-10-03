@@ -8,7 +8,6 @@ import tempfile
 
 from native_faults import API, Key, Operation, Stats, VERSION
 
-
 def check(library, path):
     api = API(library)
     api.options.buffered = 1
@@ -76,12 +75,10 @@ def check(library, path):
             assert api.lib.zg_close(handle) == 0
     print("600 seeded batches, deletes, restarts and compactions passed")
 
-
-
 def check_damaged_files(library):
     api = API(library)
     segment = "0000000000000001-0000000000000001.segment"
-    # Damage at the end of the active segment looks like a torn write, so it needs recovery.
+    # Damage at the active tail looks torn.
     cases = (("MANIFEST", "missing", 8), (segment, "missing", 6),
              (segment, "truncated", 8), (segment, "corrupt", 8), ("MANIFEST", "corrupt", 6))
     for name, damage, expected_status in cases:
@@ -89,7 +86,7 @@ def check_damaged_files(library):
             handle = api.open(path)
             assert api.write(handle, 1, [b"saved"]) == 0
             assert api.lib.zg_close(handle) == 0
-            # Without INDEX, open replays and checks every frame.
+            # Without INDEX, open checks every frame.
             (Path(path) / "00000000-00000000-00000000.region" / "INDEX").unlink()
             source = Path(path) / "00000000-00000000-00000000.region" / name
             if damage == "missing":
@@ -112,7 +109,6 @@ def check_damaged_files(library):
             finally:
                 assert api.lib.zg_close(handle) == 0
     print("Missing, truncated and corrupt files fail safely without overwriting data")
-
 
 if __name__ == "__main__":
     signal.alarm(120)

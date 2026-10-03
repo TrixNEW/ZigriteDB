@@ -3,13 +3,6 @@ const crc = @import("crc.zig");
 
 const Region = @import("key.zig").Region;
 
-/// The authoritative list of a region's segments.
-///
-///   0  "ZGMF"   4 u16 version   6 u16 flags   8 u64 generation   16 i32 dimension, X, Z
-///  28  u32 segment count        32 u64 active segment ID          40 u64 base batch ID
-///  48  u64 region salt          56 u32 zero                      60 u32 CRC-32C of 0..60
-///
-/// Sorted u64 segment IDs follow, then CRC-32C of everything before it.
 pub const header_len = 64;
 pub const version = 2;
 pub const max_segments = 4096;
@@ -30,12 +23,12 @@ pub const Error = error{
     BufferTooSmall,
 };
 
-/// Segment IDs must be sorted, with the active segment last.
+/// Sorted IDs; the last one is active.
 pub const Manifest = struct {
     generation: u64,
     region: Region,
     segments: []const u64,
-    /// Batch ID shared by the generation's compacted base frames; later batches are higher.
+    /// Shared by the generation's base frames.
     base_batch_id: u64 = 0,
     salt: u64,
 
@@ -108,7 +101,6 @@ pub fn decode(bytes: []const u8, segment_ids: []u64) Error!Manifest {
     };
 }
 
-/// The format version of a manifest, if `bytes` looks like one.
 pub fn peekVersion(bytes: []const u8) ?u16 {
     if (bytes.len < 6 or !std.mem.eql(u8, bytes[0..4], "ZGMF")) return null;
     return std.mem.readInt(u16, bytes[4..6], .little);

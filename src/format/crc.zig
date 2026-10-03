@@ -1,8 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// CRC-32C. Uses the CPU's CRC instruction when present, otherwise slicing-by-8 tables.
-/// Builds that target a CPU with the instruction skip the runtime check entirely.
+/// CRC-32C, using the CPU's instruction when it has one.
 pub const Implementation = enum { hardware, software };
 
 const native = switch (builtin.cpu.arch) {
@@ -13,14 +12,14 @@ const native = switch (builtin.cpu.arch) {
 
 const Update = *const fn (u32, []const u8) u32;
 
-// Starts at `resolve`, which swaps in the chosen implementation on first use.
+// Picks the implementation on first use.
 var selected: std.atomic.Value(Update) = .init(&resolve);
 
 pub fn hash(bytes: []const u8) u32 {
     return ~update(0xffff_ffff, bytes);
 }
 
-/// Raw register update; start from 0xffff_ffff and invert the result, or use `hash`.
+/// Start from 0xffff_ffff and invert the result.
 pub inline fn update(crc: u32, bytes: []const u8) u32 {
     if (native) return hardware(crc, bytes);
     return selected.load(.monotonic)(crc, bytes);
@@ -39,7 +38,7 @@ fn resolve(crc: u32, bytes: []const u8) u32 {
 fn detect() bool {
     switch (builtin.cpu.arch) {
         .x86_64 => {
-            // CPUID.1:ECX.SSE4_2[bit 20] covers the crc32 instruction.
+            // SSE4.2, which has crc32.
             var ecx: u32 = undefined;
             asm volatile ("cpuid"
                 : [_] "={ecx}" (ecx),
@@ -61,7 +60,7 @@ pub fn hardware(initial: u32, bytes: []const u8) u32 {
     var crc: u64 = initial;
     var i: usize = 0;
     while (i + 8 <= bytes.len) : (i += 8) crc = step64(crc, std.mem.readInt(u64, bytes[i..][0..8], .little));
-    // The few tail bytes go through the table; Zig's own x86 backend cannot encode crc32b.
+    // Zig's own backend can't encode crc32b, so tails use the table.
     return software(@truncate(crc), bytes[i..]);
 }
 

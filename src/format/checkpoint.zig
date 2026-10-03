@@ -4,17 +4,7 @@ const index_module = @import("../index/index.zig");
 const Location = index_module.Location;
 const record = @import("record.zig");
 
-/// An optional snapshot of a region's index, written on clean close.
-/// It only covers data that was already synced, is never synced itself, and is ignored
-/// whenever anything disagrees with the manifest or segments, which stay authoritative.
-///
-///   0  "ZGIX"   4 u16 version   6 u16 flags (bit 0: fingerprints)   8 u64 generation
-///  16  u64 salt                 24 u32 covered segments             28 u32 entry count
-///  32  u64 offset covered in the last covered segment               40 u64 last batch ID
-///  48  u64 total bytes          56 u8 seen batch   57..60 zero      60 u32 CRC-32C of 0..60
-///
-/// Then the covered segment IDs (u64 each), 1024 per-slot entry counts (u16 each), the
-/// entries in slot order, and a trailing CRC-32C of everything after the header.
+// Index snapshot written on clean close. Never synced; ignored on any mismatch.
 pub const name = "INDEX";
 pub const header_len = 64;
 pub const version = 1;

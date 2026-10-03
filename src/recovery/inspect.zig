@@ -33,7 +33,7 @@ pub const Report = struct {
     orphans: []const Orphan = &.{},
 };
 
-/// Reports what a region directory holds without changing it. `scratch` holds one frame.
+/// Read-only. `scratch` holds one frame.
 pub fn inspect(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: Options, scratch: []u8, orphans: []Orphan) !Report {
     var directory = try Directory.init(dir, io);
     defer directory.deinit();

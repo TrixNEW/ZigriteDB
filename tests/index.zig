@@ -8,7 +8,6 @@ const salt = 9;
 
 const Change = struct { x: u5 = 0, z: u5 = 0, component: db.Component = .version, y: i8 = 0, value: ?[]const u8 };
 
-/// Encodes one frame at `offset` and returns it as a scanned batch.
 fn frameOf(buffer: []u8, id: u64, offset: u64, changes: []const Change) !db.recovery.Batch {
     var builder: db.frame.Builder = .init(buffer);
     for (changes) |c| try builder.add(@as(u10, c.z) * 32 + c.x, db.key.localKey(c.component, c.y), c.value, null, 0);
@@ -50,7 +49,6 @@ test "the key limit counts net additions and leaves the index untouched when exc
     try testing.expectError(error.IndexFull, index.prepare(&.{try frameOf(&buffer, 2, 100, &.{.{ .x = 2, .value = "c" }})}, 0));
     try testing.expectEqual(@as(u32, 2), index.count);
     try testing.expectEqual(@as(u64, 1), index.lastBatchId());
-    // Replacing and swapping keys at the limit is fine.
     try index.apply(try frameOf(&buffer, 2, 100, &.{ .{ .x = 1, .value = null }, .{ .x = 2, .value = "c" }, .{ .value = "d" } }), 0);
     try testing.expectEqual(@as(u32, 2), index.count);
 }

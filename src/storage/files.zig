@@ -30,7 +30,6 @@ pub fn openManifest(dir: std.Io.Dir, io: std.Io) !std.Io.File {
     };
 }
 
-/// A read-only regular file that is not a symlink.
 pub fn openRegularFile(dir: std.Io.Dir, io: std.Io, name: [:0]const u8) !std.Io.File {
     return openRegular(dir, io, name, false);
 }

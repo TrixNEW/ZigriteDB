@@ -5,7 +5,6 @@ const segment = @import("../format/segment.zig");
 const File = @import("../io/file.zig").File;
 const files = @import("files.zig");
 
-/// Segments of a generation being written by compaction or recovery.
 pub const CompactionOutput = struct {
     io: std.Io,
     dir: std.Io.Dir,
@@ -20,13 +19,11 @@ pub const CompactionOutput = struct {
     bytes: u64 = 0,
     synced: usize = 0,
 
-    /// Closes every file still owned here; a published generation takes them over first.
     pub fn deinit(self: *CompactionOutput) void {
         for (self.devices[0..self.count]) |device| device.handle.close(self.io);
         self.count = 0;
     }
 
-    /// Removes the files of an unpublished generation.
     pub fn discard(self: *CompactionOutput) void {
         const count = self.count;
         self.deinit();
@@ -48,7 +45,7 @@ pub const CompactionOutput = struct {
         return .{ .position = self.count - 1, .offset = offset };
     }
 
-    /// Syncs every segment written since the last call, creating one if none exist yet.
+    /// Creates a segment if none exist yet.
     pub fn sync(self: *CompactionOutput) !void {
         if (self.count == 0) try self.rotate();
         for (self.devices[self.synced..self.count]) |device| try device.sync();

@@ -64,7 +64,7 @@ test "failed writes leave the old index visible and stop the writer" {
 
         var output: [128]u8 = undefined;
         if (sync_failure) {
-            // The append landed and was published before its fsync failed.
+            // Published before the fsync failed.
             try testing.expectEqualStrings("new", (try store.get(key(0), &output)).?);
         } else {
             try testing.expectEqualStrings("old", (try store.get(key(0), &output)).?);
@@ -202,7 +202,7 @@ test "a failed rotation publication stops writes and keeps what was there" {
         try testing.expectError(error.WriterFailed, store.write(batch(3, &.{put(1, "later")})));
         try tmp.dir.deleteFile(io, "MANIFEST.tmp");
     }
-    // The unpublished segment is left behind and cleared on the next open.
+    // Left behind, then cleared on open.
     _ = try tmp.dir.statFile(io, "0000000000000001-0000000000000002.segment", .{});
     var store = try db.Store.open(testing.allocator, io, tmp.dir, try small());
     defer store.deinit();
@@ -247,7 +247,7 @@ test "open restores data, accepts new writes, and refuses partial tails" {
         try store.close();
     }
     {
-        // A clean close's INDEX lets open skip its fsyncs; without it open syncs and sees the error.
+        // INDEX lets open skip its fsyncs.
         var faults: db.storage.Faults = .{ .fail_sync = true };
         support.inject(&faults);
         defer support.clearFaults();
@@ -276,7 +276,7 @@ test "losing unsynced writes preserves the last flushed batch" {
             if (flush) try store.flush();
             synced = store.synced_offset;
         }
-        // Drop what never reached the disk, as a power cut would.
+        // Drop unsynced bytes, as a power cut would.
         const file = try support.openFile(tmp.dir, segment_name);
         try file.handle.setLength(io, synced);
         file.handle.close(io);
@@ -517,7 +517,6 @@ test "getChunk returns every component of a chunk in key order" {
     try testing.expectEqual(@as(i8, -4), records[2].subchunk_y);
     try testing.expectEqualSlices(u8, &big, records[2].value);
     try testing.expectEqualStrings("tile", records[3].value);
-    // Both frames sit close together, so one read covers the chunk.
     try testing.expectEqual(@as(u64, 1), stats.disk_reads.load(.monotonic));
 
     try testing.expectError(error.BufferTooSmall, store.getChunk(3, 4, buffer[0..10], &records, &result));
@@ -993,5 +992,76 @@ test "stats count gets, writes, bytes and real reads only" {
     _ = try store.getSized(key(1), &output, &required);
     try testing.expectEqual(@as(u64, 3), stats.get_calls.load(.monotonic));
     try testing.expectEqual(@as(u64, 2), stats.disk_reads.load(.monotonic));
+    try store.close();
+}
+
+const Hammer = struct {
+    store: *db.Store,
+    x: i32,
+    rounds: usize,
+    ids: []u64,
+    failure: ?anyerror = null,
+
+    fn run(self: *Hammer) void {
+        for (0..self.rounds) |round| {
+            var value: [24]u8 = undefined;
+            std.mem.writeInt(u64, value[0..8], round, .little);
+            @memset(value[8..], @truncate(round));
+            const entries = [_]db.Entry{ put(self.x, &value), put(self.x + 16, if (round % 5 == 0) null else &value) };
+            const result = self.store.write(batch(0, &entries)) catch |err| {
+                self.failure = err;
+                return;
+            };
+            self.ids[round] = result.batch_id;
+        }
+    }
+};
+
+fn collide(store: *db.Store, failures: *std.atomic.Value(usize)) void {
+    // Losers must get BatchOrder.
+    for (0..200) |i| {
+        _ = store.write(batch(1_000_000 + i * 3, &.{put(31, "explicit")})) catch |err| {
+            if (err != error.BatchOrder) _ = failures.fetchAdd(1000, .monotonic) else _ = failures.fetchAdd(1, .monotonic);
+        };
+    }
+}
+
+test "many writers in one region get unique IDs and every acknowledged write survives" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const threads = 12;
+    const rounds = 400;
+    var ids: [threads][rounds]u64 = undefined;
+    var hammers: [threads]Hammer = undefined;
+    var collisions: std.atomic.Value(usize) = .init(0);
+    const options: db.store.Options = .{ .max_segment_size = 64 * 1024, .max_segments = 255, .batch_buffer_size = 4096 };
+    {
+        var store = try db.Store.create(testing.allocator, io, tmp.dir, region, options);
+        defer store.deinit();
+        var handles: [threads + 1]std.Thread = undefined;
+        for (&hammers, handles[0..threads], 0..) |*h, *handle, i| {
+            h.* = .{ .store = &store, .x = @intCast(i), .rounds = rounds, .ids = &ids[i] };
+            handle.* = try std.Thread.spawn(.{}, Hammer.run, .{h});
+        }
+        handles[threads] = try std.Thread.spawn(.{}, collide, .{ &store, &collisions });
+        for (handles) |handle| handle.join();
+        try testing.expect(collisions.load(.monotonic) < 1000);
+        for (hammers) |h| try testing.expectEqual(null, h.failure);
+        try store.close();
+    }
+    var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
+    defer seen.deinit(testing.allocator);
+    for (ids) |list| {
+        for (list[1..], list[0 .. rounds - 1]) |later, earlier| try testing.expect(later > earlier);
+        for (list) |id| try testing.expect(!(try seen.getOrPut(testing.allocator, id)).found_existing);
+    }
+    var store = try db.Store.open(testing.allocator, io, tmp.dir, options);
+    defer store.deinit();
+    var output: [24]u8 = undefined;
+    for (0..threads) |i| {
+        const value = (try store.get(key(@intCast(i)), &output)).?;
+        try testing.expectEqual(@as(u64, rounds - 1), std.mem.readInt(u64, value[0..8], .little));
+        try testing.expectEqualStrings(value, (try store.get(key(@intCast(i + 16)), &output)).?);
+    }
     try store.close();
 }

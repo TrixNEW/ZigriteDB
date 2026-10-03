@@ -1,5 +1,4 @@
-// Real-world workloads over a dataset extracted from a Bedrock world (see dataset.c).
-// Runs against ZigriteDB's C API or PMMP's LevelDB with the same records, keys and access order.
+// Realistic workloads over a dataset from dataset.c, against ZigriteDB or PMMP's LevelDB.
 #define _GNU_SOURCE
 #include "harness.h"
 #include <fcntl.h>
@@ -40,6 +39,7 @@ static size_t ops = 2000;
 static double seconds = 10;
 static const char *phases = "import,reopen,load,walk,update,autosave,mixed,compact";
 static const char *target = "region";
+static int read_chunk = 0;
 
 typedef struct {
     int leveldb;
@@ -253,7 +253,6 @@ static void flushStore(Store *store) {
     leveldb_writebatch_destroy(batch);
 }
 
-// Saves `n` records of `chunk`; `values` holds their current bytes.
 static void save(Store *store, const Chunk *chunk, const uint32_t *which, size_t n, uint8_t *const *values) {
     if (!store->leveldb) {
         zg_operation operations[MAX_RECORDS];
@@ -276,9 +275,16 @@ static void save(Store *store, const Chunk *chunk, const uint32_t *which, size_t
     leveldb_writebatch_destroy(batch);
 }
 
-// Loads every record of a chunk into `output`, laid out back to back.
 static void load(Store *store, const Chunk *chunk, uint8_t *output, int check_values) {
     size_t offset = 0;
+#if ZG_ABI_VERSION >= 3
+    if (!store->leveldb && read_chunk) {
+        zg_chunk_record found[MAX_RECORDS];
+        size_t count = 0, required = 0;
+        check(zg_get_chunk(store->zig, 0, chunk->x, chunk->z, output, chunk->bytes, found, MAX_RECORDS, &count, &required));
+        if (count != chunk->count || required != chunk->bytes) exit(1);
+    } else
+#endif
     if (!store->leveldb) {
         zg_read_request requests[MAX_RECORDS];
         zg_read_result results[MAX_RECORDS];
@@ -339,7 +345,7 @@ static uint32_t next(uint32_t *random) {
     return *random >> 8;
 }
 
-// A partial save: the block entity record (or the first record) plus one subchunk.
+// A partial save: block entities plus one subchunk.
 static void update(Worker *worker, const Chunk *chunk) {
     uint32_t which[2];
     size_t n = 0;
@@ -355,7 +361,7 @@ static void update(Worker *worker, const Chunk *chunk) {
         uint32_t pick = first_sub + next(&worker->random) % subchunks;
         if (pick != which[0]) which[n++] = pick;
     }
-    // Saves of one chunk are ordered, as a server would; otherwise final contents could not be checked.
+    // Ordered per chunk, as a server would, so final contents can be checked.
     pthread_mutex_t *stripe = &stripes[(size_t)(chunk - chunks) % 256];
     if (lock_updates) pthread_mutex_lock(stripe);
     for (size_t i = 0; i < n; i++) {
@@ -626,7 +632,6 @@ static void *writer(void *arg) {
     return NULL;
 }
 
-// Same-region contention: every thread saves `ops` partial chunk updates.
 static void phaseWriters(Store *store) {
     initWorkers(ops);
     int region_x = chunks[0].x >> 5, region_z = chunks[0].z >> 5;
@@ -682,6 +687,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "phases")) phases = value;
         else if (!strcmp(argv[i], "target")) target = value;
         else if (!strcmp(argv[i], "verify")) verify = atoi(value);
+        else if (!strcmp(argv[i], "read")) read_chunk = !strcmp(value, "chunk");
         else return 1;
     }
     if (threads < 1 || threads > MAX_THREADS || !ops) return 1;

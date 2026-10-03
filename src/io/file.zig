@@ -28,9 +28,14 @@ pub const File = struct {
         return self.handle.writePositional(self.io, &.{bytes}, offset);
     }
 
-    /// Asks the kernel to start reading the file in the background.
-    pub fn willNeed(self: File) void {
-        if (builtin.os.tag == .linux) _ = std.os.linux.fadvise(self.handle.handle, 0, 0, std.os.linux.POSIX_FADV.WILLNEED);
+    /// Each call is capped at the readahead window, so it goes in steps.
+    pub fn willNeed(self: File, len: u64) void {
+        if (builtin.os.tag != .linux) return;
+        const step = 1024 * 1024;
+        var offset: u64 = 0;
+        while (offset < len) : (offset += step) {
+            _ = std.os.linux.fadvise(self.handle.handle, @intCast(offset), step, std.os.linux.POSIX_FADV.WILLNEED);
+        }
     }
 
     pub fn length(self: File) std.Io.File.LengthError!u64 {
@@ -57,11 +62,10 @@ pub const File = struct {
     }
 };
 
-/// Test-only fault injection; compiled out of every other build.
+/// Test-only fault injection.
 pub const Faults = struct {
     fail_write: bool = false,
     fail_sync: bool = false,
-    /// The next read waits here until `released` is set.
     armed: std.atomic.Value(bool) = .init(false),
     paused: std.atomic.Value(bool) = .init(false),
     released: std.atomic.Value(bool) = .init(false),

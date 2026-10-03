@@ -3,10 +3,6 @@ const crc = @import("crc.zig");
 
 const Region = @import("key.zig").Region;
 
-/// Segment header, followed by frames without padding.
-///
-///   0  "ZGSG"   4 u16 version   6 u16 flags   8 u64 segment ID   16 u64 generation
-///  24  i32 dimension, X, Z      36 u64 region salt               44 u32 CRC-32C of 0..44
 pub const encoded_len = 48;
 pub const version = 2;
 
@@ -62,7 +58,7 @@ pub const Header = struct {
         return header;
     }
 
-    /// The salt is not known from the manifest, so it is compared only when `expected` sets one.
+    /// A zero salt in `expected` skips the salt check.
     pub fn checkIdentity(self: Header, expected: Header) Error!void {
         const mismatch = self.segment_id != expected.segment_id or self.generation != expected.generation or
             !self.region.eql(expected.region) or (expected.salt != 0 and self.salt != expected.salt);
@@ -75,7 +71,7 @@ pub const Header = struct {
     }
 };
 
-/// A per-region salt; never zero so it always takes part in identity checks.
+/// Never zero.
 pub fn newSalt(io: std.Io) u64 {
     var bytes: [8]u8 = undefined;
     io.random(&bytes);

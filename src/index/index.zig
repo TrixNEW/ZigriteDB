@@ -17,7 +17,7 @@ pub const Location = struct {
     offset: u32,
     stored_len: u32,
     raw_len: u32,
-    /// Hash of the stored bytes, only kept for skip_unchanged.
+    /// Only kept for skip_unchanged.
     fingerprint: u32,
     segment: u8,
     compression: record.Compression,
@@ -31,8 +31,7 @@ pub fn fingerprint(compression: record.Compression, stored: []const u8) u32 {
     return @truncate(std.hash.Wyhash.hash(@intFromEnum(compression), stored));
 }
 
-/// Components of one chunk, sorted by local key. One allocation holds the
-/// locations followed by the keys, so lookups scan a dense u16 array.
+/// One chunk's sorted components; keys and locations share one allocation.
 const Chunk = struct {
     data: ?[*]align(@alignOf(Location)) u8 = null,
     len: u16 = 0,
@@ -129,7 +128,6 @@ pub const Entry = struct {
     location: Location,
 };
 
-/// Dense index of one region: 1024 chunk slots, each with a small sorted component list.
 pub const Index = struct {
     allocator: std.mem.Allocator,
     region: Region,
@@ -173,7 +171,7 @@ pub const Index = struct {
         return c.locations()[i];
     }
 
-    /// Copies a chunk's entries into `out`; returns how many exist, which may exceed `out.len`.
+    /// The count returned may exceed `out.len`.
     pub fn chunkEntries(self: *const Index, slot: u10, out: []Entry) usize {
         const c = self.chunks[slot];
         for (c.keys()[0..@min(c.len, out.len)], c.locations()[0..@min(c.len, out.len)], out[0..@min(c.len, out.len)]) |local, location, *entry| {
@@ -191,14 +189,13 @@ pub const Index = struct {
         }
     }
 
-    /// Calls `visit(context, slot, local, location)` for every live entry in slot order.
     pub fn each(self: *const Index, context: anytype, comptime visit: anytype) !void {
         for (self.chunks, 0..) |c, slot| {
             for (c.keys(), c.locations()) |local, location| try visit(context, @as(u10, @intCast(slot)), local, location);
         }
     }
 
-    /// Records the frames' changes and reserves room for them; nothing is visible until `publish`.
+    /// Nothing is visible until `publish`.
     pub fn prepare(self: *Index, batches: []const scan.Batch, segment: usize) !Prepared {
         if (segment >= max_segments) return error.InvalidSegmentId;
         var order = self.order;
@@ -279,7 +276,7 @@ pub const Index = struct {
         self.publish(try self.prepare(&.{batch}, segment));
     }
 
-    /// Fills an empty slot from a checkpoint; keys must be strictly increasing.
+    /// Keys must be strictly increasing.
     pub fn loadChunk(self: *Index, slot: u10, keys: []const u16, locations: []const Location) !void {
         if (keys.len == 0) return;
         const c = &self.chunks[slot];
@@ -294,7 +291,6 @@ pub const Index = struct {
         for (locations) |location| self.live_bytes += location.recordLen();
     }
 
-    /// Inserts one entry without a frame. Entries must not repeat.
     pub fn restore(self: *Index, slot: u10, local: u16, location: Location) !void {
         if (self.count == self.max_keys) return error.IndexFull;
         const c = &self.chunks[slot];
@@ -305,7 +301,6 @@ pub const Index = struct {
         self.live_bytes += location.recordLen();
     }
 
-    /// Bytes held by chunk lists, for memory accounting.
     pub fn memory(self: *const Index) usize {
         var total: usize = @sizeOf([1024]Chunk);
         for (self.chunks) |c| total += Chunk.bytes(c.capacity);

@@ -28,8 +28,7 @@ pub const Result = struct {
     output_bytes: u64 = 0,
 };
 
-/// Copies every verified frame of a region into an empty directory, dropping a torn active tail.
-/// The source is never modified.
+/// Drops a torn active tail; the source is never modified.
 pub fn recoverTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, destination: std.Io.Dir, options: Options) !Result {
     if (options.stats) |s| _ = s.recovery_attempts.fetchAdd(1, .monotonic);
     errdefer if (options.stats) |s| {
