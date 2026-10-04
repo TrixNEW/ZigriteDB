@@ -13,7 +13,7 @@ const native = switch (builtin.cpu.arch) {
 const Update = *const fn (u32, []const u8) u32;
 
 // Picks the implementation on first use.
-var selected: std.atomic.Value(Update) = .init(&resolve);
+var selected: Update = &resolve;
 
 pub fn hash(bytes: []const u8) u32 {
     return ~update(0xffff_ffff, bytes);
@@ -22,7 +22,7 @@ pub fn hash(bytes: []const u8) u32 {
 /// Start from 0xffff_ffff and invert the result.
 pub inline fn update(crc: u32, bytes: []const u8) u32 {
     if (native) return hardware(crc, bytes);
-    return selected.load(.monotonic)(crc, bytes);
+    return @atomicLoad(Update, &selected, .monotonic)(crc, bytes);
 }
 
 pub fn implementation() Implementation {
@@ -31,7 +31,7 @@ pub fn implementation() Implementation {
 
 fn resolve(crc: u32, bytes: []const u8) u32 {
     const chosen: Update = if (detect()) &hardware else &software;
-    selected.store(chosen, .monotonic);
+    @atomicStore(Update, &selected, chosen, .monotonic);
     return chosen(crc, bytes);
 }
 

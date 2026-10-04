@@ -18,9 +18,13 @@ to their initial counts after every cycle. Partial-write failures are recovered
 into a separate directory without changing the source. The runner also verifies
 all frames and compares an import/export round trip.
 
-Install Valgrind (`sudo apt-get install valgrind` on Ubuntu), then run:
+Install Valgrind (`sudo apt-get install valgrind` on Ubuntu). On x86_64, rebuild
+for `x86_64_v2`, which keeps CRC32 but excludes AVX-512 instructions Valgrind
+cannot decode:
 
 ```sh
+zig build native-test native-soak -Dcpu=x86_64_v2
+zig build -Dcpu=x86_64_v2
 python3 tests/native/release_check.py --leak-check --cycles 2 --ops 32
 ```
 

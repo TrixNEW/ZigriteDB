@@ -85,8 +85,9 @@ jobs:
 
       - name: Check native heap and resource cleanup
         run: |
-          zig build native-test native-soak
-          zig build
+          zig test src/format/crc.zig -fllvm -mcpu=baseline
+          zig build native-test native-soak -Dcpu=x86_64_v2
+          zig build -Dcpu=x86_64_v2
           python3 tests/native/release_check.py --leak-check --cycles 2 --ops 32
 
       - name: Run ReleaseFast model soak
