@@ -40,6 +40,7 @@ static double seconds = 10;
 static const char *phases = "import,reopen,load,walk,update,autosave,mixed,compact";
 static const char *target = "region";
 static int read_chunk = 0;
+static uint32_t max_regions = 0;
 
 typedef struct {
     int leveldb;
@@ -207,6 +208,7 @@ static void openStore(Store *store, const char *path, int leveldb) {
         check(zg_options_init(&options));
         options.buffered = !sync_mode;
         options.cache_bytes = cache_bytes;
+        if (max_regions) options.max_open_shards = max_regions;
         check(zg_open((const uint8_t *)path, strlen(path), &options, &store->zig));
         return;
     }
@@ -669,7 +671,7 @@ static void phaseWriters(Store *store) {
 int main(int argc, char **argv) {
     if (argc < 4) {
         fprintf(stderr, "usage: world_bench EMPTY_DIR zig|leveldb DATASET [cache=MiB] [threads=N] [ops=N] [seconds=S]\n"
-                        "       [mode=buffered|sync] [phases=a,b] [target=chunk|region|regions] [verify=0|1]\n");
+                        "       [mode=buffered|sync] [phases=a,b] [target=chunk|region|regions] [verify=0|1] [regions=N]\n");
         return 1;
     }
     const char *path = argv[1];
@@ -688,6 +690,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "target")) target = value;
         else if (!strcmp(argv[i], "verify")) verify = atoi(value);
         else if (!strcmp(argv[i], "read")) read_chunk = !strcmp(value, "chunk");
+        else if (!strcmp(argv[i], "regions")) max_regions = (uint32_t)strtoul(value, NULL, 10);
         else return 1;
     }
     if (threads < 1 || threads > MAX_THREADS || !ops) return 1;

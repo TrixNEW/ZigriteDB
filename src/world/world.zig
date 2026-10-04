@@ -19,7 +19,7 @@ const File = @import("../io/file.zig").File;
 const cache_module = @import("../cache/value.zig");
 
 pub const Options = struct {
-    max_open_regions: usize = 16,
+    max_open_regions: usize = 64,
     region: store_module.Options = .{},
     cache: cache_module.Options = .{},
 };

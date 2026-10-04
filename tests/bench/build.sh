@@ -21,12 +21,14 @@ git -C "$source_dir" checkout --quiet "$leveldb_ref"
 "$cmake_bin" --build "$build_dir" --parallel
 
 if [ ! -f "$repo_dir/zig-out/lib/libzigritedb_native.so" ]; then
-    printf 'Build the Linux ZigriteDB library first: zig build bench -Doptimize=ReleaseSafe\n' >&2
+    printf 'Build ZigriteDB first: zig build -Doptimize=ReleaseSafe\n' >&2
     exit 1
 fi
-cc -std=c11 -O2 -Wall -Wextra -Werror \
-    -I"$repo_dir/include" -I"$source_dir/include" \
-    "$repo_dir/tests/bench/pmmp_native.c" \
-    -L"$repo_dir/zig-out/lib" -L"$build_dir" \
-    -lzigritedb_native -lleveldb -lstdc++ -o "$cache_dir/pmmp_native"
-printf '%s\n' "$cache_dir/pmmp_native"
+for name in world dataset leveldb_dump fsync_probe; do
+    cc -std=c11 -O2 -Wall -Wextra -Werror \
+        -I"$repo_dir/include" -I"$source_dir/include" \
+        "$repo_dir/tests/bench/$name.c" \
+        -L"$repo_dir/zig-out/lib" -L"$build_dir" \
+        -lzigritedb_native -lleveldb -lstdc++ -lpthread -o "$cache_dir/$name"
+done
+printf 'LD_LIBRARY_PATH=%s:%s %s/world\n' "$build_dir" "$repo_dir/zig-out/lib" "$cache_dir"

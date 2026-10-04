@@ -2,6 +2,7 @@
 zig-out/
 *.o
 PLAN.md
-/docs/
+/docs/*
+!/docs/format.md
 
 __pycache__/

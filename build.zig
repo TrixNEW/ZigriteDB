@@ -1,22 +1,5 @@
 const std = @import("std");
 
-fn addBenchExecutable(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    native: *std.Build.Step.Compile,
-    source: []const u8,
-    name: []const u8,
-    needs_pthread: bool,
-) *std.Build.Step.Compile {
-    const bench_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
-    bench_module.addCSourceFile(.{ .file = b.path(source), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-    bench_module.addIncludePath(b.path("include"));
-    bench_module.linkLibrary(native);
-    if (needs_pthread) bench_module.linkSystemLibrary("pthread", .{});
-    return b.addExecutable(.{ .name = name, .root_module = bench_module });
-}
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -57,17 +40,6 @@ pub fn build(b: *std.Build) void {
     const native_tests = b.step("native-test", "Build the C API smoke test");
     native_tests.dependOn(&b.addInstallArtifact(smoke, .{}).step);
     native_tests.dependOn(&b.addInstallArtifact(native, .{}).step);
-
-    if (target.result.os.tag == .linux) {
-        const benchmark = b.step("bench", "Build the native workload benchmark");
-
-        const bench = addBenchExecutable(b, target, optimize, native, "tests/bench/native.c", "native_bench", false);
-        benchmark.dependOn(&b.addInstallArtifact(bench, .{}).step);
-        benchmark.dependOn(&b.addInstallArtifact(native, .{}).step);
-
-        const bench_concurrency = addBenchExecutable(b, target, optimize, native, "tests/bench/native_concurrency.c", "native_bench_concurrency", true);
-        benchmark.dependOn(&b.addInstallArtifact(bench_concurrency, .{}).step);
-    }
 
     const tool_module = b.createModule(.{
         .root_source_file = b.path("src/tool/main.zig"),

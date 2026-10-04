@@ -60,7 +60,7 @@ pub export fn zg_status_message(code: c_int) [*:0]const u8 {
 pub const Options = extern struct {
     version: u32 = abi_version,
     struct_size: u32 = @sizeOf(Options),
-    max_open_shards: u32 = 16,
+    max_open_shards: u32 = 64,
     max_keys: u32 = 65536,
     max_segments: u32 = 64,
     batch_buffer_size: u32 = 1024 * 1024,
