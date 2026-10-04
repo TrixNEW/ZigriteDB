@@ -41,6 +41,16 @@ pub fn build(b: *std.Build) void {
     native_tests.dependOn(&b.addInstallArtifact(smoke, .{}).step);
     native_tests.dependOn(&b.addInstallArtifact(native, .{}).step);
 
+    const soak_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    soak_module.addCSourceFile(.{ .file = b.path("tests/native/native_soak.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    soak_module.addIncludePath(b.path("include"));
+    soak_module.linkLibrary(native);
+    soak_module.linkSystemLibrary("pthread", .{});
+    const soak = b.addExecutable(.{ .name = "native_soak", .root_module = soak_module });
+    const soak_tests = b.step("native-soak", "Build the Linux C API model soak");
+    soak_tests.dependOn(&b.addInstallArtifact(soak, .{}).step);
+    soak_tests.dependOn(&b.addInstallArtifact(native, .{}).step);
+
     const tool_module = b.createModule(.{
         .root_source_file = b.path("src/tool/main.zig"),
         .target = target,

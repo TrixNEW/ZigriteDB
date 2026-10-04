@@ -76,6 +76,34 @@ test "corrupt compaction tail fails while the writer lock is held" {
     try std.testing.expect(store.failed);
 }
 
+test "flush releases the commit mutex before waiting for the writer" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    var store = try Store.create(std.testing.allocator, io, tmp.dir, .{ .dimension = 0, .x = 0, .z = 0 }, .{});
+    defer store.deinit();
+    const Flusher = struct {
+        fn run(target: *Store, failure: *?anyerror) void {
+            target.flush() catch |err| {
+                failure.* = err;
+            };
+        }
+    };
+    var failure: ?anyerror = null;
+    lock.lockUncancelable(&store.writer, io);
+    const thread = std.Thread.spawn(.{}, Flusher.run, .{ &store, &failure }) catch |err| {
+        store.writer.unlock(io);
+        return err;
+    };
+    while (store.writer.state.load(.acquire) != .contended) std.atomic.spinLoopHint();
+    const available = store.commit_mutex.tryLock();
+    if (available) store.commit_mutex.unlock(io);
+    store.writer.unlock(io);
+    thread.join();
+    try std.testing.expect(available);
+    try std.testing.expectEqual(@as(?anyerror, null), failure);
+}
+
 pub const AppendResult = struct {
     batch_id: u64,
     start: u64,
@@ -882,8 +910,14 @@ pub const Store = struct {
         defer self.committed.broadcast(self.io);
         while (self.syncing) self.committed.waitUncancelable(self.io, &self.commit_mutex);
         if (self.commit_error) |err| return err;
+        self.syncing = true;
         const target = self.appended_ticket;
-        self.syncAppended() catch |err| {
+        // Appends take writer before commit_mutex; never wait for writer while holding it.
+        self.commit_mutex.unlock(self.io);
+        const result = self.syncAppended();
+        lock.lockUncancelable(&self.commit_mutex, self.io);
+        self.syncing = false;
+        result catch |err| {
             self.commit_error = err;
             return err;
         };

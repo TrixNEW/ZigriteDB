@@ -53,6 +53,32 @@ test "the key limit counts net additions and leaves the index untouched when exc
     try testing.expectEqual(@as(u32, 2), index.count);
 }
 
+test "deleting the last component preserves capacity for its replacement" {
+    for ([_]bool{ false, true }) |grouped| {
+        var index = try Index.init(testing.allocator, region, 1, 1);
+        defer index.deinit();
+        const empty_memory = index.memory();
+        var buffers: [2][512]u8 = undefined;
+        try index.apply(try frameOf(&buffers[0], 1, 48, &.{.{ .value = "old" }}), 0);
+        const replacement: Change = .{ .component = .subchunk, .y = -1, .value = "new" };
+        if (grouped) {
+            const frames = [_]db.recovery.Batch{
+                try frameOf(&buffers[0], 2, 148, &.{.{ .value = null }}),
+                try frameOf(&buffers[1], 3, 248, &.{replacement}),
+            };
+            index.publish(try index.prepare(&frames, 0));
+        } else try index.apply(try frameOf(&buffers[0], 2, 148, &.{ .{ .value = null }, replacement }), 0);
+        try testing.expectEqual(@as(u32, 1), index.count);
+        try testing.expectEqual(@as(?db.index.Location, null), lookup(&index, 0, .version, 0));
+        try testing.expectEqual(@as(u32, 3), lookup(&index, 0, .subchunk, -1).?.raw_len);
+        try testing.expectEqual(@as(u64, db.record.overhead + 3), index.live_bytes);
+        try index.apply(try frameOf(&buffers[0], 4, 348, &.{.{ .component = .subchunk, .y = -1, .value = null }}), 0);
+        try testing.expectEqual(@as(u32, 0), index.count);
+        try testing.expectEqual(@as(u64, 0), index.live_bytes);
+        try testing.expectEqual(empty_memory, index.memory());
+    }
+}
+
 test "subchunk Y and components never collide, and keys come back sorted" {
     var index = try Index.init(testing.allocator, region, 1, 100);
     defer index.deinit();

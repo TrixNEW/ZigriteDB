@@ -203,6 +203,8 @@ zig build fuzz --fuzz=10000
 
 Native crash, fault and workload checks live in [tests/native](tests/native),
 including multi-region flush faults and repeated C API lifecycle/FD checks.
+See the [release checks](tests/native/README.md) for the concurrent model soak,
+Valgrind heap/resource validation and native Linux release gate.
 ReleaseFast runs native smoke, workloads and concurrency without repeating the
 full fault matrix. Benchmark CI checks contents and tooling, without speed limits.
 See [CI](.github/workflows/ci.yml) for the full set.

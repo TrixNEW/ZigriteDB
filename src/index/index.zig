@@ -257,7 +257,7 @@ pub const Index = struct {
     }
 
     pub fn publish(self: *Index, prepared: Prepared) void {
-        for (prepared.changes) |change| {
+        for (prepared.changes, 0..) |change, i| {
             const c = &self.chunks[change.slot];
             if (change.location) |location| {
                 if (c.put(change.local, location)) |old| self.live_bytes -= old.recordLen() else self.count += 1;
@@ -265,8 +265,9 @@ pub const Index = struct {
             } else if (c.remove(change.local)) |old| {
                 self.live_bytes -= old.recordLen();
                 self.count -= 1;
-                if (c.len == 0) c.free(self.allocator);
             }
+            // Later changes in this chunk still need the reserved storage.
+            if (c.len == 0 and (i + 1 == prepared.changes.len or prepared.changes[i + 1].slot != change.slot)) c.free(self.allocator);
         }
         self.total_bytes += prepared.bytes;
         self.order = prepared.order;
