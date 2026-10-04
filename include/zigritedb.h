@@ -35,14 +35,14 @@ enum zg_component {
     ZG_ACTOR_DIGEST = 0x80 /* Bedrock's "digp" record, stored with its chunk */
 };
 typedef struct {
-    uint32_t version, struct_size, max_open_shards, max_keys;
+    uint32_t version, struct_size, max_open_regions, max_keys;
     uint32_t max_segments, batch_buffer_size;
     uint64_t max_segment_size;
     uint32_t buffered, compression_threshold; /* buffered defaults to 1; set 0 for synchronous writes. */
     /* Budget for cached values only; cache bookkeeping and allocator overhead are extra. */
     uint64_t cache_bytes;
     uint32_t cache_shards;
-    uint32_t skip_unchanged;
+    uint32_t skip_unchanged; /* Single-batch writes only; multi-batch groups keep every frame. */
     /* A region is compacted in the background once it holds compact_min_bytes and less than
        compact_live_percent of it is live. 0 percent turns this off. */
     uint64_t compact_min_bytes;
@@ -99,13 +99,21 @@ int zg_platform_supported(void);
 int zg_key_init(zg_key *out, int32_t dimension, int32_t chunk_x, int32_t chunk_z, uint32_t component, int32_t subchunk_y);
 int zg_key_validate(const zg_key *key);
 int zg_key_region(const zg_key *key, zg_region *out);
+/* Initialize options before changing fields; version and struct_size must match this ABI. */
 int zg_options_init(zg_options *options);
 int zg_options_validate(const zg_options *options);
 int zg_open(const uint8_t *path, size_t path_len, const zg_options *options, zg_handle **out);
+/* Calls on a handle may run concurrently with separate caller-owned buffers.
+   Close requires all other calls on that handle to have returned and consumes it even on error. */
 int zg_close(zg_handle *handle);
+/* Batches contain one region. Buffered writes need a successful flush for durability;
+   write_group is durable on success. After an I/O failure, stop writes and close/reopen. */
 int zg_write(zg_handle *handle, uint64_t batch_id, const zg_operation *operations, size_t count);
 int zg_write_group(zg_handle *handle, const zg_batch *batches, size_t count);
+/* Buffers belong to the caller. NULL output with zero capacity probes the required size.
+   Retries can see concurrent writes; check the returned status and size again. */
 int zg_get(zg_handle *handle, const zg_key *key, uint8_t *output, size_t capacity, size_t *required);
+/* Results and output buffers are usable only when the call returns ZG_OK. */
 int zg_get_many(zg_handle *handle, const zg_read_request *requests, zg_read_result *results, size_t count);
 /* Reads every record of a chunk. ZG_BUFFER_TOO_SMALL fills count and required for a retry;
    ZG_NOT_FOUND means the chunk has no records. */
@@ -114,6 +122,7 @@ int zg_get_chunk(zg_handle *handle, int32_t dimension, int32_t chunk_x, int32_t 
 int zg_aux_get(zg_handle *handle, const uint8_t *key, size_t key_len, uint8_t *output, size_t capacity, size_t *required);
 int zg_aux_put(zg_handle *handle, const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len);
 int zg_aux_delete(zg_handle *handle, const uint8_t *key, size_t key_len);
+/* Covers writes completed before this call; crash atomicity is per region. */
 int zg_flush(zg_handle *handle);
 int zg_compact(zg_handle *handle, int32_t dimension, int32_t region_x, int32_t region_z);
 int zg_last_batch_id(zg_handle *handle, int32_t dimension, int32_t region_x, int32_t region_z, uint64_t *out);

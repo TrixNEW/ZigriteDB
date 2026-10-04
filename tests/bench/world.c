@@ -208,7 +208,7 @@ static void openStore(Store *store, const char *path, int leveldb) {
         check(zg_options_init(&options));
         options.buffered = !sync_mode;
         options.cache_bytes = cache_bytes;
-        if (max_regions) options.max_open_shards = max_regions;
+        if (max_regions) options.max_open_regions = max_regions;
         check(zg_open((const uint8_t *)path, strlen(path), &options, &store->zig));
         return;
     }

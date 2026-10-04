@@ -8,7 +8,7 @@ pub const File = struct {
     io: std.Io,
 
     pub fn readExact(self: File, buffer: []u8, offset: u64) !void {
-        if (builtin.is_test) if (faults) |f| f.pauseRead();
+        if (builtin.is_test) if (faults) |f| if (!f.pause_sync) f.pauseRead();
         return transfer.readExact(self, buffer, offset);
     }
 
@@ -43,6 +43,7 @@ pub const File = struct {
     }
 
     pub fn sync(self: File) !void {
+        if (builtin.is_test) if (faults) |f| if (f.pause_sync) f.pauseRead();
         if (builtin.is_test) if (faults) |f| if (f.fail_sync) return error.InputOutput;
         if (builtin.os.tag != .linux) return self.handle.sync(self.io);
         const linux = std.os.linux;
@@ -66,6 +67,7 @@ pub const File = struct {
 pub const Faults = struct {
     fail_write: bool = false,
     fail_sync: bool = false,
+    pause_sync: bool = false,
     armed: std.atomic.Value(bool) = .init(false),
     paused: std.atomic.Value(bool) = .init(false),
     released: std.atomic.Value(bool) = .init(false),

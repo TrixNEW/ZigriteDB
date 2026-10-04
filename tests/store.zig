@@ -970,6 +970,37 @@ test "skip_unchanged drops no-op puts and deletes but keeps every real change" {
     try store.close();
 }
 
+test "skip_unchanged preserves changes across a group and rejects a failed writer" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const options: db.store.Options = .{ .skip_unchanged = true };
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, options);
+    defer store.deinit();
+    _ = try store.write(batch(1, &.{put(0, "original")}));
+    _ = try store.writeGroup(&.{
+        batch(2, &.{ put(0, "changed"), put(1, "created") }),
+        batch(3, &.{ put(0, "original"), put(1, null) }),
+    });
+    var output: [16]u8 = undefined;
+    try testing.expectEqualStrings("original", (try store.get(key(0), &output)).?);
+    try testing.expectEqual(null, try store.get(key(1), &output));
+    try testing.expectEqual(@as(u64, 3), try store.lastBatchId());
+    try store.close();
+    var reopened = try db.Store.open(testing.allocator, io, tmp.dir, options);
+    defer reopened.deinit();
+    try testing.expectEqualStrings("original", (try reopened.get(key(0), &output)).?);
+    try testing.expectEqual(null, try reopened.get(key(1), &output));
+    var faults: db.storage.Faults = .{ .fail_write = true };
+    db.storage.faults = &faults;
+    defer db.storage.faults = null;
+    try testing.expectError(error.NoSpaceLeft, reopened.write(batch(4, &.{put(2, "torn")})));
+    faults.fail_write = false;
+    try testing.expectError(error.WriterFailed, reopened.write(batch(5, &.{put(0, "original")})));
+    try testing.expectError(error.WriterFailed, reopened.writeGroup(&.{batch(5, &.{put(0, "original")})}));
+    try testing.expectError(error.WriterFailed, reopened.flush());
+    try testing.expectError(error.WriterFailed, reopened.close());
+}
+
 test "stats count gets, writes, bytes and real reads only" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

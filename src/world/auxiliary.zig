@@ -64,7 +64,10 @@ fn readBucket(world: *World, allocator: std.mem.Allocator, key: Key) !?[]u8 {
             buffer = try allocator.alloc(u8, required);
             continue;
         };
-        if (found) |value| return buffer[0..value.len];
+        if (found) |value| return allocator.realloc(buffer, value.len) catch |err| {
+            allocator.free(buffer);
+            return err;
+        };
         allocator.free(buffer);
         return null;
     }
@@ -85,6 +88,7 @@ pub fn get(world: *World, allocator: std.mem.Allocator, key: []const u8) !?[]u8 
 /// Null deletes the key.
 pub fn put(world: *World, allocator: std.mem.Allocator, key: []const u8, value: ?[]const u8) !void {
     if (key.len > std.math.maxInt(u32)) return error.InvalidArgument;
+    if (value) |v| if (v.len > record.max_value_len) return error.BatchTooLarge;
     if (parseKey(key)) |chunk| {
         _ = try world.write(.{ .entries = &.{.{ .key = chunk, .value = value }} });
         return;
@@ -115,6 +119,8 @@ pub fn put(world: *World, allocator: std.mem.Allocator, key: []const u8, value: 
 }
 
 fn append(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, key: []const u8, value: []const u8) !void {
+    if (key.len > record.max_value_len or value.len > record.max_value_len or
+        out.items.len + 8 + key.len + value.len > record.max_value_len) return error.BatchTooLarge;
     var len: [4]u8 = undefined;
     std.mem.writeInt(u32, &len, @intCast(key.len), .little);
     try out.appendSlice(allocator, &len);
@@ -182,5 +188,34 @@ test "chunk-shaped keys go to their chunk record" {
     try std.testing.expectEqualStrings("nbt", (try world.get(parseKey("player_10").?, &output)).?);
     try put(&world, allocator, "player_10", null);
     try std.testing.expectEqual(null, try get(&world, allocator, "player_10"));
+    try world.close();
+}
+
+test "a shrinking auxiliary read returns an allocation of the right size" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try World.open(std.testing.allocator, std.testing.io, tmp.dir, .{});
+    defer world.deinit();
+    try put(&world, std.testing.allocator, "player_10", "original");
+    const Shrinking = struct {
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const w: *World = @ptrCast(@alignCast(ctx));
+            put(w, std.testing.allocator, "player_10", "s") catch unreachable;
+            return std.testing.allocator.rawAlloc(len, alignment, ret);
+        }
+        fn resize(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) bool {
+            return std.testing.allocator.rawResize(memory, alignment, len, ret);
+        }
+        fn remap(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) ?[*]u8 {
+            return std.testing.allocator.rawRemap(memory, alignment, len, ret);
+        }
+        fn free(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+            std.testing.allocator.rawFree(memory, alignment, ret);
+        }
+    };
+    const allocator: std.mem.Allocator = .{ .ptr = &world, .vtable = &.{ .alloc = Shrinking.alloc, .resize = Shrinking.resize, .remap = Shrinking.remap, .free = Shrinking.free } };
+    const value = (try get(&world, allocator, "player_10")).?;
+    defer allocator.free(value);
+    try std.testing.expectEqualStrings("s", value);
     try world.close();
 }

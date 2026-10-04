@@ -58,6 +58,24 @@ pub const Options = struct {
     }
 };
 
+test "corrupt compaction tail fails while the writer lock is held" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var store = try Store.create(allocator, io, tmp.dir, .{ .dimension = 0, .x = 0, .z = 0 }, .{});
+    defer store.deinit();
+    try store.generation.devices[0].writeAll("X", 0);
+    var scratch = try allocator.alloc(u8, 256);
+    defer allocator.free(scratch);
+    var tail: Store.Tail = .{ .position = 0, .offset = segment.encoded_len };
+    var output: CompactionOutput = undefined;
+    lock.lockUncancelable(&store.writer, io);
+    defer store.writer.unlock(io);
+    try std.testing.expectError(error.InvalidMagic, store.copyTail(store.generation, &tail, &output, &store.generation.index, &scratch, true));
+    try std.testing.expect(store.failed);
+}
+
 pub const AppendResult = struct {
     batch_id: u64,
     start: u64,
@@ -330,6 +348,12 @@ pub const Store = struct {
             generation.devices[position] = .{ .handle = try files.openSegment(directory.dir, io, metadata.generation, id, active), .io = io };
             generation.segment_ids[position] = id;
             generation.count += 1;
+            _ = try Scanner.init(generation.devices[position], .{
+                .segment_id = id,
+                .generation = metadata.generation,
+                .region = metadata.region,
+                .salt = metadata.salt,
+            }, if (active) .active else .sealed, .{}, options.max_segment_size);
         }
 
         const covered = try loadCheckpoint(allocator, io, &directory, &generation.index, generation.devices[0..generation.count], metadata, options);
@@ -584,21 +608,10 @@ pub const Store = struct {
             var builder = frame.Builder.init(buffer.bytes[used..]);
             const encoder: ?*lz4.Encoder = if (self.options.compression_threshold == 0) null else &buffer.encoder;
             for (batch.entries) |entry| try builder.add(entry.key.slot(), entry.key.local(), entry.value, encoder, self.options.compression_threshold);
-            if (self.options.skip_unchanged) try self.dropUnchanged(&builder);
-            if (builder.count == 0) continue;
             builders[kept] = builder;
             ids[kept] = batch.id;
             kept += 1;
             used += builder.len;
-        }
-        if (kept == 0) {
-            const result: AppendResult = blk: {
-                lock.lockUncancelable(&self.writer, self.io);
-                defer self.writer.unlock(self.io);
-                break :blk .{ .batch_id = self.generation.index.lastBatchId(), .start = self.offset, .end = self.offset, .synced = false };
-            };
-            if (durable) try self.commitBarrier();
-            return result;
         }
         for (builders[1..kept], builders[0 .. kept - 1]) |*next, previous| {
             std.debug.assert(next.buffer.ptr == previous.buffer.ptr + previous.len);
@@ -606,12 +619,22 @@ pub const Store = struct {
         return self.append(buffer.bytes[0..used], builders[0..kept], ids[0..kept], buffer.batches[0..kept], durable);
     }
 
-    fn append(self: *Store, span: []u8, builders: []frame.Builder, ids: []const u64, batches: []scan.Batch, durable: bool) !AppendResult {
+    fn append(self: *Store, input: []u8, builders: []frame.Builder, ids: []const u64, batches: []scan.Batch, durable: bool) !AppendResult {
         const result: AppendResult, const ticket: ?u64 = blk: {
             try lock.lock(&self.writer, self.io);
             defer self.writer.unlock(self.io);
             if (self.closed) return error.Closed;
             if (self.failed) return error.WriterFailed;
+
+            // ponytail: groups keep every frame until filtering tracks earlier changes.
+            const span = if (self.options.skip_unchanged and builders.len == 1) filtered: {
+                try self.dropUnchanged(&builders[0]);
+                if (builders[0].count == 0) break :blk .{
+                    .{ .batch_id = self.generation.index.lastBatchId(), .start = self.offset, .end = self.offset, .synced = false },
+                    if (durable) self.nextTicket() else null,
+                };
+                break :filtered input[0..builders[0].len];
+            } else input;
 
             if (span.len > self.options.max_segment_size - self.offset) try self.rotate();
             var last = self.generation.index.lastBatchId();
@@ -645,7 +668,7 @@ pub const Store = struct {
             const ticket = if (durable) self.nextTicket() else null;
             break :blk .{ .{ .batch_id = last, .start = start, .end = self.offset, .synced = false }, ticket };
         };
-        self.countWrites(builders);
+        if (builders[0].count != 0) self.countWrites(builders);
         var done = result;
         if (ticket) |t| {
             try self.waitDurable(t);
@@ -831,14 +854,17 @@ pub const Store = struct {
 
     /// Appends continue during the fsync.
     fn syncAppended(self: *Store) !void {
-        const device, const epoch, const offset = blk: {
+        const generation, const device, const epoch, const offset = blk: {
             try lock.lock(&self.writer, self.io);
             defer self.writer.unlock(self.io);
             if (self.closed) return error.Closed;
             if (self.failed) return error.WriterFailed;
             if (self.synced_offset == self.offset) return;
-            break :blk .{ self.generation.devices[self.generation.count - 1], self.epoch, self.offset };
+            const generation = self.generation;
+            _ = generation.readers.fetchAdd(1, .seq_cst);
+            break :blk .{ generation, generation.devices[generation.count - 1], self.epoch, self.offset };
         };
+        defer self.unpin(generation);
         const result = self.timedSync(device);
         lock.lockUncancelable(&self.writer, self.io);
         defer self.writer.unlock(self.io);
@@ -1250,7 +1276,7 @@ pub const Store = struct {
         defer self.allocator.free(staging);
         var source_bytes: u64 = 0;
         self.writeBase(old, live.items, &output, &index, snapshot.last_batch_id, &scratch, &staging, &source_bytes) catch |err|
-            return if (isSourceError(err)) self.sourceFailure(err) else err;
+            return if (isSourceError(err)) self.sourceFailure(err, false) else err;
         try output.sync();
 
         var tail: Tail = .{ .position = snapshot.position, .offset = snapshot.offset };
@@ -1260,7 +1286,7 @@ pub const Store = struct {
             if (copied <= catch_up_bytes) break;
         }
 
-        const old_count = blk: {
+        const old_count, const output_count = blk: {
             try lock.lock(&self.writer, self.io);
             defer self.writer.unlock(self.io);
             if (self.closed) return error.Closed;
@@ -1301,7 +1327,7 @@ pub const Store = struct {
             self.offset = output.offset;
             self.synced_offset = output.offset;
             self.epoch += 1;
-            break :blk old.count;
+            break :blk .{ old.count, fresh.count };
         };
 
         const output_bytes = output.bytes;
@@ -1316,14 +1342,14 @@ pub const Store = struct {
         if (self.options.stats) |s| {
             _ = s.compactions.fetchAdd(1, .monotonic);
             // One per new segment plus the manifest file and two directory syncs.
-            _ = s.fsync_count.fetchAdd(self.generation.count + 3, .monotonic);
+            _ = s.fsync_count.fetchAdd(output_count + 3, .monotonic);
             _ = s.compaction_input_bytes.fetchAdd(source_bytes, .monotonic);
             _ = s.compaction_output_bytes.fetchAdd(output_bytes, .monotonic);
             if (started) |t| _ = s.compaction_duration_ns.fetchAdd(@intCast(t.untilNow(self.io).raw.nanoseconds), .monotonic);
         }
         return .{
             .generation = next_generation,
-            .segment_count = self.generation.count,
+            .segment_count = output_count,
             .source_bytes = source_bytes,
             .output_bytes = output_bytes,
             .cleanup = cleanup,
@@ -1464,10 +1490,10 @@ pub const Store = struct {
                 .generation = old.index.generation,
                 .region = self.region,
                 .salt = self.salt,
-            }, .sealed, index.order, std.math.maxInt(u64)) catch |err| return self.sourceFailure(err);
+            }, .sealed, index.order, std.math.maxInt(u64)) catch |err| return self.sourceFailure(err, locked);
             if (last) scanner.length = end_offset;
-            scanner.seek(tail.offset) catch |err| return self.sourceFailure(err);
-            while (scanner.nextGrowing(self.allocator, scratch) catch |err| return self.sourceFailure(err)) |batch| {
+            scanner.seek(tail.offset) catch |err| return self.sourceFailure(err, locked);
+            while (scanner.nextGrowing(self.allocator, scratch) catch |err| return self.sourceFailure(err, locked)) |batch| {
                 const placed = try output.append(batch.bytes);
                 var moved = batch;
                 moved.offset = placed.offset;
@@ -1491,10 +1517,10 @@ pub const Store = struct {
         return reclamation.reclaim(&self.directory, self.generation.index.generation, generation, ids);
     }
 
-    fn sourceFailure(self: *Store, err: anyerror) anyerror {
+    fn sourceFailure(self: *Store, err: anyerror, locked: bool) anyerror {
         if (err != error.Canceled) {
-            lock.lockUncancelable(&self.writer, self.io);
-            defer self.writer.unlock(self.io);
+            if (!locked) lock.lockUncancelable(&self.writer, self.io);
+            defer if (!locked) self.writer.unlock(self.io);
             self.failed = true;
         }
         return err;

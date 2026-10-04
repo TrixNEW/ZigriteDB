@@ -11,7 +11,7 @@ from native_faults import API, Key, Operation, Stats, VERSION
 def check(library, path):
     api = API(library)
     api.options.buffered = 1
-    api.options.max_open_shards = 2
+    api.options.max_open_regions = 2
     api.options.max_segment_size = 8192
     api.options.batch_buffer_size = 4096
     api.options.compression_threshold = 128

@@ -60,7 +60,7 @@ pub export fn zg_status_message(code: c_int) [*:0]const u8 {
 pub const Options = extern struct {
     version: u32 = abi_version,
     struct_size: u32 = @sizeOf(Options),
-    max_open_shards: u32 = 64,
+    max_open_regions: u32 = 64,
     max_keys: u32 = 65536,
     max_segments: u32 = 64,
     batch_buffer_size: u32 = 1024 * 1024,
@@ -85,7 +85,7 @@ pub const Options = extern struct {
             self.skip_unchanged > 1 or self.compact_live_percent > 100 or self.reserved != 0) return error.InvalidArgument;
         if (self.compression_threshold > db.record.max_value_len) return error.InvalidArgument;
         const result: db.WorldOptions = .{
-            .max_open_regions = self.max_open_shards,
+            .max_open_regions = self.max_open_regions,
             .region = .{
                 .max_keys = self.max_keys,
                 .max_segments = self.max_segments,
@@ -112,6 +112,7 @@ pub const Options = extern struct {
 comptime {
     std.debug.assert(@sizeOf(Options) == 72);
     std.debug.assert(@offsetOf(Options, "struct_size") == 4);
+    std.debug.assert(@offsetOf(Options, "max_open_regions") == 8);
     std.debug.assert(@offsetOf(Options, "compression_threshold") == 36);
     std.debug.assert(@offsetOf(Options, "cache_bytes") == 40);
     std.debug.assert(@offsetOf(Options, "skip_unchanged") == 52);
@@ -421,13 +422,14 @@ pub export fn zg_aux_get(optional: ?*Handle, key: ?[*]const u8, key_len: usize, 
     defer allocator.free(value);
     length.* = value.len;
     if (capacity < value.len) return .buffer_too_small;
-    @memcpy(output.?[0..value.len], value);
+    if (value.len != 0) @memcpy(output.?[0..value.len], value);
     return .ok;
 }
 
 pub export fn zg_aux_put(optional: ?*Handle, key: ?[*]const u8, key_len: usize, value: ?[*]const u8, value_len: usize) Status {
     const handle = optional orelse return .invalid_argument;
     if (key == null or (value == null and value_len != 0)) return .invalid_argument;
+    if (value_len > db.record.max_value_len) return .limit;
     const bytes: []const u8 = if (value) |v| v[0..value_len] else &.{};
     db.aux.put(&handle.world, allocator, key.?[0..key_len], bytes) catch |err| return status(err);
     return .ok;
@@ -524,8 +526,9 @@ pub export fn zg_prefetch(optional: ?*Handle, keys: ?[*]const Key, count: usize)
 }
 
 pub export fn zg_list_regions(optional: ?*Handle, out: ?[*]Region, capacity: usize, count: ?*usize) Status {
-    const handle = optional orelse return .invalid_argument;
     const total = count orelse return .invalid_argument;
+    total.* = 0;
+    const handle = optional orelse return .invalid_argument;
     if (capacity != 0 and out == null) return .invalid_argument;
     const all = handle.world.regions(allocator) catch |err| return status(err);
     defer allocator.free(all);
@@ -543,8 +546,9 @@ pub export fn zg_list_regions(optional: ?*Handle, out: ?[*]Region, capacity: usi
 }
 
 pub export fn zg_list_keys(optional: ?*Handle, dimension: i32, x: i32, z: i32, component: u32, out: ?[*]Key, capacity: usize, count: ?*usize) Status {
-    const handle = optional orelse return .invalid_argument;
     const total = count orelse return .invalid_argument;
+    total.* = 0;
+    const handle = optional orelse return .invalid_argument;
     if (capacity != 0 and out == null) return .invalid_argument;
     const filter: db.KeyFilter = if (component == std.math.maxInt(u32))
         .{}
@@ -625,7 +629,7 @@ fn status(err: anyerror) Status {
         error.BatchOrder => .batch_order,
         error.BatchTooLarge, error.IndexFull, error.TooManySegments, error.SegmentFull, error.GenerationExhausted, error.SegmentIdExhausted, error.TooManyKeys => .limit,
         error.InvalidArgument, error.InvalidSubchunkY, error.RegionMismatch, error.InvalidBufferSize, error.InvalidRegionLimit, error.InvalidSegmentSize, error.EmptyBatch => .invalid_argument,
-        error.InvalidMagic, error.ChecksumMismatch, error.InvalidCompressedData, error.TruncatedHeader, error.TruncatedRecord, error.TruncatedFrame, error.TruncatedManifest, error.InvalidLength, error.InvalidFrame, error.BatchMismatch, error.IdentityMismatch, error.IncompleteBatch, error.InvalidGeneration, error.InvalidSegmentCount, error.InvalidSegmentId, error.InvalidSegmentOrder, error.InvalidActiveSegment, error.IndexMismatch, error.MissingSegment, error.InvalidFormatFile => .corruption,
+        error.InvalidMagic, error.ChecksumMismatch, error.InvalidCompressedData, error.TruncatedHeader, error.TruncatedRecord, error.TruncatedFrame, error.TruncatedManifest, error.InvalidLength, error.InvalidFrame, error.BatchMismatch, error.IdentityMismatch, error.IncompleteBatch, error.InvalidGeneration, error.InvalidSegmentCount, error.InvalidSegmentId, error.InvalidSegmentOrder, error.InvalidActiveSegment, error.IndexMismatch, error.MissingSegment, error.InvalidFormatFile, error.InvalidAuxBucket, error.ManifestTooLarge, error.SegmentTooLarge, error.UnexpectedEndOfFile => .corruption,
         error.UnsupportedVersion, error.UnsupportedCompression, error.InvalidFlags => .unsupported,
         else => .io_error,
     };

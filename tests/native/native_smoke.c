@@ -9,6 +9,7 @@
 
 _Static_assert(ZG_ABI_VERSION == 3u, "ABI 3 added compaction thresholds and Bedrock component tags");
 _Static_assert(sizeof(zg_options) == 72, "zg_options layout changed; bump ZG_ABI_VERSION");
+_Static_assert(offsetof(zg_options, max_open_regions) == 8, "region limit layout changed");
 
 int main(int argc, char **argv) {
     assert(argc == 2);
@@ -37,6 +38,7 @@ int main(int argc, char **argv) {
     zg_options options;
     assert(zg_options_init(&options) == ZG_OK);
     assert(options.buffered == ZG_BUFFERED);
+    assert(options.max_open_regions == 64);
     assert(zg_options_validate(&options) == ZG_OK);
     assert(zg_options_validate(NULL) == ZG_INVALID_ARGUMENT);
     options.buffered = 2;
@@ -164,6 +166,11 @@ int main(int argc, char **argv) {
     assert(keys[0].subchunk_y == -2 && keys[1].subchunk_y == 3);
     assert(zg_list_keys(handle, 0, 0, 0, ZG_ALL_COMPONENTS, keys, 1, &count) == ZG_BUFFER_TOO_SMALL);
     assert(zg_list_keys(handle, 0, 0, 0, 256, keys, 8, &count) == ZG_INVALID_ARGUMENT);
+    assert(count == 0);
+    count = 99;
+    assert(zg_list_regions(NULL, NULL, 0, &count) == ZG_INVALID_ARGUMENT && count == 0);
+    count = 99;
+    assert(zg_list_keys(NULL, 0, 0, 0, ZG_ALL_COMPONENTS, NULL, 0, &count) == ZG_INVALID_ARGUMENT && count == 0);
     uint8_t aux_out[16];
     assert(zg_aux_get(handle, (const uint8_t *)"~local_player", 13, aux_out, sizeof(aux_out), &required) == ZG_NOT_FOUND);
     assert(zg_aux_put(handle, (const uint8_t *)"~local_player", 13, (const uint8_t *)"nbt", 3) == ZG_OK);
@@ -171,6 +178,9 @@ int main(int argc, char **argv) {
     assert(zg_aux_get(handle, (const uint8_t *)"~local_player", 13, aux_out, sizeof(aux_out), &required) == ZG_OK);
     assert(memcmp(aux_out, "nbt", 3) == 0);
     assert(zg_list_regions(handle, NULL, 0, &count) == ZG_BUFFER_TOO_SMALL && count == 1);
+    assert(zg_aux_put(handle, (const uint8_t *)"~local_player", 13, aux_out, ZG_MAX_VALUE_SIZE + 1u) == ZG_LIMIT);
+    assert(zg_aux_put(handle, (const uint8_t *)"~local_player", 13, NULL, 0) == ZG_OK);
+    assert(zg_aux_get(handle, (const uint8_t *)"~local_player", 13, NULL, 0, &required) == ZG_OK && required == 0);
     assert(zg_aux_delete(handle, (const uint8_t *)"~local_player", 13) == ZG_OK);
     assert(zg_aux_get(handle, (const uint8_t *)"~local_player", 13, aux_out, sizeof(aux_out), &required) == ZG_NOT_FOUND);
     assert(zg_flush(handle) == ZG_OK);

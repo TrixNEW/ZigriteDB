@@ -420,3 +420,52 @@ test "reopening clears segments of a compaction that never published" {
     try testing.expectEqualStrings("saved", (try store.get(key(0), &value)).?);
     try store.close();
 }
+
+test "compaction keeps a generation alive until its in-flight fsync returns" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{});
+    defer store.deinit();
+    _ = try store.write(batch(1, &.{put(0, "saved")}));
+    var faults: db.storage.Faults = .{ .pause_sync = true, .armed = .init(true) };
+    db.storage.faults = &faults;
+    defer db.storage.faults = null;
+    const Work = struct {
+        store: *db.Store,
+        compact: bool,
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            if (self.compact) {
+                _ = self.store.compact() catch |err| {
+                    self.failure = err;
+                    return;
+                };
+            } else self.store.flush() catch |err| {
+                self.failure = err;
+            };
+        }
+    };
+    var flush: Work = .{ .store = &store, .compact = false };
+    var compact: Work = .{ .store = &store, .compact = true };
+    {
+        const syncer = try std.Thread.spawn(.{}, Work.run, .{&flush});
+        defer syncer.join();
+        defer faults.released.store(true, .release);
+        faults.waitPaused();
+        const compactor = try std.Thread.spawn(.{}, Work.run, .{&compact});
+        defer compactor.join();
+        defer faults.released.store(true, .release);
+        while (true) {
+            store.table.lockSharedUncancelable(io);
+            const installed = store.generation.index.generation == 2;
+            store.table.unlockShared(io);
+            if (installed) break;
+            std.Thread.yield() catch {};
+        }
+        _ = try tmp.dir.statFile(io, support.segment_name, .{});
+        faults.released.store(true, .release);
+    }
+    try testing.expectEqual(null, flush.failure);
+    try testing.expectEqual(null, compact.failure);
+    try store.close();
+}

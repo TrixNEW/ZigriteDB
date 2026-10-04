@@ -14,7 +14,7 @@ import tempfile
 
 class Options(c.Structure):
     _fields_ = [(name, c.c_uint32) for name in (
-        "version", "struct_size", "max_open_shards", "max_keys", "max_segments", "batch_buffer_size"
+        "version", "struct_size", "max_open_regions", "max_keys", "max_segments", "batch_buffer_size"
     )] + [("max_segment_size", c.c_uint64), ("buffered", c.c_uint32), ("compression_threshold", c.c_uint32),
           ("cache_bytes", c.c_uint64), ("cache_shards", c.c_uint32), ("skip_unchanged", c.c_uint32),
           ("compact_min_bytes", c.c_uint64), ("compact_live_percent", c.c_uint32), ("reserved", c.c_uint32)]
@@ -370,13 +370,13 @@ def check_permissions(api, root):
     assert os.WIFEXITED(result) and os.WEXITSTATUS(result) == 0
 
 
-def check_concurrency(library, root, shard_limit=16):
+def check_concurrency(library, root, region_limit=16):
     api = API(library)
     api.options.max_segment_size = 1024 * 1024
-    api.options.max_open_shards = shard_limit
+    api.options.max_open_regions = region_limit
     api.options.compression_threshold = 32
     api.options.cache_bytes = 16 * 1024
-    path = root / f"concurrent-{shard_limit}"
+    path = root / f"concurrent-{region_limit}"
     path.mkdir()
     handle = api.open(path)
     start = threading.Barrier(4)
@@ -424,7 +424,7 @@ def check_concurrency(library, root, shard_limit=16):
         assert api.lib.zg_compact_async(handle, 0, 1, 0) == 0
     finally:
         assert api.lib.zg_close(handle) == 0
-    print(f"Concurrent C API reads, writes and maintenance passed with {shard_limit} cached shards")
+    print(f"Concurrent C API reads, writes and maintenance passed with {region_limit} open regions")
 
 
 def check_stats(library, root):
@@ -519,8 +519,8 @@ def main():
                     verify(api, case, root / f"recovered-{grouped}-{mode}-{point}", acks == b"W")
             print(f"{len(events) * 4} syscall-boundary crash and I/O fault cases passed: {sorted(set(events))}")
         check_group_commit(library, root)
-        for shard_limit in (1, 2, 16):
-            check_concurrency(library, root, shard_limit)
+        for region_limit in (1, 2, 16):
+            check_concurrency(library, root, region_limit)
     signal.alarm(0)
 
 

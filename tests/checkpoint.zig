@@ -185,3 +185,20 @@ test "a leftover INDEX.tmp from a crash is ignored and replaced" {
     const report = try db.inspection.inspect(testing.allocator, io, tmp.dir, .{}, &scratch, &orphans);
     try testing.expectEqual(@as(usize, 0), report.unknown_entries);
 }
+
+test "a clean checkpoint cannot hide damaged or foreign segment headers" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try populate(tmp.dir, .{});
+    const file = try support.openFile(tmp.dir, support.segment_name);
+    defer file.handle.close(io);
+    var original: [db.segment.encoded_len]u8 = undefined;
+    try file.readExact(&original, 0);
+    var header = try db.segment.Header.decode(&original);
+    header.salt ^= 2;
+    try file.writeAll(&(try header.encode()), 0);
+    try testing.expectError(error.IdentityMismatch, db.Store.open(testing.allocator, io, tmp.dir, .{}));
+    original[0] ^= 1;
+    try file.writeAll(&original, 0);
+    try testing.expectError(error.InvalidMagic, db.Store.open(testing.allocator, io, tmp.dir, .{}));
+}
