@@ -24,8 +24,37 @@ medians from [`summarize_world.py`](../summarize_world.py).
   (16,384 chunks, 334 MB raw).
 - 5 runs per row for workloads, 3 for writer sweeps.
 
-Reproduce with [`build.sh`](../build.sh) and [`run_world.py`](../run_world.py), e.g.
-`run_world.py --binary world --dataset zhyrr.zgds --repeats 5 cache=8`.
+Reproduce from the repository root on Linux with Zig 0.16.0, a C/C++ compiler,
+CMake, Git and Python 3. [`build.sh`](../build.sh) builds the pinned PMMP LevelDB
+fork and the current harness; it does not need Snappy, Zstd or TCMalloc.
+
+```sh
+zig build -Doptimize=ReleaseSafe
+bash tests/bench/build.sh
+bench="${XDG_CACHE_HOME:-$HOME/.cache}/zigritedb-pmmp-native"
+export LD_LIBRARY_PATH="$PWD/zig-out/lib:$bench/build${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+"$bench/dataset" /path/to/bedrock/db zhyrr.zgds 128
+python3 tests/bench/run_world.py --binary "$bench/world" --dataset zhyrr.zgds \
+  --engine zig --label zig --repeats 5 cache=8 > zig.jsonl
+python3 tests/bench/run_world.py --binary "$bench/world" --dataset zhyrr.zgds \
+  --engine leveldb --label leveldb --repeats 5 cache=8 > leveldb.jsonl
+python3 tests/bench/summarize_world.py zig.jsonl leveldb.jsonl
+```
+
+Use the same dataset, filesystem, cache and build mode for comparisons. Add
+`--writers mode=sync cache=8` to `run_world.py` for the thread/target sweep, or
+`read=chunk` to exercise ZigriteDB's whole-chunk API. Keep generated datasets and
+measurements outside this results folder unless intentionally publishing them.
+
+CI runs a small generated dataset through both engines and both ZigriteDB read
+paths, verifying contents after reopen, updates, flush and compaction:
+
+```sh
+python3 tests/bench/smoke.py --binary "$bench/world" \
+  --library zig-out/lib --library "$bench/build"
+```
+
+This is a functionality check; latency thresholds belong in controlled manual runs.
 
 ## Phases
 

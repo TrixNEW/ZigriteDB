@@ -592,6 +592,8 @@ def check_stats(library, root):
 
 def main():
     assert sys.platform == "linux" and platform.machine() == "x86_64"
+    concurrency_only = sys.argv[3:] == ["--concurrency-only"]
+    assert not sys.argv[3:] or concurrency_only, "expected --concurrency-only or no extra arguments"
     library, smoke = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
     api = API(library)
     signal.alarm(480)
@@ -603,6 +605,11 @@ def main():
         c_root.mkdir()
         env = dict(os.environ, LD_LIBRARY_PATH=str(library.parent))
         subprocess.run([str(smoke), str(c_root)], env=env, check=True, timeout=30)
+        if concurrency_only:
+            for region_limit in (1, 2, 16):
+                check_concurrency(library, root, region_limit)
+            signal.alarm(0)
+            return
         template = root / "template"
         template.mkdir()
         handle = api.open(template)

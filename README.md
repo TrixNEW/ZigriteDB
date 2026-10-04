@@ -112,8 +112,9 @@ pub fn main() !void {
 
 A batch is atomic and stays within one region. `writeGroup` commits up to 64 batches
 of one region and returns once they are durable. Writes are buffered by default:
-`flush` makes every region durable at once and is the save barrier; `close` does the
-same at shutdown. Set `.region = .{ .durability = .sync }` to sync every write.
+`flush` makes completed writes durable across regions and is the save barrier;
+`close` does the same at shutdown. Crash atomicity remains per region. Set
+`.region = .{ .durability = .sync }` to sync every write.
 `deinit` only frees memory. Raw Bedrock keys go through `db.aux.get`/`db.aux.put`. See
 [World](src/world/world.zig) for the rest.
 
@@ -136,6 +137,11 @@ The ABI is version 3. Compared to version 2:
 - Format 1 worlds fail to open with `ZG_NEEDS_MIGRATION`; run `zigrite migrate`.
 
 Version 2 clients must be rebuilt.
+
+Calls on one handle may run concurrently with separate caller-owned buffers.
+Wait for all calls to return before `zg_close`, which consumes the handle even on
+error. Initialize options with `zg_options_init`; `max_open_regions` bounds the
+region cache without changing the ABI 3 struct layout.
 
 ## Durability
 
@@ -191,10 +197,14 @@ comparison and raw data are in [tests/bench/results](tests/bench/results/README.
 ```sh
 zig build test
 zig build test -Doptimize=ReleaseSafe
+zig build test -Doptimize=ReleaseFast
 zig build fuzz --fuzz=10000
 ```
 
-Native crash, fault and workload checks live in [tests/native](tests/native).
+Native crash, fault and workload checks live in [tests/native](tests/native),
+including multi-region flush faults and repeated C API lifecycle/FD checks.
+ReleaseFast runs native smoke, workloads and concurrency without repeating the
+full fault matrix. Benchmark CI checks contents and tooling, without speed limits.
 See [CI](.github/workflows/ci.yml) for the full set.
 
 ## License
