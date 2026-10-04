@@ -17,6 +17,8 @@ world/
 
 Region names are the dimension, region X and region Z as 32-bit two's complement hex.
 A region holds 32x32 chunks; region coordinates use floor division by 32.
+Region X/Z range from -67108864 to 67108863, so every chunk fits signed 32-bit
+coordinates.
 
 ## Keys
 

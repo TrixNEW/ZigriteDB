@@ -36,6 +36,12 @@ pub const Region = struct {
     x: i32,
     z: i32,
 
+    pub fn validate(self: Region) error{InvalidRegion}!void {
+        const min = std.math.minInt(i32) >> 5;
+        const max = std.math.maxInt(i32) >> 5;
+        if (self.x < min or self.x > max or self.z < min or self.z > max) return error.InvalidRegion;
+    }
+
     pub fn eql(a: Region, b: Region) bool {
         return a.dimension == b.dimension and a.x == b.x and a.z == b.z;
     }

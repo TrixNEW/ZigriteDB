@@ -288,6 +288,7 @@ pub const World = struct {
             if (try device.length() != bytes.len) return error.InvalidFormatFile;
             try device.readExact(&bytes, 0);
             if (!std.mem.eql(u8, bytes[0..4], "ZGWD") or std.mem.readInt(u32, bytes[8..12], .little) != crc.hash(bytes[0..8])) return error.InvalidFormatFile;
+            if (std.mem.readInt(u16, bytes[6..8], .little) != 0) return error.InvalidFormatFile;
             const found = std.mem.readInt(u16, bytes[4..6], .little);
             if (found < format_version) return error.NeedsMigration;
             if (found > format_version) return error.UnsupportedVersion;

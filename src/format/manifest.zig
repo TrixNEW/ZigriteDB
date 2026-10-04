@@ -15,6 +15,7 @@ pub const Error = error{
     InvalidFlags,
     ChecksumMismatch,
     InvalidGeneration,
+    InvalidRegion,
     InvalidSegmentCount,
     InvalidSegmentId,
     InvalidSegmentOrder,
@@ -34,6 +35,7 @@ pub const Manifest = struct {
 
     /// `output` must not overlap `segments`.
     pub fn encode(self: Manifest, output: []u8) Error![]u8 {
+        try self.region.validate();
         if (self.generation == 0) return error.InvalidGeneration;
         const len = try encodedSize(self.segments.len);
         var previous: u64 = 0;
@@ -85,16 +87,18 @@ pub fn decode(bytes: []const u8, segment_ids: []u64) Error!Manifest {
         previous = id;
     }
     if (std.mem.readInt(u64, bytes[32..40], .little) != previous) return error.InvalidActiveSegment;
+    const region: Region = .{
+        .dimension = std.mem.readInt(i32, bytes[16..20], .little),
+        .x = std.mem.readInt(i32, bytes[20..24], .little),
+        .z = std.mem.readInt(i32, bytes[24..28], .little),
+    };
+    try region.validate();
     if (segment_ids.len < count) return error.BufferTooSmall;
     for (segment_ids[0..count], 0..) |*id, i| id.* = readId(bytes, i);
 
     return .{
         .generation = generation,
-        .region = .{
-            .dimension = std.mem.readInt(i32, bytes[16..20], .little),
-            .x = std.mem.readInt(i32, bytes[20..24], .little),
-            .z = std.mem.readInt(i32, bytes[24..28], .little),
-        },
+        .region = region,
         .segments = segment_ids[0..count],
         .base_batch_id = std.mem.readInt(u64, bytes[40..48], .little),
         .salt = std.mem.readInt(u64, bytes[48..56], .little),

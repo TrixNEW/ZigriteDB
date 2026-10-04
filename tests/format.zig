@@ -38,6 +38,53 @@ test "regions use floor division at the extremes" {
     }
 }
 
+test "region metadata rejects coordinates outside the chunk key range" {
+    const min = std.math.minInt(i32) >> 5;
+    const max = std.math.maxInt(i32) >> 5;
+    for ([_]i32{ min, max }) |coordinate| {
+        const region: db.Region = .{ .dimension = std.math.minInt(i32), .x = coordinate, .z = coordinate };
+        try region.validate();
+        const key = db.Key.fromLocal(region, 1023, 0x2c80);
+        try testing.expectEqual(region, key.region());
+    }
+    for ([_]db.Region{
+        .{ .dimension = 0, .x = min - 1, .z = 0 },
+        .{ .dimension = 0, .x = max + 1, .z = 0 },
+        .{ .dimension = 0, .x = 0, .z = min - 1 },
+        .{ .dimension = 0, .x = 0, .z = max + 1 },
+    }) |bad| {
+        try testing.expectError(error.InvalidRegion, (segment.Header{ .generation = 1, .segment_id = 1, .region = bad, .salt = 9 }).encode());
+        var header = try (segment.Header{ .generation = 1, .segment_id = 1, .region = .{ .dimension = 0, .x = 0, .z = 0 }, .salt = 9 }).encode();
+        std.mem.writeInt(i32, header[28..32], bad.x, .little);
+        std.mem.writeInt(i32, header[32..36], bad.z, .little);
+        std.mem.writeInt(u32, header[44..48], db.crc.hash(header[0..44]), .little);
+        try testing.expectError(error.InvalidRegion, segment.Header.decode(&header));
+        var buffer: [128]u8 = undefined;
+        try testing.expectError(error.InvalidRegion, (manifest.Manifest{ .generation = 1, .region = bad, .segments = &.{1}, .salt = 9 }).encode(&buffer));
+        const bytes = try (manifest.Manifest{ .generation = 1, .region = .{ .dimension = 0, .x = 0, .z = 0 }, .segments = &.{1}, .salt = 9 }).encode(&buffer);
+        std.mem.writeInt(i32, bytes[20..24], bad.x, .little);
+        std.mem.writeInt(i32, bytes[24..28], bad.z, .little);
+        std.mem.writeInt(u32, bytes[60..64], db.crc.hash(bytes[0..60]), .little);
+        std.mem.writeInt(u32, bytes[bytes.len - 4 ..][0..4], db.crc.hash(bytes[0 .. bytes.len - 4]), .little);
+        var ids = [_]u64{42};
+        try testing.expectError(error.InvalidRegion, manifest.decode(bytes, &ids));
+        try testing.expectEqual(@as(u64, 42), ids[0]);
+        if (db.index.Index.init(testing.allocator, bad, 1, 1)) |created| {
+            var index = created;
+            index.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try testing.expectEqual(error.InvalidRegion, err);
+    }
+}
+
+test "oversized batches reject repeated large values before length overflow" {
+    const value = try testing.allocator.alloc(u8, record.max_value_len);
+    defer testing.allocator.free(value);
+    var entries: [frame.max_records]db.Entry = undefined;
+    @memset(&entries, .put(.{ .dimension = 0, .chunk_x = 0, .chunk_z = 0, .component = .version }, value));
+    try testing.expectError(error.BatchTooLarge, (db.WriteBatch{ .entries = &entries }).validate());
+}
+
 test "record header bytes" {
     var bytes: [record.header_len]u8 = undefined;
     const header: record.Header = .{ .slot = 0x3ff, .local = db.Key.local(.{ .dimension = 0, .chunk_x = 0, .chunk_z = 0, .component = .subchunk, .subchunk_y = -4 }), .compression = .lz4, .stored_len = 5, .raw_len = 0x00020304 };

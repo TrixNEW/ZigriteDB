@@ -10,7 +10,7 @@ ZigriteDB is an embedded Minecraft Bedrock world storage engine written in Zig
 for [Quark](https://github.com/Bedrock-Phanatics/Quark). It imports and exports
 Bedrock LevelDB worlds byte for byte.
 
-> **In development:** The API may still change. Keep backups of worlds you care about.
+The v1 API is frozen at C ABI 3 and disk format 2. Keep backups of worlds you care about.
 
 ## How it works
 
@@ -24,9 +24,8 @@ and Y.
   Different regions write and flush in parallel.
 - **Reads** go through a dense in-memory index per region: one lookup finds every
   record of a chunk. `getChunk` reads a whole chunk in one call.
-- **Every byte is checked.** Records carry a CRC-32C (hardware accelerated when
-  the CPU has it, picked at runtime), frames bind their records together, and
-  anything that doesn't verify is refused rather than skipped.
+- **Checksums** validate records on read and frames on replay. CRC-32C is hardware
+  accelerated when available. Data that fails verification is refused.
 - **Reopen** loads an index checkpoint written on clean close. If it's missing or
   doesn't match, the region is replayed from its segments, which are always the
   source of truth.
@@ -117,6 +116,9 @@ of one region and returns once they are durable. Writes are buffered by default:
 `.region = .{ .durability = .sync }` to sync every write.
 `deinit` only frees memory. Raw Bedrock keys go through `db.aux.get`/`db.aux.put`. See
 [World](src/world/world.zig) for the rest.
+
+Concurrent calls require separate output buffers and a thread-safe allocator and
+I/O implementation. Finish all calls before `close` or `deinit`.
 
 Compaction runs when you call `compact`, or set `World.compactor` to schedule it
 yourself. The C API schedules it automatically.

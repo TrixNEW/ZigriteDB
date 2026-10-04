@@ -143,6 +143,7 @@ pub const Index = struct {
     changes: std.ArrayListUnmanaged(Change) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, region: Region, generation: u64, max_keys: u32) !Index {
+        try region.validate();
         const chunks = try allocator.create([1024]Chunk);
         chunks.* = @splat(.{});
         return .{ .allocator = allocator, .region = region, .generation = generation, .max_keys = max_keys, .chunks = chunks };

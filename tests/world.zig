@@ -166,6 +166,27 @@ test "worlds written before the format marker need migration" {
     try testing.expectError(error.InvalidFormatFile, db.World.open(testing.allocator, io, other.dir, .{}));
 }
 
+test "world rejects reserved format marker bytes with a valid checksum" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+        try world.close();
+    }
+    const file = try support.openFile(tmp.dir, db.world.format_file);
+    defer file.handle.close(io);
+    var bytes: [12]u8 = undefined;
+    try file.readExact(&bytes, 0);
+    bytes[6] = 1;
+    std.mem.writeInt(u32, bytes[8..12], db.crc.hash(bytes[0..8]), .little);
+    try file.writeAll(&bytes, 0);
+    if (db.World.open(testing.allocator, io, tmp.dir, .{})) |opened| {
+        var world = opened;
+        world.deinit();
+        return error.TestUnexpectedResult;
+    } else |err| try testing.expectEqual(error.InvalidFormatFile, err);
+}
+
 test "world never follows region symlinks" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

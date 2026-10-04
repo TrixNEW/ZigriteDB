@@ -93,6 +93,7 @@ typedef struct {
     uint64_t unchanged_write_skips;
 } zg_stats;
 
+/* Static message; do not free. */
 const char *zg_status_message(int status);
 uint32_t zg_abi_version(void);
 int zg_platform_supported(void);
@@ -102,6 +103,7 @@ int zg_key_region(const zg_key *key, zg_region *out);
 /* Initialize options before changing fields; version and struct_size must match this ABI. */
 int zg_options_init(zg_options *options);
 int zg_options_validate(const zg_options *options);
+/* Caller buffers are borrowed for the call only, never retained. */
 int zg_open(const uint8_t *path, size_t path_len, const zg_options *options, zg_handle **out);
 /* Calls on a handle may run concurrently with separate caller-owned buffers.
    Close requires all other calls on that handle to have returned and consumes it even on error. */

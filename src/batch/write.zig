@@ -42,8 +42,8 @@ pub const WriteBatch = struct {
             const len = if (entry.value) |value| value.len else 0;
             if (len > record.max_value_len) return error.BatchTooLarge;
             size += record.overhead + len;
+            if (size - frame.header_len > frame.max_bytes) return error.BatchTooLarge;
         }
-        if (size - frame.header_len > frame.max_bytes) return error.BatchTooLarge;
         return size;
     }
 

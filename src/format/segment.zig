@@ -14,6 +14,7 @@ pub const Error = error{
     InvalidFlags,
     InvalidSegmentId,
     InvalidGeneration,
+    InvalidRegion,
     IdentityMismatch,
 };
 
@@ -66,6 +67,7 @@ pub const Header = struct {
     }
 
     fn validate(self: Header) Error!void {
+        try self.region.validate();
         if (self.segment_id == 0) return error.InvalidSegmentId;
         if (self.generation == 0) return error.InvalidGeneration;
     }
