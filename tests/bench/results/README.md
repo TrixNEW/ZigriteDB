@@ -72,7 +72,7 @@ This is a functionality check; latency thresholds belong in controlled manual ru
 
 ## Workloads, 8 MiB cache (files: `*-cache8.jsonl`)
 
-| Rave / Zhyrr | LevelDB | v1 | v2 |
+| Rave / Zhyrr | LevelDB | v0.5.0 | v1 |
 | --- | ---: | ---: | ---: |
 | import chunks/s | 670 / 4,242 | 8,140 / 15,255 | 13,066 / 24,725 |
 | reopen + first load | 89 / 64 ms | 37 / 12 ms | 11 / 8 ms |
@@ -130,7 +130,7 @@ two or three.
 
 Threads saving continuously to one chunk, one region, or one region each.
 
-| saves/s, 1 / 16 threads | LevelDB | v1 | v2 |
+| saves/s, 1 / 16 threads | LevelDB | v0.5.0 | v1 |
 | --- | ---: | ---: | ---: |
 | buffered, same region | 901 / 8,848 | 157k / 80k | 142k / 109k |
 | buffered, own region | 899 / 9,210 | 166k / 240k | 177k / 375k |
