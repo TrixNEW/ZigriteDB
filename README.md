@@ -170,7 +170,7 @@ Real Bedrock worlds replayed through ZigriteDB's C API and the
 block size, an 8 MiB cache and checksums verified on both. Medians of 5 runs on WSL2,
 Ryzen 5 5500, ReleaseSafe. **Native code only:** no PHP, NBT or server is involved.
 
-| Rave (2.8k chunks) / Zhyrr (16k chunks) | LevelDB | ZigriteDB |
+| World 1 (2.8k chunks) / World 2 (16k chunks) | LevelDB | ZigriteDB |
 | --- | ---: | ---: |
 | Import | 670 / 4,242 chunks/s | 13,066 / 24,725 chunks/s |
 | Reopen and first chunk | 89 / 64 ms | 11 / 8 ms |
