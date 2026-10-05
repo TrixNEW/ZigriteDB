@@ -207,6 +207,17 @@ static size_t entries(const char *path) {
     return count;
 }
 
+static void resources(size_t fd_count, size_t thread_count) {
+    assert(entries("/proc/self/fd") == fd_count);
+    // Joined threads can remain in /proc briefly while the kernel finishes exit.
+    double deadline = now() + 1;
+    while (entries("/proc/self/task") != thread_count && now() < deadline) {
+        struct timespec delay = {0, 1000000};
+        assert(nanosleep(&delay, NULL) == 0);
+    }
+    assert(entries("/proc/self/task") == thread_count);
+}
+
 static void path(char out[ZG_MAX_PATH_LENGTH], const char *root, const char *name) {
     int length = snprintf(out, ZG_MAX_PATH_LENGTH, "%s/%s", root, name);
     assert(length > 0 && length < (int)ZG_MAX_PATH_LENGTH);
@@ -353,12 +364,12 @@ int main(int argc, char **argv) {
         check(zg_open((const uint8_t *)world, strlen(world), &options, &handle));
         verify();
         check(zg_close(handle));
-        assert(entries("/proc/self/fd") == fd_count && entries("/proc/self/task") == thread_count);
+        resources(fd_count, thread_count);
         cycles++;
     } while (max_cycles ? cycles < max_cycles : now() - started < seconds);
     assert(rotations > 0 && compactions > 0);
     failures(argv[1], options);
-    assert(entries("/proc/self/fd") == fd_count && entries("/proc/self/task") == thread_count);
+    resources(fd_count, thread_count);
     for (size_t id = 0; id < CHUNKS; id++) assert(pthread_mutex_destroy(&locks[id]) == 0);
     for (size_t id = 0; id < AUX_KEYS; id++) assert(pthread_mutex_destroy(&aux_locks[id]) == 0);
     printf("soak passed: %zu cycles, %.1fs, %llu rotations, %llu compactions; FDs/threads returned to baseline\n",
