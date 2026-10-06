@@ -1,76 +1,73 @@
 const std = @import("std");
-const Sha256 = std.crypto.hash.sha2.Sha256;
 
-const lz4 = @import("../compression/lz4.zig");
-const Entry = @import("../format/entry.zig").Entry;
-const commit = @import("commit.zig");
+const frame = @import("../format/frame.zig");
+const key_format = @import("../format/key.zig");
+const Key = key_format.Key;
+const Region = key_format.Region;
+const record = @import("../format/record.zig");
 
-pub const WriteBatch = struct {
-    entries: []const Entry,
+pub const max_group_batches = 64;
 
-    /// Leaves compressed values unchecked; `validate` and `encode` check them.
-    pub fn size(self: WriteBatch) commit.Error!usize {
-        if (self.entries.len == 0) return error.EmptyBatch;
-        if (self.entries.len > commit.max_records) return error.BatchTooLarge;
+pub const Entry = struct {
+    key: Key,
+    /// Null deletes the key.
+    value: ?[]const u8,
 
-        const first = &self.entries[0];
-        const region = first.key.region();
-
-        var bytes: usize = 0;
-
-        for (self.entries) |item| {
-            const len = try item.encodedLen();
-
-            if (item.header.batch_id != first.header.batch_id) return error.BatchIdMismatch;
-
-            const current = item.key.region();
-            const same_region =
-                current.dimension == region.dimension and
-                current.x == region.x and
-                current.z == region.z;
-
-            if (!same_region) return error.RegionMismatch;
-
-            bytes = std.math.add(usize, bytes, len) catch return error.BatchTooLarge;
-            if (bytes > commit.max_bytes) return error.BatchTooLarge;
-        }
-
-        return std.math.add(usize, bytes, commit.commit_len) catch error.BatchTooLarge;
+    pub fn put(key: Key, value: []const u8) Entry {
+        return .{ .key = key, .value = value };
     }
 
-    pub fn validate(self: WriteBatch) commit.Error!usize {
-        const len = try self.size();
-        for (self.entries) |item| {
-            if (item.header.compression == .lz4) try lz4.validate(item.value, item.header.raw_len);
-        }
-        return len;
-    }
-
-    pub fn id(self: WriteBatch) u64 {
-        return self.entries[0].header.batch_id;
-    }
-
-    /// `output` must not overlap the entries or their values.
-    pub fn encode(self: WriteBatch, output: []u8) commit.Error![]u8 {
-        _ = try self.validate();
-        return self.encodeChecked(output);
-    }
-
-    /// `encode` for batches that already passed `validate`.
-    pub fn encodeChecked(self: WriteBatch, output: []u8) commit.Error![]u8 {
-        const len = try self.size();
-        if (output.len < len) return error.BufferTooSmall;
-
-        var digest = Sha256.init(.{});
-        var offset: usize = 0;
-        for (self.entries) |item| {
-            const bytes = try item.encodeChecked(output[offset..len]);
-            digest.update(bytes);
-            offset += bytes.len;
-        }
-
-        const marker = try commit.marker(self.id(), @intCast(self.entries.len), offset, digest.finalResult());
-        @memcpy(output[offset..len], &marker);
-        return output[0..len];
+    pub fn delete(key: Key) Entry {
+        return .{ .key = key, .value = null };
     }
 };
+
+pub const WriteBatch = struct {
+    /// Zero takes the next ID.
+    id: u64 = 0,
+    entries: []const Entry,
+
+    pub fn region(self: WriteBatch) Region {
+        return self.entries[0].key.region();
+    }
+
+    pub fn validate(self: WriteBatch) !usize {
+        if (self.entries.len == 0) return error.EmptyBatch;
+        if (self.entries.len > frame.max_records) return error.BatchTooLarge;
+        const first = self.region();
+        var size: usize = frame.header_len;
+        for (self.entries) |entry| {
+            try entry.key.validate();
+            if (!entry.key.region().eql(first)) return error.RegionMismatch;
+            const len = if (entry.value) |value| value.len else 0;
+            if (len > record.max_value_len) return error.BatchTooLarge;
+            size += record.overhead + len;
+            if (size - frame.header_len > frame.max_bytes) return error.BatchTooLarge;
+        }
+        return size;
+    }
+
+    pub fn bound(self: WriteBatch) usize {
+        var size: usize = frame.header_len;
+        for (self.entries) |entry| size += frame.Builder.bound(if (entry.value) |value| value.len else 0);
+        return size;
+    }
+};
+
+pub fn validateGroup(batches: []const WriteBatch) !usize {
+    if (batches.len == 0 or batches.len > max_group_batches) return error.InvalidArgument;
+    var size: usize = 0;
+    var records: usize = 0;
+    var previous: u64 = 0;
+    for (batches) |batch| {
+        size += try batch.validate();
+        records += batch.entries.len;
+        if (records > frame.max_records or size > frame.max_bytes) return error.BatchTooLarge;
+        if (!batch.region().eql(batches[0].region())) return error.RegionMismatch;
+        if (batch.id != 0) {
+            if (batch.id <= previous) return error.BatchOrder;
+            previous = batch.id;
+        }
+    }
+    return size;
+}

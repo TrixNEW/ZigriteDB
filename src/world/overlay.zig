@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Entry = @import("../format/entry.zig").Entry;
+const Entry = @import("../batch/write.zig").Entry;
 const Key = @import("../format/key.zig").Key;
 const world_module = @import("world.zig");
 const World = world_module.World;
@@ -25,7 +25,6 @@ pub const OverlayWorld = struct {
     const present = 1;
     const inline_len = 8192;
 
-    /// Opens or creates the overlay directory.
     pub fn open(allocator: std.mem.Allocator, io: std.Io, base: *World, parent: std.Io.Dir, name: []const u8, options: world_module.Options) !OverlayWorld {
         return .{
             .allocator = allocator,
@@ -61,7 +60,6 @@ pub const OverlayWorld = struct {
         self.overlay = try openOverlay(self.allocator, self.io, self.parent, self.name, self.options);
     }
 
-    /// Looks up a value in the overlay.
     pub fn lookup(self: *OverlayWorld, key: Key, output: []u8) !Lookup {
         var stack: [inline_len]u8 = undefined;
         var heap: []u8 = &.{};
@@ -102,14 +100,10 @@ pub const OverlayWorld = struct {
         };
     }
 
-    /// Writes uncompressed changes using the overlay's next batch ID.
     pub fn write(self: *OverlayWorld, entries: []const Entry) !void {
         if (entries.len == 0) return error.EmptyBatch;
         var total: usize = 0;
-        for (entries) |item| {
-            if (item.header.compression != .none) return error.UnsupportedCompression;
-            total += item.value.len + 1;
-        }
+        for (entries) |item| total += (if (item.value) |value| value.len else 0) + 1;
 
         const values = try self.allocator.alloc(u8, total);
         defer self.allocator.free(values);
@@ -118,18 +112,13 @@ pub const OverlayWorld = struct {
 
         var offset: usize = 0;
         for (entries, marked) |item, *out| {
-            const deleted = item.header.kind == .delete;
-            const bytes = values[offset..][0 .. (if (deleted) 0 else item.value.len) + 1];
-            bytes[0] = if (deleted) tombstone else present;
-            if (!deleted) @memcpy(bytes[1..], item.value);
+            const value = item.value orelse &.{};
+            const bytes = values[offset..][0 .. value.len + 1];
+            bytes[0] = if (item.value == null) tombstone else present;
+            @memcpy(bytes[1..], value);
             offset += bytes.len;
-
-            out.* = item;
-            out.header.kind = .put;
-            out.header.stored_len = @intCast(bytes.len);
-            out.header.raw_len = @intCast(bytes.len);
-            out.value = bytes;
+            out.* = .{ .key = item.key, .value = bytes };
         }
-        _ = try self.overlay.writeNext(marked);
+        _ = try self.overlay.write(.{ .entries = marked });
     }
 };

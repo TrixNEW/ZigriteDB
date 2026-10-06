@@ -29,9 +29,6 @@ pub const Directory = struct {
 
         var self: Directory = .{ .dir = dir, .io = io };
         if (!try self.directoryFile().tryLock(io, .exclusive)) return error.DirectoryBusy;
-
-        try (storage.File{ .handle = self.directoryFile(), .io = io }).sync();
-
         return self;
     }
 

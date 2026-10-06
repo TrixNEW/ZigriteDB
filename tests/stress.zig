@@ -2,7 +2,9 @@ const std = @import("std");
 const db = @import("zigritedb");
 const testing = std.testing;
 const io = testing.io;
-const item = @import("support/shard.zig").item;
+const support = @import("support/region.zig");
+const put = support.put;
+const batch = support.batch;
 
 const writers = 4;
 const readers = 3;
@@ -21,7 +23,7 @@ const Shared = struct {
 };
 
 fn key(writer: usize, region: usize) db.Key {
-    return item(0, @intCast(writer + region * 32), "").key;
+    return support.key(@intCast(writer + region * 32));
 }
 
 fn write(shared: *Shared, writer: usize) void {
@@ -31,8 +33,7 @@ fn write(shared: *Shared, writer: usize) void {
         var value: [16]u8 = undefined;
         std.mem.writeInt(u64, value[0..8], writer, .little);
         std.mem.writeInt(u64, value[8..16], sequence, .little);
-        var entries = [_]db.entry.Entry{item(0, @intCast(writer + region * 32), &value)};
-        _ = shared.world.writeNext(&entries) catch return shared.fail(1);
+        _ = shared.world.write(batch(0, &.{put(@intCast(writer + region * 32), &value)})) catch return shared.fail(1);
         shared.acknowledged[writer].store(sequence, .release);
     }
 }
@@ -61,12 +62,11 @@ fn compact(shared: *Shared) void {
 }
 
 test "readers, writers, compaction, eviction and the cache all agree with the writers' history" {
-    if (!db.directory.supported) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var world = try db.World.open(testing.allocator, io, tmp.dir, .{
-        .max_open_shards = 2,
-        .shard = .{ .max_segment_size = 4096, .batch_buffer_size = 1024 },
+        .max_open_regions = 2,
+        .region = .{ .max_segment_size = 4096, .batch_buffer_size = 1024 },
         .cache = .{ .bytes = 2048, .shards = 2 },
     });
     defer world.deinit();
@@ -114,10 +114,10 @@ const Hot = struct {
     }
 };
 
-const hot_key = item(0, 0, "").key;
+const hot_key = support.key(0);
 
 fn growKey(sequence: usize) db.Key {
-    return .{ .dimension = 0, .chunk_x = @intCast(sequence % 32), .chunk_z = @intCast(1 + sequence / 32), .component = .metadata };
+    return .{ .dimension = 0, .chunk_x = @intCast(sequence % 32), .chunk_z = @intCast(1 + sequence / 32), .component = .version };
 }
 
 /// Value format: sequence id plus a low-byte fill.
@@ -138,11 +138,8 @@ fn writeHot(hot: *Hot) void {
     defer hot.done.store(true, .release);
     var buffer: [128]u8 = undefined;
     for (1..hot_rounds + 1) |sequence| {
-        var entries = [_]db.entry.Entry{item(0, 0, hotValue(sequence, &buffer))};
-        _ = hot.world.writeNext(&entries) catch return hot.fail(1);
-        var grow = [_]db.entry.Entry{item(0, 0, "g")};
-        grow[0].key = growKey(sequence);
-        _ = hot.world.writeNext(&grow) catch return hot.fail(1);
+        _ = hot.world.write(batch(0, &.{put(0, hotValue(sequence, &buffer))})) catch return hot.fail(1);
+        _ = hot.world.write(batch(0, &.{.{ .key = growKey(sequence), .value = "g" }})) catch return hot.fail(1);
         hot.progress.store(sequence, .release);
     }
 }
@@ -187,11 +184,10 @@ fn compactHot(hot: *Hot) void {
 }
 
 test "same-key size-changing overwrites, index growth, rotation and compaction never tear a read" {
-    if (!db.directory.supported) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var world = try db.World.open(testing.allocator, io, tmp.dir, .{
-        .shard = .{ .max_segment_size = 4096, .batch_buffer_size = 1024 },
+        .region = .{ .max_segment_size = 4096, .batch_buffer_size = 1024 },
         .cache = .{ .bytes = 1024, .shards = 2 },
     });
     defer world.deinit();

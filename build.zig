@@ -1,22 +1,5 @@
 const std = @import("std");
 
-fn addBenchExecutable(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    native: *std.Build.Step.Compile,
-    source: []const u8,
-    name: []const u8,
-    needs_pthread: bool,
-) *std.Build.Step.Compile {
-    const bench_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
-    bench_module.addCSourceFile(.{ .file = b.path(source), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-    bench_module.addIncludePath(b.path("include"));
-    bench_module.linkLibrary(native);
-    if (needs_pthread) bench_module.linkSystemLibrary("pthread", .{});
-    return b.addExecutable(.{ .name = name, .root_module = bench_module });
-}
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -44,7 +27,7 @@ pub fn build(b: *std.Build) void {
         .name = "zigritedb_native",
         .linkage = .dynamic,
         .root_module = native_module,
-        .version = .{ .major = 2, .minor = 0, .patch = 0 },
+        .version = .{ .major = 3, .minor = 0, .patch = 0 },
     });
     b.installArtifact(native);
     b.installFile("include/zigritedb.h", "include/zigritedb.h");
@@ -58,16 +41,34 @@ pub fn build(b: *std.Build) void {
     native_tests.dependOn(&b.addInstallArtifact(smoke, .{}).step);
     native_tests.dependOn(&b.addInstallArtifact(native, .{}).step);
 
-    if (target.result.os.tag == .linux) {
-        const benchmark = b.step("bench", "Build the native workload benchmark");
+    const soak_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    soak_module.addCSourceFile(.{ .file = b.path("tests/native/native_soak.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    soak_module.addIncludePath(b.path("include"));
+    soak_module.linkLibrary(native);
+    soak_module.linkSystemLibrary("pthread", .{});
+    const soak = b.addExecutable(.{ .name = "native_soak", .root_module = soak_module });
+    const soak_tests = b.step("native-soak", "Build the Linux C API model soak");
+    soak_tests.dependOn(&b.addInstallArtifact(soak, .{}).step);
+    soak_tests.dependOn(&b.addInstallArtifact(native, .{}).step);
 
-        const bench = addBenchExecutable(b, target, optimize, native, "tests/bench/native.c", "native_bench", false);
-        benchmark.dependOn(&b.addInstallArtifact(bench, .{}).step);
-        benchmark.dependOn(&b.addInstallArtifact(native, .{}).step);
+    const tool_module = b.createModule(.{
+        .root_source_file = b.path("src/tool/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zigritedb", .module = module }},
+    });
+    const tool = b.addExecutable(.{ .name = "zigrite", .root_module = tool_module });
+    b.installArtifact(tool);
 
-        const bench_concurrency = addBenchExecutable(b, target, optimize, native, "tests/bench/native_concurrency.c", "native_bench_concurrency", true);
-        benchmark.dependOn(&b.addInstallArtifact(bench_concurrency, .{}).step);
-    }
+    const micro_module = b.createModule(.{
+        .root_source_file = b.path("tests/bench/micro.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zigritedb", .module = module }},
+    });
+    const micro = b.addRunArtifact(b.addExecutable(.{ .name = "micro", .root_module = micro_module }));
+    if (b.args) |args| micro.addArgs(args);
+    b.step("micro", "Run component micro-benchmarks").dependOn(&micro.step);
 
     const unit_tests = b.addTest(.{ .root_module = module });
     const run_unit_tests = b.addRunArtifact(unit_tests);

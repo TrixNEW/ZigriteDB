@@ -23,21 +23,14 @@ test "positional reads and writes" {
     try testing.expectError(error.InvalidOffset, file.writeAll("xx", std.math.maxInt(u64)));
 }
 
-test "write close reopen and recover" {
+test "write close reopen and scan" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const header: db.segment.Header = .{
-        .segment_id = 1,
-        .generation = 1,
-        .region = .{ .dimension = 0, .x = 0, .z = 0 },
-    };
-    const item: db.entry.Entry = .{
-        .header = .{ .kind = .put, .batch_id = 1, .stored_len = 5, .raw_len = 5 },
-        .key = .{ .dimension = 0, .chunk_x = 0, .chunk_z = 0, .component = .metadata },
-        .value = "hello",
-    };
+    const header: db.segment.Header = .{ .segment_id = 1, .generation = 1, .region = .{ .dimension = 0, .x = 0, .z = 0 }, .salt = 3 };
     var buffer: [256]u8 = undefined;
-    const bytes = try (db.WriteBatch{ .entries = &.{item} }).encode(&buffer);
+    var builder: db.frame.Builder = .init(&buffer);
+    try builder.add(0, 0x2c80, "hello", null, 0);
+    const bytes = builder.finish(.batch, 1, header.salt);
     {
         const handle = try tmp.dir.createFile(io, "segment", .{ .exclusive = true });
         defer handle.close(io);
@@ -52,8 +45,8 @@ test "write close reopen and recover" {
     var loaded: [512]u8 = undefined;
     const len: usize = @intCast(try file.length());
     try file.readExact(loaded[0..len], 0);
-    var scanner = try db.recovery.Scanner.init(loaded[0..len], header, .sealed, 0);
+    var scanner = try db.recovery.Scanner.init(loaded[0..len], header, .sealed, .{});
     const recovered = (try scanner.next()).?;
-    try testing.expectEqualStrings("hello", (try db.entry.decode(recovered.records)).entry.value);
+    try testing.expectEqualStrings("hello", (try db.record.decode(recovered.body())).value);
     try testing.expectEqual(null, try scanner.next());
 }

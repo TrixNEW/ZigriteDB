@@ -30,6 +30,10 @@ pub fn openManifest(dir: std.Io.Dir, io: std.Io) !std.Io.File {
     };
 }
 
+pub fn openRegularFile(dir: std.Io.Dir, io: std.Io, name: [:0]const u8) !std.Io.File {
+    return openRegular(dir, io, name, false);
+}
+
 fn segmentName(buffer: []u8, generation: u64, id: u64) ![:0]u8 {
     if (generation == 0) return error.InvalidGeneration;
     if (id == 0) return error.InvalidSegmentId;
