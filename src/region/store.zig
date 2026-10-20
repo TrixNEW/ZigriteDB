@@ -940,6 +940,13 @@ pub const Store = struct {
         return self.commitBarrier();
     }
 
+    /// True if a flush would have to fsync.
+    pub fn dirty(self: *Store) bool {
+        lock.lockUncancelable(&self.writer, self.io);
+        defer self.writer.unlock(self.io);
+        return self.synced_offset != self.offset;
+    }
+
     const Pinned = struct {
         generation: *Generation,
         location: Location,

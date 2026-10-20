@@ -387,14 +387,30 @@ pub const World = struct {
         return flushed;
     }
 
-    // Regions are separate files, so their fsyncs can overlap.
+    // Regions are separate files, so their fsyncs can overlap. `async` would run most of them
+    // inline once the pool is busy, so dirty regions get their own threads, a wave at a time.
     fn flushStores(io: std.Io, stores: []const *Store) !void {
-        var failures: [1024]?anyerror = undefined;
-        var group: std.Io.Group = .init;
-        for (stores, failures[0..stores.len]) |store, *failure| group.async(io, flushStore, .{ store, failure });
-        try group.await(io);
+        var failures: [1024]?anyerror = @splat(null);
+        var dirty: [1024]usize = undefined;
+        var count: usize = 0;
+        for (stores, 0..) |store, i| {
+            if (store.dirty()) {
+                dirty[count] = i;
+                count += 1;
+            } else flushStore(store, &failures[i]);
+        }
+        var start: usize = 0;
+        while (start < count) : (start += max_parallel_syncs) {
+            var group: std.Io.Group = .init;
+            for (dirty[start..@min(count, start + max_parallel_syncs)]) |i| {
+                group.concurrent(io, flushStore, .{ stores[i], &failures[i] }) catch flushStore(stores[i], &failures[i]);
+            }
+            try group.await(io);
+        }
         for (failures[0..stores.len]) |failure| if (failure) |err| return err;
     }
+
+    const max_parallel_syncs = 64;
 
     fn flushStore(store: *Store, failure: *?anyerror) void {
         store.flush() catch |err| {
