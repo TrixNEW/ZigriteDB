@@ -22,13 +22,49 @@ fn sizeClass(len: usize) usize {
     return std.math.ceilPowerOfTwo(usize, @max(len, 16)) catch len;
 }
 
+// Hashed once per call: the low bits pick a shard and the high bits index it.
+fn hashKey(key: Key) u64 {
+    const words = [3]u64{
+        @as(u64, @as(u32, @bitCast(key.chunk_x))) | @as(u64, @as(u32, @bitCast(key.chunk_z))) << 32,
+        @as(u64, @as(u32, @bitCast(key.dimension))) | @as(u64, @as(u32, @bitCast(key.subchunk_y))) << 32,
+        @intFromEnum(key.component),
+    };
+    return std.hash.Wyhash.hash(0, std.mem.asBytes(&words));
+}
+
+const Context = struct {
+    pub fn hash(_: Context, key: Key) u32 {
+        return @truncate(hashKey(key) >> 32);
+    }
+
+    pub fn eql(_: Context, a: Key, b: Key, _: usize) bool {
+        return std.meta.eql(a, b);
+    }
+};
+
+// Hands the map the hash the caller already has.
+const Hashed = struct {
+    bits: u32,
+
+    fn of(full: u64) Hashed {
+        return .{ .bits = @truncate(full >> 32) };
+    }
+
+    pub fn hash(self: Hashed, _: Key) u32 {
+        return self.bits;
+    }
+
+    pub fn eql(_: Hashed, a: Key, b: Key, _: usize) bool {
+        return std.meta.eql(a, b);
+    }
+};
+
 pub const Cache = struct {
     allocator: std.mem.Allocator,
     shards: []Shard,
     stats: ?*Stats = null,
 
     const Slot = struct {
-        key: Key,
         hash: u64,
         batch_id: u64,
         buffer: []u8,
@@ -40,8 +76,8 @@ pub const Cache = struct {
 
     const Shard = struct {
         mutex: std.Io.Mutex = .init,
-        map: std.AutoHashMapUnmanaged(Key, u32) = .empty,
-        slots: std.ArrayListUnmanaged(Slot) = .empty,
+        // Array hash maps delete without tombstones, which constant evictions would pile up.
+        slots: std.ArrayHashMapUnmanaged(Key, Slot, Context, false) = .empty,
         hand: usize = 0,
         used: usize = 0,
         capacity: usize,
@@ -51,11 +87,9 @@ pub const Cache = struct {
         touches: usize = 0,
 
         fn take(self: *Shard, index: usize) []u8 {
-            const slot = self.slots.items[index];
+            const slot = self.slots.values()[index];
             self.used -= slot.buffer.len + entry_overhead;
-            _ = self.map.remove(slot.key);
-            _ = self.slots.swapRemove(index);
-            if (index < self.slots.items.len) self.map.getPtr(self.slots.items[index].key).?.* = @intCast(index);
+            self.slots.swapRemoveAt(index);
             return slot.buffer;
         }
 
@@ -74,9 +108,10 @@ pub const Cache = struct {
 
         /// The slot the clock would evict next, clearing reference bits on the way.
         fn victim(self: *Shard) usize {
+            const slots = self.slots.values();
             while (true) {
-                if (self.hand >= self.slots.items.len) self.hand = 0;
-                const slot = &self.slots.items[self.hand];
+                if (self.hand >= slots.len) self.hand = 0;
+                const slot = &slots[self.hand];
                 if (!slot.referenced) return self.hand;
                 slot.referenced = false;
                 self.hand += 1;
@@ -93,18 +128,11 @@ pub const Cache = struct {
 
     pub fn deinit(self: *Cache) void {
         for (self.shards) |*shard| {
-            for (shard.slots.items) |slot| self.allocator.free(slot.buffer);
+            for (shard.slots.values()) |slot| self.allocator.free(slot.buffer);
             shard.slots.deinit(self.allocator);
-            shard.map.deinit(self.allocator);
         }
         self.allocator.free(self.shards);
         self.* = undefined;
-    }
-
-    fn hashKey(key: Key) u64 {
-        var hasher = std.hash.Wyhash.init(0);
-        std.hash.autoHash(&hasher, key);
-        return hasher.final();
     }
 
     pub fn get(self: *Cache, io: std.Io, key: Key, batch_id: u64, output: []u8) ?[]const u8 {
@@ -115,8 +143,7 @@ pub const Cache = struct {
         shard.touch(hash);
 
         const hit: ?[]const u8 = blk: {
-            const index = shard.map.get(key) orelse break :blk null;
-            const slot = &shard.slots.items[index];
+            const slot = shard.slots.getPtrAdapted(key, Hashed.of(hash)) orelse break :blk null;
             if (slot.batch_id != batch_id or output.len < slot.len) break :blk null;
             slot.referenced = true;
             @memcpy(output[0..slot.len], slot.buffer[0..slot.len]);
@@ -137,8 +164,8 @@ pub const Cache = struct {
         defer shard.mutex.unlock(io);
 
         var reuse: ?[]u8 = null;
-        if (shard.map.get(key)) |index| {
-            const slot = &shard.slots.items[index];
+        if (shard.slots.getIndexAdapted(key, Hashed.of(hash))) |index| {
+            const slot = &shard.slots.values()[index];
             if (slot.batch_id >= batch_id) return;
             if (slot.buffer.len == size) {
                 @memcpy(slot.buffer[0..value.len], value);
@@ -149,7 +176,7 @@ pub const Cache = struct {
             }
             self.allocator.free(shard.take(index));
         } else if (shard.used + size + entry_overhead > shard.capacity) {
-            if (shard.frequency(hash) <= shard.frequency(shard.slots.items[shard.victim()].hash)) return;
+            if (shard.frequency(hash) <= shard.frequency(shard.slots.values()[shard.victim()].hash)) return;
         }
 
         while (shard.used + size + entry_overhead > shard.capacity) {
@@ -159,10 +186,10 @@ pub const Cache = struct {
         }
 
         const buffer = reuse orelse self.allocator.alloc(u8, size) catch return;
-        shard.slots.ensureUnusedCapacity(self.allocator, 1) catch return self.allocator.free(buffer);
-        shard.map.put(self.allocator, key, @intCast(shard.slots.items.len)) catch return self.allocator.free(buffer);
+        const entry = shard.slots.getOrPutAdapted(self.allocator, key, Hashed.of(hash)) catch return self.allocator.free(buffer);
+        entry.key_ptr.* = key;
         @memcpy(buffer[0..value.len], value);
-        shard.slots.appendAssumeCapacity(.{ .key = key, .hash = hash, .batch_id = batch_id, .buffer = buffer, .len = value.len });
+        entry.value_ptr.* = .{ .hash = hash, .batch_id = batch_id, .buffer = buffer, .len = value.len };
         shard.used += size + entry_overhead;
     }
 };
