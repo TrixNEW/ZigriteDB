@@ -38,7 +38,6 @@ fn resolve(crc: u32, bytes: []const u8) u32 {
 fn detect() bool {
     switch (builtin.cpu.arch) {
         .x86_64 => {
-            // SSE4.2, which has crc32.
             var ecx: u32 = undefined;
             asm volatile ("cpuid"
                 : [_] "={ecx}" (ecx),

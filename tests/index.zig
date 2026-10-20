@@ -28,7 +28,6 @@ test "the last change for each key wins, within and across frames" {
     const first = lookup(&index, 0, .version, 0).?;
     try testing.expectEqual(@as(u32, 1), first.stored_len);
     try testing.expectEqual(@as(u64, 1), first.batch_id);
-    // The third record, not the first, is live.
     try testing.expectEqual(@as(u32, 48 + db.frame.header_len + 2 * (db.record.overhead + 1)), first.offset);
 
     try index.apply(try frameOf(&buffer, 2, 200, &.{ .{ .x = 1, .value = null }, .{ .value = "longer" } }), 0);

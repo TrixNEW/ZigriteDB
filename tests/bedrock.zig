@@ -38,7 +38,6 @@ fn buildWorld(arena: std.mem.Allocator, parent: std.Io.Dir, expected: *Expected)
     for ([_][]const u8{ "~local_player", "scoreboard", "BiomeData", "portals", "Overworld", "mobevents", "player_server_abc" }) |name| try keys.append(arena, name);
     try keys.append(arena, "actorprefix" ++ [_]u8{ 0, 0, 0, 1, 0, 0, 0, 7 });
     try keys.append(arena, &[_]u8{ 7, 0, 0, 0, 11, 0, 0, 0 } ++ "PMMPDataVersion");
-    // Not Bedrock's layout, so it stays raw.
     try keys.append(arena, &[_]u8{ 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0x2c });
     std.mem.sort([]const u8, keys.items, {}, struct {
         fn lessThan(_: void, a: []const u8, b: []const u8) bool {

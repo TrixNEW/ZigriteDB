@@ -191,10 +191,13 @@ pub fn decompress(allocator: std.mem.Allocator, kind: u8, data: []const u8, out:
     var input: std.Io.Reader = .fixed(data);
     var window: [flate.max_window_len]u8 = undefined;
     var inflate: flate.Decompress = .init(&input, container, &window);
-    var writer: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
-    defer out.* = writer.toArrayList();
-    _ = inflate.reader.streamRemaining(&writer.writer) catch return error.Corrupt;
+    inflate.reader.appendRemaining(allocator, out, .limited(max_block + 1)) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.Corrupt,
+    };
 }
+
+const max_block = 64 * 1024 * 1024;
 
 const TableIterator = struct {
     file: File,
@@ -237,7 +240,7 @@ const TableIterator = struct {
     }
 
     fn readBlock(self: *TableIterator, allocator: std.mem.Allocator, offset: u64, size: u64, out: *std.ArrayListUnmanaged(u8)) !void {
-        if (size > 64 * 1024 * 1024) return error.Corrupt;
+        if (size > max_block) return error.Corrupt;
         try self.raw.resize(allocator, @intCast(size + 5));
         try self.file.readExact(self.raw.items, offset);
         const n: usize = @intCast(size);
@@ -680,6 +683,21 @@ pub const Writer = struct {
         try self.dir.writeFile(self.io, .{ .sub_path = "CURRENT", .data = "MANIFEST-000002\n" });
     }
 };
+
+test "a block that inflates past the limit is refused" {
+    const allocator = std.testing.allocator;
+    var compressed: std.Io.Writer.Allocating = try .initCapacity(allocator, 64 * 1024);
+    defer compressed.deinit();
+    const window = try allocator.alloc(u8, flate.max_window_len);
+    defer allocator.free(window);
+    var deflate = try flate.Compress.init(&compressed.writer, window, .raw, .fastest);
+    const zeros: [64 * 1024]u8 = @splat(0);
+    for (0..max_block / zeros.len + 1) |_| try deflate.writer.writeAll(&zeros);
+    try deflate.finish();
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+    try std.testing.expectError(error.Corrupt, decompress(allocator, 4, compressed.written(), &out));
+}
 
 test "log records span blocks and survive a round trip" {
     var tmp = std.testing.tmpDir(.{});

@@ -174,7 +174,12 @@ def reap(pid):
             return
 
 
+MODE = "baseline"
+
+
 def trace(api, path, target=0, mode="baseline", work=workload, exact=True, exits=(0,)):
+    global MODE
+    MODE = mode
     ack_read, ack_write = os.pipe()
     pid = os.fork()
     if pid == 0:
@@ -285,7 +290,7 @@ def group_workload(api, path, ack):
                     assert not failed, ("write succeeded after a failure", failed)
                     opened.set()
                     os.write(ack, bytes([x, sequence]))
-                elif opened.is_set():
+                elif opened.is_set() and not (MODE == "enospc" and result == 14):
                     failed = failed or result
         except BaseException as error:
             failures.append(error)

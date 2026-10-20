@@ -154,10 +154,12 @@ region cache without changing the ABI 3 struct layout.
 | `writeGroup` / `zg_write_group` | fsync, once for the whole group |
 | `flush` / `zg_flush` | fsync of every dirty region, run concurrently |
 
-Concurrent writers to a region share one fsync. A failed write, fsync or manifest
-update stops that region's writer instead of guessing what reached the disk. A torn
-tail after a crash is detected on open, and `zg_recover_region` copies every
-verified frame into a new directory.
+Concurrent writers to a region share one fsync. A failed fsync or manifest update
+stops that region's writer instead of guessing what reached the disk. A failed write
+is cut back off the file, and if the disk was full the region carries on once there's
+space again. A region evicted from the open-region cache is synced on the way out,
+and if that fails the next `flush` reports it. A torn tail after a crash is detected
+on open, and `zg_recover_region` copies every verified frame into a new directory.
 
 Atomicity is per batch, and so per region. A crash during `flush` can leave some
 regions saved and others not. A world-wide log would close that gap but writes every
@@ -193,6 +195,8 @@ comparison and raw data are in [tests/bench/results](tests/bench/results/README.
 - A region holds at most 255 segments of up to 4 GiB each.
 - Files are bigger than LevelDB's, since LZ4 trades ratio for speed.
 - Saves are atomic per region, not across regions (see Durability).
+- The first write into a new region waits for it to be created and synced, five fsyncs
+  in all (about 30 ms under WSL2), even when buffered.
 
 ## Testing
 

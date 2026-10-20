@@ -143,7 +143,6 @@ test "worlds written before the format marker need migration" {
         var store = try db.Store.create(testing.allocator, io, region_dir, support.region, .{});
         try store.close();
     }
-    // A bare region with a current manifest is adopted.
     {
         var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
         try world.close();
@@ -209,6 +208,71 @@ test "world releases its lock even when a region cannot flush" {
     defer reopened.deinit();
     var output: [128]u8 = undefined;
     try testing.expectEqualStrings("saved", (try reopened.get(key(0), &output)).?);
+}
+
+test "a region that fails to close on eviction fails the next flush, not the caller" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .max_open_regions = 1 });
+    defer world.deinit();
+    _ = try world.write(batch(1, &.{put(0, "unsaved")}));
+    world.slots[0].opened.store.failed = true;
+    _ = try world.write(batch(1, &.{put(32, "other")}));
+    try testing.expectError(error.WriterFailed, world.flush());
+    try world.flush();
+    try world.close();
+}
+
+fn writeOther(world: *db.World, result: *?anyerror) void {
+    _ = world.write(batch(1, &.{put(32, "other")})) catch |err| {
+        result.* = err;
+    };
+}
+
+fn flushWorld(world: *db.World, done: *std.atomic.Value(bool), result: *?anyerror) void {
+    world.flush() catch |err| {
+        result.* = err;
+    };
+    done.store(true, .release);
+}
+
+test "flush waits for a region that is still syncing on its way out" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .max_open_regions = 1 });
+    defer world.deinit();
+    _ = try world.write(batch(1, &.{put(0, "saved")}));
+
+    var faults: db.storage.Faults = .{ .pause_sync = true, .armed = .init(true) };
+    db.storage.faults = &faults;
+    defer db.storage.faults = null;
+    var write_result: ?anyerror = null;
+    const writer = try std.Thread.spawn(.{}, writeOther, .{ &world, &write_result });
+    var writer_joined = false;
+    defer if (!writer_joined) {
+        faults.released.store(true, .release);
+        writer.join();
+    };
+    faults.waitPaused();
+
+    var flushed: std.atomic.Value(bool) = .init(false);
+    var flush_result: ?anyerror = null;
+    const flusher = try std.Thread.spawn(.{}, flushWorld, .{ &world, &flushed, &flush_result });
+    var flusher_joined = false;
+    defer if (!flusher_joined) {
+        faults.released.store(true, .release);
+        flusher.join();
+    };
+    while (world.waiters.load(.seq_cst) == 0 and !flushed.load(.acquire)) std.Thread.yield() catch {};
+    try testing.expect(!flushed.load(.acquire));
+    faults.released.store(true, .release);
+    flusher.join();
+    flusher_joined = true;
+    writer.join();
+    writer_joined = true;
+    try testing.expectEqual(null, write_result);
+    try testing.expectEqual(null, flush_result);
+    try world.close();
 }
 
 fn worldWithAllocator(allocator: std.mem.Allocator) !void {

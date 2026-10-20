@@ -58,6 +58,9 @@ pub const World = struct {
     compactor: ?Compactor = null,
     waiters: std.atomic.Value(usize) = .init(0),
     aux_mutex: std.Io.Mutex = .init,
+    // Evictions in flight and the first one that failed, reported by the next flush.
+    evictions: usize = 0,
+    evict_error: ?anyerror = null,
 
     const Opened = struct {
         store: Store,
@@ -278,7 +281,6 @@ pub const World = struct {
         return .{ .dimension = parts[0], .x = parts[1], .z = parts[2] };
     }
 
-    /// Refuses format 1 worlds.
     fn checkFormat(directory: *Directory) !void {
         var bytes: [12]u8 = undefined;
         const io = directory.io;
@@ -295,7 +297,6 @@ pub const World = struct {
             return;
         } else |err| if (err != error.FileNotFound) return err;
 
-        // No marker yet: check a region's manifest.
         var iterator = directory.dir.iterate();
         while (try iterator.next(io)) |entry| {
             if (entry.kind != .directory or parseRegionName(entry.name) == null) continue;
@@ -359,10 +360,17 @@ pub const World = struct {
     pub fn flush(self: *World) !void {
         var stores: [1024]*Store = undefined;
         try lock.lock(&self.mutex, self.io);
+        // An evicted region's writes are only durable once its close returns.
+        while (self.evictions != 0 and !self.closing) self.wait() catch |err| {
+            self.mutex.unlock(self.io);
+            return err;
+        };
         if (self.closed or self.closing) {
             self.mutex.unlock(self.io);
             return error.Closed;
         }
+        const evicted = self.evict_error;
+        self.evict_error = null;
         var count: usize = 0;
         for (self.slots[0..self.count]) |*slot| {
             if (slot.loading) continue;
@@ -372,14 +380,34 @@ pub const World = struct {
         }
         self.mutex.unlock(self.io);
         defer for (stores[0..count]) |store| self.unpin(store);
-
-        // Regions are separate files, so their fsyncs can overlap.
-        var failures: [1024]?anyerror = undefined;
-        var group: std.Io.Group = .init;
-        for (stores[0..count], failures[0..count]) |store, *failure| group.async(self.io, flushStore, .{ store, failure });
-        try group.await(self.io);
-        for (failures[0..count]) |failure| if (failure) |err| return err;
+        const flushed = flushStores(self.io, stores[0..count]);
+        if (evicted) |err| return err;
+        return flushed;
     }
+
+    // `async` runs tasks inline once the pool is busy, which would serialize the fsyncs.
+    fn flushStores(io: std.Io, stores: []const *Store) !void {
+        var failures: [1024]?anyerror = @splat(null);
+        var dirty: [1024]usize = undefined;
+        var count: usize = 0;
+        for (stores, 0..) |store, i| {
+            if (store.dirty()) {
+                dirty[count] = i;
+                count += 1;
+            } else flushStore(store, &failures[i]);
+        }
+        var start: usize = 0;
+        while (start < count) : (start += max_parallel_syncs) {
+            var group: std.Io.Group = .init;
+            for (dirty[start..@min(count, start + max_parallel_syncs)]) |i| {
+                group.concurrent(io, flushStore, .{ stores[i], &failures[i] }) catch flushStore(stores[i], &failures[i]);
+            }
+            try group.await(io);
+        }
+        for (failures[0..stores.len]) |failure| if (failure) |err| return err;
+    }
+
+    const max_parallel_syncs = 64;
 
     fn flushStore(store: *Store, failure: *?anyerror) void {
         store.flush() catch |err| {
@@ -396,7 +424,10 @@ pub const World = struct {
         if (self.closed) return;
         self.startClosing();
         while (self.inUse()) self.waitUnused();
-        var failure: ?anyerror = null;
+        var failure = self.evict_error;
+        var stores: [1024]*Store = undefined;
+        for (self.slots[0..self.count], stores[0..self.count]) |*slot, *store| store.* = &slot.opened.store;
+        flushStores(self.io, stores[0..self.count]) catch {};
         while (self.count != 0) {
             self.evict() catch |err| {
                 if (failure == null) failure = err;
@@ -561,9 +592,21 @@ pub const World = struct {
             self.count += 1;
         }
         self.loads += 1;
+        if (victim != null) self.evictions += 1;
 
         self.mutex.unlock(self.io);
-        const result = self.openRegion(region, create, victim);
+        if (victim) |opened| {
+            const closed = opened.store.close();
+            self.allocator.destroy(opened);
+            lock.lockUncancelable(&self.mutex, self.io);
+            closed catch |err| if (self.evict_error == null) {
+                self.evict_error = err;
+            };
+            self.evictions -= 1;
+            self.changed.broadcast(self.io);
+            self.mutex.unlock(self.io);
+        }
+        const result = self.openRegion(region, create);
         lock.lockUncancelable(&self.mutex, self.io);
         defer self.changed.broadcast(self.io);
         self.loads -= 1;
@@ -607,12 +650,7 @@ pub const World = struct {
         return null;
     }
 
-    fn openRegion(self: *World, region: Region, create: bool, victim: ?*Opened) !?*Opened {
-        if (victim) |opened| {
-            defer self.allocator.destroy(opened);
-            try opened.store.close();
-        }
-
+    fn openRegion(self: *World, region: Region, create: bool) !?*Opened {
         var name_buffer: [40]u8 = undefined;
         const name = regionName(&name_buffer, region);
         var created = false;

@@ -78,7 +78,6 @@ test "compaction groups each chunk's records together" {
     var filler: [6000]u8 = undefined;
     var prng = std.Random.DefaultPrng.init(3);
     prng.random().bytes(&filler);
-    // Push each chunk's records far apart.
     for (0..4) |round| {
         _ = try store.write(batch(0, &.{ at(1, .version, "a"), at(2, .version, "b") }));
         _ = try store.write(batch(0, &.{at(@intCast(10 + round), .data3d, &filler)}));
@@ -416,6 +415,26 @@ test "reopening clears segments of a compaction that never published" {
     try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "0000000000000002-0000000000000002.segment", .{}));
     _ = try tmp.dir.statFile(io, "0000000000000003-0000000000000001.segment", .{});
     try testing.expectEqual(@as(u64, 2), (try store.compact()).generation);
+    var value: [16]u8 = undefined;
+    try testing.expectEqualStrings("saved", (try store.get(key(0), &value)).?);
+    try store.close();
+}
+
+test "reopening removes old generations whose cleanup never ran" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{});
+        defer store.deinit();
+        _ = try store.write(batch(1, &.{put(0, "saved")}));
+        _ = try store.compact();
+        try store.close();
+    }
+    // As if the process died between publishing generation 2 and removing generation 1.
+    (try tmp.dir.createFile(io, support.segment_name, .{ .exclusive = true })).close(io);
+    var store = try db.Store.open(testing.allocator, io, tmp.dir, .{});
+    defer store.deinit();
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, support.segment_name, .{}));
     var value: [16]u8 = undefined;
     try testing.expectEqualStrings("saved", (try store.get(key(0), &value)).?);
     try store.close();

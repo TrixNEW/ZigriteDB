@@ -54,6 +54,7 @@ test "failed writes leave the old index visible and stop the writer" {
         var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{ .durability = .sync });
         defer store.deinit();
         _ = try store.write(batch(1, &.{put(0, "old")}));
+        const length = try support.segmentLength(tmp.dir);
 
         var faults: db.storage.Faults = .{ .fail_sync = sync_failure, .fail_write = !sync_failure };
         support.inject(&faults);
@@ -64,13 +65,20 @@ test "failed writes leave the old index visible and stop the writer" {
 
         var output: [128]u8 = undefined;
         if (sync_failure) {
-            // Published before the fsync failed.
             try testing.expectEqualStrings("new", (try store.get(key(0), &output)).?);
-        } else {
-            try testing.expectEqualStrings("old", (try store.get(key(0), &output)).?);
-            try testing.expectEqual(null, try store.get(key(1), &output));
+            try testing.expectError(error.WriterFailed, store.write(batch(3, &.{put(0, "later")})));
+            continue;
         }
-        try testing.expectError(error.WriterFailed, store.write(batch(3, &.{put(0, "later")})));
+        try testing.expectEqualStrings("old", (try store.get(key(0), &output)).?);
+        try testing.expectEqual(null, try store.get(key(1), &output));
+        try testing.expectEqual(length, try support.segmentLength(tmp.dir));
+        _ = try store.write(batch(3, &.{put(0, "later")}));
+        try store.close();
+        var reopened = try db.Store.open(testing.allocator, io, tmp.dir, .{});
+        defer reopened.deinit();
+        try testing.expectEqualStrings("later", (try reopened.get(key(0), &output)).?);
+        try testing.expectEqual(null, try reopened.get(key(1), &output));
+        try reopened.close();
     }
 }
 
@@ -202,7 +210,6 @@ test "a failed rotation publication stops writes and keeps what was there" {
         try testing.expectError(error.WriterFailed, store.write(batch(3, &.{put(1, "later")})));
         try tmp.dir.deleteFile(io, "MANIFEST.tmp");
     }
-    // Left behind, then cleared on open.
     _ = try tmp.dir.statFile(io, "0000000000000001-0000000000000002.segment", .{});
     var store = try db.Store.open(testing.allocator, io, tmp.dir, try small());
     defer store.deinit();
@@ -247,7 +254,6 @@ test "open restores data, accepts new writes, and refuses partial tails" {
         try store.close();
     }
     {
-        // INDEX lets open skip its fsyncs.
         var faults: db.storage.Faults = .{ .fail_sync = true };
         support.inject(&faults);
         defer support.clearFaults();
@@ -324,16 +330,27 @@ test "create never replaces an existing store" {
     try testing.expectEqualStrings("saved", (try reopened.get(key(0), &output)).?);
 }
 
-test "unfinished publication blocks startup" {
+test "an unfinished publication is discarded on open and the old manifest stays" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, try small());
-    defer store.deinit();
-    try store.close();
+    {
+        var store = try db.Store.create(testing.allocator, io, tmp.dir, region, try small());
+        defer store.deinit();
+        _ = try store.write(batch(1, &.{put(0, "saved")}));
+        try store.close();
+    }
     (try tmp.dir.createFile(io, "MANIFEST.tmp", .{ .exclusive = true })).close(io);
-    try testing.expectError(error.NeedsRecovery, db.Store.open(testing.allocator, io, tmp.dir, try small()));
-    try tmp.dir.deleteFile(io, "MANIFEST.tmp");
-    try tmp.dir.deleteFile(io, segment_name);
+    (try tmp.dir.createFile(io, "0000000000000001-0000000000000002.segment", .{ .exclusive = true })).close(io);
+    {
+        var store = try db.Store.open(testing.allocator, io, tmp.dir, try small());
+        defer store.deinit();
+        var output: [128]u8 = undefined;
+        try testing.expectEqualStrings("saved", (try store.get(key(0), &output)).?);
+        _ = try store.write(batch(2, &.{put(1, "next")}));
+        try store.close();
+    }
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "MANIFEST.tmp", .{}));
+    try tmp.dir.deleteFile(io, "0000000000000001-0000000000000002.segment");
     try testing.expectError(error.MissingSegment, db.Store.open(testing.allocator, io, tmp.dir, try small()));
 }
 
@@ -781,7 +798,6 @@ test "getMany still detects a corrupt record inside a combined read" {
     _ = try store.write(batch(1, &.{ put(0, "aaaa"), put(1, "bbbb"), put(2, "cccc") }));
     const file = try support.openFile(tmp.dir, segment_name);
     defer file.handle.close(io);
-    // The second record's value.
     try file.writeAll("x", db.segment.encoded_len + db.frame.header_len + (db.record.overhead + 4) + db.record.header_len);
 
     var out: [3][4]u8 = undefined;
@@ -949,11 +965,9 @@ test "skip_unchanged drops no-op puts and deletes but keeps every real change" {
         try testing.expectEqual(@as(u64, 4), stats.records_written.load(.monotonic));
         try testing.expectEqualStrings("diff!", (try store.get(key(1), &output)).?);
 
-        // Same length, different bytes.
         _ = try store.write(batch(5, &.{put(0, "SAME")}));
         try testing.expectEqualStrings("SAME", (try store.get(key(0), &output)).?);
 
-        // The last occurrence wins inside a batch.
         _ = try store.write(batch(6, &.{ put(1, "changed"), put(1, "diff!") }));
         try testing.expectEqualStrings("diff!", (try store.get(key(1), &output)).?);
 
@@ -995,6 +1009,8 @@ test "skip_unchanged preserves changes across a group and rejects a failed write
     defer db.storage.faults = null;
     try testing.expectError(error.NoSpaceLeft, reopened.write(batch(4, &.{put(2, "torn")})));
     faults.fail_write = false;
+    try testing.expectEqual(null, try reopened.get(key(2), &output));
+    reopened.failed = true;
     try testing.expectError(error.WriterFailed, reopened.write(batch(5, &.{put(0, "original")})));
     try testing.expectError(error.WriterFailed, reopened.writeGroup(&.{batch(5, &.{put(0, "original")})}));
     try testing.expectError(error.WriterFailed, reopened.flush());
@@ -1049,7 +1065,6 @@ const Hammer = struct {
 };
 
 fn collide(store: *db.Store, failures: *std.atomic.Value(usize)) void {
-    // Losers must get BatchOrder.
     for (0..200) |i| {
         _ = store.write(batch(1_000_000 + i * 3, &.{put(31, "explicit")})) catch |err| {
             if (err != error.BatchOrder) _ = failures.fetchAdd(1000, .monotonic) else _ = failures.fetchAdd(1, .monotonic);

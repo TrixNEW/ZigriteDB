@@ -158,7 +158,6 @@ test "frames reject reordered records, other salts and bad IDs" {
     const bytes = try buildFrame(&buffer, 5, 1);
     try testing.expectError(error.ChecksumMismatch, frame.verify(bytes, 6, {}, ignore));
 
-    // Each record still checks out alone.
     const first_len = record.overhead + 5;
     var swapped: [256]u8 = undefined;
     @memcpy(swapped[0..frame.header_len], bytes[0..frame.header_len]);
