@@ -61,6 +61,10 @@ fn compact(shared: *Shared) void {
     }
 }
 
+fn flush(shared: *Shared) void {
+    while (!shared.done.load(.acquire)) shared.world.flush() catch return shared.fail(7);
+}
+
 test "readers, writers, compaction, eviction and the cache all agree with the writers' history" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -72,10 +76,11 @@ test "readers, writers, compaction, eviction and the cache all agree with the wr
     defer world.deinit();
     var shared: Shared = .{ .world = &world };
 
-    var threads: [writers + readers + 1]std.Thread = undefined;
+    var threads: [writers + readers + 2]std.Thread = undefined;
     for (threads[0..writers], 0..) |*thread, w| thread.* = try std.Thread.spawn(.{}, write, .{ &shared, w });
     for (threads[writers..][0..readers], 0..) |*thread, r| thread.* = try std.Thread.spawn(.{}, read, .{ &shared, 100 + r });
     threads[writers + readers] = try std.Thread.spawn(.{}, compact, .{&shared});
+    threads[writers + readers + 1] = try std.Thread.spawn(.{}, flush, .{&shared});
     for (threads[0..writers]) |thread| thread.join();
     shared.done.store(true, .release);
     for (threads[writers..]) |thread| thread.join();
