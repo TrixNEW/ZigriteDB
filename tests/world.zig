@@ -211,6 +211,19 @@ test "world releases its lock even when a region cannot flush" {
     try testing.expectEqualStrings("saved", (try reopened.get(key(0), &output)).?);
 }
 
+test "a region that fails to close on eviction fails the next flush, not the caller" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .max_open_regions = 1 });
+    defer world.deinit();
+    _ = try world.write(batch(1, &.{put(0, "unsaved")}));
+    world.slots[0].opened.store.failed = true;
+    _ = try world.write(batch(1, &.{put(32, "other")}));
+    try testing.expectError(error.WriterFailed, world.flush());
+    try world.flush();
+    try world.close();
+}
+
 fn worldWithAllocator(allocator: std.mem.Allocator) !void {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
