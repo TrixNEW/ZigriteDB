@@ -317,16 +317,22 @@ pub const Store = struct {
         if (has_segment or has_temporary) try directory.syncEntries();
     }
 
-    /// Removes segments left by an unfinished compaction or rotation.
+    /// Removes what an interrupted rotation, compaction or cleanup left behind. None of it can
+    /// be named by the manifest: MANIFEST.tmp only survives a rename that never happened.
     fn discardUnfinished(directory: *Directory, current: u64, active: u64) !void {
         var removed = false;
         var iterator = directory.dir.iterate();
         while (try iterator.next(directory.io)) |item| {
+            if (item.kind == .file and std.mem.eql(u8, item.name, "MANIFEST.tmp")) {
+                try directory.dir.deleteFile(directory.io, item.name);
+                removed = true;
+                continue;
+            }
             if (item.kind != .file or item.name.len != 41 or !std.mem.endsWith(u8, item.name, ".segment") or item.name[16] != '-') continue;
             const generation = std.fmt.parseInt(u64, item.name[0..16], 16) catch continue;
             const id = std.fmt.parseInt(u64, item.name[17..33], 16) catch continue;
-            const unpublished = (generation == current and id > active) or generation == current +% 1;
-            if (!unpublished) continue;
+            const unnamed = (generation == current and id > active) or generation == current +% 1 or generation < current;
+            if (!unnamed) continue;
             try directory.dir.deleteFile(directory.io, item.name);
             removed = true;
         }
@@ -350,9 +356,6 @@ pub const Store = struct {
         try options.validate();
         var directory = try Directory.init(dir, io);
         errdefer directory.deinit();
-        if (directory.dir.statFile(io, "MANIFEST.tmp", .{ .follow_symlinks = false })) |_| {
-            return error.NeedsRecovery;
-        } else |err| if (err != error.FileNotFound) return err;
 
         const ids = try allocator.alloc(u64, manifest.max_segments);
         defer allocator.free(ids);
@@ -682,8 +685,15 @@ pub const Store = struct {
                 break :prep try self.generation.index.prepare(batches, self.generation.count - 1);
             };
             const start = self.offset;
-            self.generation.devices[self.generation.count - 1].writeAll(span, start) catch |err| {
-                self.failed = true;
+            const device = self.generation.devices[self.generation.count - 1];
+            device.writeAll(span, start) catch |err| {
+                // Nothing from `start` on was acknowledged, so cutting it keeps the region openable.
+                device.handle.setLength(self.io, start) catch {
+                    self.failed = true;
+                    return err;
+                };
+                // A full disk can clear up, anything else stops the writer.
+                if (err != error.NoSpaceLeft and err != error.DiskQuota) self.failed = true;
                 return err;
             };
             {
@@ -794,14 +804,17 @@ pub const Store = struct {
         const id = std.math.add(u64, self.segment_id, 1) catch return error.SegmentIdExhausted;
         try self.syncActive();
 
-        // Failures stop writes.
-        errdefer self.failed = true;
         const handle = try files.createSegment(self.directory.dir, self.io, generation.index.generation, id);
         const device: File = .{ .handle = handle, .io = self.io };
         errdefer handle.close(self.io);
-        // Once publishing starts the manifest may name the file.
+        // Once publishing starts the manifest may name the file, so only earlier failures can be undone.
         var publishing = false;
-        errdefer if (!publishing) files.removeSegment(self.directory.dir, self.io, generation.index.generation, id) catch {};
+        errdefer if (!publishing) files.removeSegment(self.directory.dir, self.io, generation.index.generation, id) catch {
+            self.failed = true;
+        };
+        errdefer if (publishing) {
+            self.failed = true;
+        };
         const header = try (segment.Header{ .segment_id = id, .generation = generation.index.generation, .region = self.region, .salt = self.salt }).encode();
         try device.writeAll(&header, 0);
         try device.sync();

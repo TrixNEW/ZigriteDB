@@ -137,9 +137,11 @@ writer's state durable.
 Open replays committed frames. Anything unreadable at the end of the active segment —
 a cut, zeros or garbage — is treated as a torn tail and requires explicit recovery into
 an empty directory (`zg_recover_region`), which copies every verified frame and leaves
-the source untouched. Damage in a sealed segment is corruption. Segments of the next
-generation (an unfinished compaction) and segments newer than the manifest's active one
-(an unfinished rotation) are deleted on open; neither can be named by a manifest.
+the source untouched. Damage in a sealed segment is corruption. A leftover `MANIFEST.tmp`
+(a publication whose rename never happened), segments of the next generation (an
+unfinished compaction), segments of older generations (cleanup that never ran) and
+segments newer than the manifest's active one (an unfinished rotation) are deleted on
+open; none of them can be named by the manifest.
 
 ## Compaction
 
@@ -153,5 +155,6 @@ either.
 ## Durability
 
 Sync writes and save groups acknowledge only after fsync, shared by concurrent writers.
-Buffered writes are durable after the next successful flush or close. A failed write,
-fsync, rotation or publication stops the region's writer.
+Buffered writes are durable after the next successful flush or close. A failed fsync or
+publication stops the region's writer. A failed write is truncated away; running out of
+space only fails that write, anything else stops the writer.
