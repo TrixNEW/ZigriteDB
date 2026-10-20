@@ -254,7 +254,6 @@ static void failures(const char *root, zg_options options) {
     assert(zg_write(handle, 2, &put, 1) == ZG_IO_ERROR);
     assert(zg_flush(handle) == ZG_IO_ERROR);
     assert(zg_close(handle) == ZG_IO_ERROR);
-    // The partial frame was cut off, so the region still opens.
     struct stat after_failure;
     assert(stat(segment, &after_failure) == 0 && after_failure.st_size == info.st_size);
     check(zg_open((const uint8_t *)source, strlen(source), &options, &handle));
@@ -263,7 +262,6 @@ static void failures(const char *root, zg_options options) {
     check(zg_get(handle, &put.key, output, sizeof(output), &required));
     assert(required == 7 && memcmp(output, "durable", 7) == 0);
     check(zg_close(handle));
-    // A crash in the middle of a write still leaves a tail for explicit recovery.
     FILE *torn = fopen(segment, "ab");
     assert(torn != NULL && fwrite("torn", 1, 4, torn) == 4 && fclose(torn) == 0);
     check(zg_open((const uint8_t *)source, strlen(source), &options, &handle));

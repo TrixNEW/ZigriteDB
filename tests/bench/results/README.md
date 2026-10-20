@@ -110,6 +110,29 @@ instead of one `zg_get` per record; it matches per-record reads within noise her
   16 regions manage 563 saves/s vs LevelDB's 1,045 (see Writers).
 - **Update tail on Zhyrr:** p99 24 µs vs 46 µs.
 
+## 1.0 vs 1.1 (`v1.0-ab-*.jsonl`, `v1.1-ab-*.jsonl`)
+
+Same machine and session, ReleaseSafe, 8 MiB cache, 5 runs each, alternating builds.
+1.1 hashes cache keys once and keeps its map free of tombstones, gives each dirty
+region its own thread at a barrier, and skips ReleaseSafe fills in the C API.
+
+| Rave / Zhyrr | 1.0 | 1.1 |
+| --- | ---: | ---: |
+| hot load p50 | 30.0 / 9.40 µs | 25.9 / 8.16 µs |
+| walk p50 | 22.8 / 8.60 µs | 16.9 / 7.76 µs |
+| mixed load p50 | 42.1 / 13.0 µs | 35.9 / 11.3 µs |
+| mixed load p99 | 195 / 82.8 µs | 139 / 69.3 µs |
+| autosave barrier p50 | 10.1 / 20.3 ms | 9.6 / 14.8 ms |
+| mixed barrier p50 | 13.2 / 19.1 ms | 12.0 / 16.1 ms |
+| import chunks/s | 10,734 / 20,524 | 10,848 / 21,188 |
+| compaction | 206 / 926 ms | 215 / 974 ms |
+
+Compaction and update tails moved within run-to-run noise; their code didn't change.
+Reopen and first load on Zhyrr (`*-ab-reopen.jsonl`, 6 runs each with the order
+flipped every run) had medians of 12.1 ms for 1.0 and 11.0 ms for 1.1. In the
+profile of the mixed phase the value cache fell from about a third of CPU time to a
+sixth; LZ4 decoding is now the largest cost at 2.8 GB/s.
+
 ## Open-region limit (`v2-regions*.jsonl`)
 
 Zhyrr spans 25 regions. With at most 16 open, random updates kept evicting dirty

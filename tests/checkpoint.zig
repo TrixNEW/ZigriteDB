@@ -34,7 +34,6 @@ test "a clean close leaves an INDEX that reopens without replaying" {
     try populate(tmp.dir, .{});
     _ = try tmp.dir.statFile(io, "INDEX", .{});
 
-    // Open trusts INDEX; reads still verify.
     const file = try support.openFile(tmp.dir, support.segment_name);
     defer file.handle.close(io);
     var store = try db.Store.open(testing.allocator, io, tmp.dir, .{});
@@ -89,7 +88,6 @@ test "writes after the checkpoint are replayed when the session never closed" {
         defer store.deinit();
         _ = try store.write(batch(41, &.{ put(0, "after"), put(1, null) }));
         try store.flush();
-        // No close, so INDEX is stale.
     }
     var store = try db.Store.open(testing.allocator, io, tmp.dir, .{});
     defer store.deinit();

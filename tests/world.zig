@@ -143,7 +143,6 @@ test "worlds written before the format marker need migration" {
         var store = try db.Store.create(testing.allocator, io, region_dir, support.region, .{});
         try store.close();
     }
-    // A bare region with a current manifest is adopted.
     {
         var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
         try world.close();
@@ -244,7 +243,6 @@ test "flush waits for a region that is still syncing on its way out" {
     defer world.deinit();
     _ = try world.write(batch(1, &.{put(0, "saved")}));
 
-    // The next write evicts the first region, whose close stops in its fsync.
     var faults: db.storage.Faults = .{ .pause_sync = true, .armed = .init(true) };
     db.storage.faults = &faults;
     defer db.storage.faults = null;

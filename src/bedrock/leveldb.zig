@@ -191,7 +191,6 @@ pub fn decompress(allocator: std.mem.Allocator, kind: u8, data: []const u8, out:
     var input: std.Io.Reader = .fixed(data);
     var window: [flate.max_window_len]u8 = undefined;
     var inflate: flate.Decompress = .init(&input, container, &window);
-    // Bounded so a hostile table can't inflate into all of memory.
     inflate.reader.appendRemaining(allocator, out, .limited(max_block + 1)) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return error.Corrupt,

@@ -52,7 +52,6 @@ pub const OverlayWorld = struct {
         self.overlay.deinit();
     }
 
-    /// Drops all overlay changes.
     pub fn reset(self: *OverlayWorld) !void {
         self.overlay.close() catch {};
         self.overlay.deinit();
@@ -91,7 +90,6 @@ pub const OverlayWorld = struct {
         };
     }
 
-    /// Reads the overlay first, then the base.
     pub fn get(self: *OverlayWorld, key: Key, output: []u8) !?[]const u8 {
         return switch (try self.lookup(key, output)) {
             .absent => self.base.get(key, output),

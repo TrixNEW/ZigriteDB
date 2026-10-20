@@ -195,6 +195,8 @@ comparison and raw data are in [tests/bench/results](tests/bench/results/README.
 - A region holds at most 255 segments of up to 4 GiB each.
 - Files are bigger than LevelDB's, since LZ4 trades ratio for speed.
 - Saves are atomic per region, not across regions (see Durability).
+- The first write into a new region waits for it to be created and synced, five fsyncs
+  in all (about 30 ms under WSL2), even when buffered.
 
 ## Testing
 

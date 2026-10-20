@@ -291,7 +291,6 @@ def group_workload(api, path, ack):
                     opened.set()
                     os.write(ack, bytes([x, sequence]))
                 elif opened.is_set() and not (MODE == "enospc" and result == 14):
-                    # A full disk only fails that write; other errors stop the region.
                     failed = failed or result
         except BaseException as error:
             failures.append(error)

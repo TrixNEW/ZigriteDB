@@ -1,6 +1,5 @@
 const std = @import("std");
 
-/// Atomic counters for one handle.
 pub const Stats = struct {
     get_calls: std.atomic.Value(u64) = .init(0),
     writes: std.atomic.Value(u64) = .init(0),

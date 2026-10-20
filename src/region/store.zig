@@ -317,8 +317,7 @@ pub const Store = struct {
         if (has_segment or has_temporary) try directory.syncEntries();
     }
 
-    /// Removes what an interrupted rotation, compaction or cleanup left behind. None of it can
-    /// be named by the manifest: MANIFEST.tmp only survives a rename that never happened.
+    /// None of this can be named by the manifest; MANIFEST.tmp only survives a rename that never happened.
     fn discardUnfinished(directory: *Directory, current: u64, active: u64) !void {
         var removed = false;
         var iterator = directory.dir.iterate();
@@ -589,7 +588,6 @@ pub const Store = struct {
         }
     };
 
-    /// Returns the active segment's end.
     fn replay(allocator: std.mem.Allocator, index: *Index, devices: []const File, metadata: manifest.Manifest, options: Options, scratch: *[]u8, position: usize, offset: u64) !u64 {
         var end: u64 = offset;
         for (devices[position..], metadata.segments[position..], position..) |device, id, at| {
@@ -687,12 +685,11 @@ pub const Store = struct {
             const start = self.offset;
             const device = self.generation.devices[self.generation.count - 1];
             device.writeAll(span, start) catch |err| {
-                // Nothing from `start` on was acknowledged, so cutting it keeps the region openable.
+                // Nothing past `start` was acknowledged, so cutting it keeps the region openable.
                 device.handle.setLength(self.io, start) catch {
                     self.failed = true;
                     return err;
                 };
-                // A full disk can clear up, anything else stops the writer.
                 if (err != error.NoSpaceLeft and err != error.DiskQuota) self.failed = true;
                 return err;
             };
@@ -807,7 +804,7 @@ pub const Store = struct {
         const handle = try files.createSegment(self.directory.dir, self.io, generation.index.generation, id);
         const device: File = .{ .handle = handle, .io = self.io };
         errdefer handle.close(self.io);
-        // Once publishing starts the manifest may name the file, so only a full disk before that is retryable.
+        // The manifest may name the file once publishing starts.
         var publishing = false;
         errdefer |err| {
             const removed = !publishing and if (files.removeSegment(self.directory.dir, self.io, generation.index.generation, id)) true else |_| false;
@@ -940,7 +937,6 @@ pub const Store = struct {
         return self.commitBarrier();
     }
 
-    /// True if a flush would have to fsync.
     pub fn dirty(self: *Store) bool {
         lock.lockUncancelable(&self.writer, self.io);
         defer self.writer.unlock(self.io);
@@ -1209,7 +1205,6 @@ pub const Store = struct {
                 break :blk .{ generation, count };
             };
             if (count > entries.len) {
-                // Rare: too many to fit on the stack.
                 if (heap) |bytes| self.allocator.free(bytes);
                 heap = null;
                 const capacity = count + 16;

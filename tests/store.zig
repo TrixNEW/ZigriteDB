@@ -65,14 +65,12 @@ test "failed writes leave the old index visible and stop the writer" {
 
         var output: [128]u8 = undefined;
         if (sync_failure) {
-            // Published before the fsync failed.
             try testing.expectEqualStrings("new", (try store.get(key(0), &output)).?);
             try testing.expectError(error.WriterFailed, store.write(batch(3, &.{put(0, "later")})));
             continue;
         }
         try testing.expectEqualStrings("old", (try store.get(key(0), &output)).?);
         try testing.expectEqual(null, try store.get(key(1), &output));
-        // The torn frame is cut off and a full disk is not fatal.
         try testing.expectEqual(length, try support.segmentLength(tmp.dir));
         _ = try store.write(batch(3, &.{put(0, "later")}));
         try store.close();
@@ -212,7 +210,6 @@ test "a failed rotation publication stops writes and keeps what was there" {
         try testing.expectError(error.WriterFailed, store.write(batch(3, &.{put(1, "later")})));
         try tmp.dir.deleteFile(io, "MANIFEST.tmp");
     }
-    // Left behind, then cleared on open.
     _ = try tmp.dir.statFile(io, "0000000000000001-0000000000000002.segment", .{});
     var store = try db.Store.open(testing.allocator, io, tmp.dir, try small());
     defer store.deinit();
@@ -257,7 +254,6 @@ test "open restores data, accepts new writes, and refuses partial tails" {
         try store.close();
     }
     {
-        // INDEX lets open skip its fsyncs.
         var faults: db.storage.Faults = .{ .fail_sync = true };
         support.inject(&faults);
         defer support.clearFaults();
@@ -343,7 +339,6 @@ test "an unfinished publication is discarded on open and the old manifest stays"
         _ = try store.write(batch(1, &.{put(0, "saved")}));
         try store.close();
     }
-    // A rotation that died before its rename leaves both behind.
     (try tmp.dir.createFile(io, "MANIFEST.tmp", .{ .exclusive = true })).close(io);
     (try tmp.dir.createFile(io, "0000000000000001-0000000000000002.segment", .{ .exclusive = true })).close(io);
     {
@@ -803,7 +798,6 @@ test "getMany still detects a corrupt record inside a combined read" {
     _ = try store.write(batch(1, &.{ put(0, "aaaa"), put(1, "bbbb"), put(2, "cccc") }));
     const file = try support.openFile(tmp.dir, segment_name);
     defer file.handle.close(io);
-    // The second record's value.
     try file.writeAll("x", db.segment.encoded_len + db.frame.header_len + (db.record.overhead + 4) + db.record.header_len);
 
     var out: [3][4]u8 = undefined;
@@ -971,11 +965,9 @@ test "skip_unchanged drops no-op puts and deletes but keeps every real change" {
         try testing.expectEqual(@as(u64, 4), stats.records_written.load(.monotonic));
         try testing.expectEqualStrings("diff!", (try store.get(key(1), &output)).?);
 
-        // Same length, different bytes.
         _ = try store.write(batch(5, &.{put(0, "SAME")}));
         try testing.expectEqualStrings("SAME", (try store.get(key(0), &output)).?);
 
-        // The last occurrence wins inside a batch.
         _ = try store.write(batch(6, &.{ put(1, "changed"), put(1, "diff!") }));
         try testing.expectEqualStrings("diff!", (try store.get(key(1), &output)).?);
 
@@ -1073,7 +1065,6 @@ const Hammer = struct {
 };
 
 fn collide(store: *db.Store, failures: *std.atomic.Value(usize)) void {
-    // Losers must get BatchOrder.
     for (0..200) |i| {
         _ = store.write(batch(1_000_000 + i * 3, &.{put(31, "explicit")})) catch |err| {
             if (err != error.BatchOrder) _ = failures.fetchAdd(1000, .monotonic) else _ = failures.fetchAdd(1, .monotonic);

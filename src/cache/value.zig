@@ -22,7 +22,7 @@ fn sizeClass(len: usize) usize {
     return std.math.ceilPowerOfTwo(usize, @max(len, 16)) catch len;
 }
 
-// Hashed once per call: the low bits pick a shard and the high bits index it.
+// Low bits pick the shard, high bits index it.
 fn hashKey(key: Key) u64 {
     const words = [3]u64{
         @as(u64, @as(u32, @bitCast(key.chunk_x))) | @as(u64, @as(u32, @bitCast(key.chunk_z))) << 32,
@@ -42,7 +42,6 @@ const Context = struct {
     }
 };
 
-// Hands the map the hash the caller already has.
 const Hashed = struct {
     bits: u32,
 

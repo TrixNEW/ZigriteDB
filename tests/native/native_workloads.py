@@ -79,7 +79,6 @@ def check(library, path):
 def check_damaged_files(library):
     api = API(library)
     segment = "0000000000000001-0000000000000001.segment"
-    # Damage at the active tail looks torn.
     cases = (("MANIFEST", "missing", 8), (segment, "missing", 6),
              (segment, "truncated", 8), (segment, "corrupt", 8), ("MANIFEST", "corrupt", 6))
     for name, damage, expected_status in cases:
@@ -87,7 +86,6 @@ def check_damaged_files(library):
             handle = api.open(path)
             assert api.write(handle, 1, [b"saved"]) == 0
             assert api.lib.zg_close(handle) == 0
-            # Without INDEX, open checks every frame.
             (Path(path) / "00000000-00000000-00000000.region" / "INDEX").unlink()
             source = Path(path) / "00000000-00000000-00000000.region" / name
             if damage == "missing":

@@ -269,8 +269,7 @@ fn entries(operations: []const Operation, buffer: []db.Entry) ![]db.Entry {
     return buffer[0..operations.len];
 }
 
-// The exported wrappers below only declare scratch arrays: with safety on, ReleaseSafe fills
-// them on every call. The work stays in checked functions.
+// These wrappers only declare scratch arrays, which ReleaseSafe would otherwise fill on every call.
 
 pub export fn zg_write(optional: ?*Handle, id: u64, operations: ?[*]const Operation, count: usize) Status {
     @setRuntimeSafety(false);

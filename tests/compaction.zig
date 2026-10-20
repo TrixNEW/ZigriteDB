@@ -78,7 +78,6 @@ test "compaction groups each chunk's records together" {
     var filler: [6000]u8 = undefined;
     var prng = std.Random.DefaultPrng.init(3);
     prng.random().bytes(&filler);
-    // Push each chunk's records far apart.
     for (0..4) |round| {
         _ = try store.write(batch(0, &.{ at(1, .version, "a"), at(2, .version, "b") }));
         _ = try store.write(batch(0, &.{at(@intCast(10 + round), .data3d, &filler)}));

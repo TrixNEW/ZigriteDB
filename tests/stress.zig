@@ -125,7 +125,6 @@ fn growKey(sequence: usize) db.Key {
     return .{ .dimension = 0, .chunk_x = @intCast(sequence % 32), .chunk_z = @intCast(1 + sequence / 32), .component = .version };
 }
 
-/// Value format: sequence id plus a low-byte fill.
 fn hotValue(sequence: u64, buffer: *[128]u8) []const u8 {
     const len = 8 + sequence % 120;
     std.mem.writeInt(u64, buffer[0..8], sequence, .little);

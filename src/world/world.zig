@@ -58,7 +58,7 @@ pub const World = struct {
     compactor: ?Compactor = null,
     waiters: std.atomic.Value(usize) = .init(0),
     aux_mutex: std.Io.Mutex = .init,
-    // Regions being closed for eviction, and the first error one hit. The next flush reports it.
+    // Evictions in flight and the first one that failed, reported by the next flush.
     evictions: usize = 0,
     evict_error: ?anyerror = null,
 
@@ -281,7 +281,6 @@ pub const World = struct {
         return .{ .dimension = parts[0], .x = parts[1], .z = parts[2] };
     }
 
-    /// Refuses format 1 worlds.
     fn checkFormat(directory: *Directory) !void {
         var bytes: [12]u8 = undefined;
         const io = directory.io;
@@ -298,7 +297,6 @@ pub const World = struct {
             return;
         } else |err| if (err != error.FileNotFound) return err;
 
-        // No marker yet: check a region's manifest.
         var iterator = directory.dir.iterate();
         while (try iterator.next(io)) |entry| {
             if (entry.kind != .directory or parseRegionName(entry.name) == null) continue;
@@ -387,8 +385,7 @@ pub const World = struct {
         return flushed;
     }
 
-    // Regions are separate files, so their fsyncs can overlap. `async` would run most of them
-    // inline once the pool is busy, so dirty regions get their own threads, a wave at a time.
+    // `async` runs tasks inline once the pool is busy, which would serialize the fsyncs.
     fn flushStores(io: std.Io, stores: []const *Store) !void {
         var failures: [1024]?anyerror = @splat(null);
         var dirty: [1024]usize = undefined;
@@ -428,7 +425,6 @@ pub const World = struct {
         self.startClosing();
         while (self.inUse()) self.waitUnused();
         var failure = self.evict_error;
-        // Sync every region at once so the closes below are cheap.
         var stores: [1024]*Store = undefined;
         for (self.slots[0..self.count], stores[0..self.count]) |*slot, *store| store.* = &slot.opened.store;
         flushStores(self.io, stores[0..self.count]) catch {};
@@ -600,7 +596,6 @@ pub const World = struct {
 
         self.mutex.unlock(self.io);
         if (victim) |opened| {
-            // The victim's failure belongs to the next flush, not to this caller.
             const closed = opened.store.close();
             self.allocator.destroy(opened);
             lock.lockUncancelable(&self.mutex, self.io);
