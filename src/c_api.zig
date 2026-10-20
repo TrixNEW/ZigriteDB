@@ -269,11 +269,19 @@ fn entries(operations: []const Operation, buffer: []db.Entry) ![]db.Entry {
     return buffer[0..operations.len];
 }
 
+// The exported wrappers below only declare scratch arrays: with safety on, ReleaseSafe fills
+// them on every call. The work stays in checked functions.
+
 pub export fn zg_write(optional: ?*Handle, id: u64, operations: ?[*]const Operation, count: usize) Status {
+    @setRuntimeSafety(false);
+    var stack: [inline_entries]db.Entry = undefined;
+    return write(optional, id, operations, count, &stack);
+}
+
+fn write(optional: ?*Handle, id: u64, operations: ?[*]const Operation, count: usize, stack: []db.Entry) Status {
     const handle = optional orelse return .invalid_argument;
     if (operations == null or count == 0) return .invalid_argument;
     if (count > db.frame.max_records) return .limit;
-    var stack: [inline_entries]db.Entry = undefined;
     const buffer = if (count <= stack.len) stack[0..count] else allocator.alloc(db.Entry, count) catch return .out_of_memory;
     defer if (count > stack.len) allocator.free(buffer);
     const list = entries(operations.?[0..count], buffer) catch |err| return status(err);
@@ -331,6 +339,13 @@ const max_c_batch = db.World.max_read_batch;
 const read_chunk = 32;
 
 pub export fn zg_get_many(optional: ?*Handle, requests: ?[*]const ReadRequest, results: ?[*]ReadResult, count: usize) Status {
+    @setRuntimeSafety(false);
+    var native_requests: [read_chunk]db.ReadRequest = undefined;
+    var native_results: [read_chunk]db.ReadResult = undefined;
+    return getMany(optional, requests, results, count, &native_requests, &native_results);
+}
+
+fn getMany(optional: ?*Handle, requests: ?[*]const ReadRequest, results: ?[*]ReadResult, count: usize, native_requests: *[read_chunk]db.ReadRequest, native_results: *[read_chunk]db.ReadResult) Status {
     const handle = optional orelse return .invalid_argument;
     if (requests == null or results == null or count == 0) return .invalid_argument;
     if (count > max_c_batch) return .limit;
@@ -341,8 +356,6 @@ pub export fn zg_get_many(optional: ?*Handle, requests: ?[*]const ReadRequest, r
     var start: usize = 0;
     while (start < count) : (start += read_chunk) {
         const end = @min(count, start + read_chunk);
-        var native_requests: [read_chunk]db.ReadRequest = undefined;
-        var native_results: [read_chunk]db.ReadResult = undefined;
         for (requests.?[start..end], native_requests[0 .. end - start]) |request, *native| {
             const bytes: []u8 = if (request.output) |ptr| ptr[0..request.capacity] else &.{};
             native.* = .{ .key = request.key.native() catch unreachable, .output = bytes };
@@ -383,13 +396,30 @@ pub export fn zg_get_chunk(
     count: ?*usize,
     required: ?*usize,
 ) Status {
+    @setRuntimeSafety(false);
+    var stack: [inline_chunk_records]db.ChunkRecord = undefined;
+    return getChunk(optional, dimension, chunk_x, chunk_z, buffer, capacity, records, record_capacity, count, required, &stack);
+}
+
+fn getChunk(
+    optional: ?*Handle,
+    dimension: i32,
+    chunk_x: i32,
+    chunk_z: i32,
+    buffer: ?[*]u8,
+    capacity: usize,
+    records: ?[*]ChunkRecord,
+    record_capacity: usize,
+    count: ?*usize,
+    required: ?*usize,
+    stack: []db.ChunkRecord,
+) Status {
     const total = count orelse return .invalid_argument;
     const bytes_needed = required orelse return .invalid_argument;
     total.* = 0;
     bytes_needed.* = 0;
     const handle = optional orelse return .invalid_argument;
     if ((buffer == null and capacity != 0) or (records == null and record_capacity != 0)) return .invalid_argument;
-    var stack: [inline_chunk_records]db.ChunkRecord = undefined;
     const native = if (record_capacity <= stack.len) stack[0..record_capacity] else allocator.alloc(db.ChunkRecord, record_capacity) catch return .out_of_memory;
     defer if (record_capacity > stack.len) allocator.free(native);
     const output: []u8 = if (buffer) |ptr| ptr[0..capacity] else &.{};
