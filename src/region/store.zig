@@ -807,14 +807,12 @@ pub const Store = struct {
         const handle = try files.createSegment(self.directory.dir, self.io, generation.index.generation, id);
         const device: File = .{ .handle = handle, .io = self.io };
         errdefer handle.close(self.io);
-        // Once publishing starts the manifest may name the file, so only earlier failures can be undone.
+        // Once publishing starts the manifest may name the file, so only a full disk before that is retryable.
         var publishing = false;
-        errdefer if (!publishing) files.removeSegment(self.directory.dir, self.io, generation.index.generation, id) catch {
-            self.failed = true;
-        };
-        errdefer if (publishing) {
-            self.failed = true;
-        };
+        errdefer |err| {
+            const removed = !publishing and if (files.removeSegment(self.directory.dir, self.io, generation.index.generation, id)) true else |_| false;
+            if (!removed or (err != error.NoSpaceLeft and err != error.DiskQuota)) self.failed = true;
+        }
         const header = try (segment.Header{ .segment_id = id, .generation = generation.index.generation, .region = self.region, .salt = self.salt }).encode();
         try device.writeAll(&header, 0);
         try device.sync();
