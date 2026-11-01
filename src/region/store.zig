@@ -589,6 +589,7 @@ pub const Store = struct {
             const count = std.mem.readInt(u16, counts[slot * 2 ..][0..2], .little);
             for (locals[0..count], locations[0..count]) |*k, *location| {
                 k.*, location.* = try checkpoint.readEntry(body[at..][0..entry_len], header.fingerprints);
+                if (header.stored_fingerprints) location.fingerprint = 0;
                 at += entry_len;
                 if (location.segment >= header.segments or location.offset < segment.encoded_len or
                     @as(u64, location.offset) + location.recordLen() > ends[location.segment]) return error.StaleCheckpoint;
@@ -742,19 +743,36 @@ pub const Store = struct {
         for (builders[1..kept], builders[0 .. kept - 1]) |*next, previous| {
             std.debug.assert(next.buffer.ptr == previous.buffer.ptr + previous.len);
         }
-        return self.append(buffer.bytes[0..used], builders[0..kept], ids[0..kept], buffer.batches[0..kept], durable);
+
+        // Hashing the values here spares the index decompressing them again.
+        var fingerprints: []u32 = &.{};
+        defer self.allocator.free(fingerprints);
+        if (self.options.skip_unchanged) {
+            var records: usize = 0;
+            for (batches) |batch| records += batch.entries.len;
+            fingerprints = try self.allocator.alloc(u32, records);
+            var at: usize = 0;
+            for (batches) |batch| {
+                for (batch.entries) |entry| {
+                    fingerprints[at] = if (entry.value) |value| index_module.fingerprint(value) else 0;
+                    at += 1;
+                }
+            }
+        }
+        return self.append(buffer.bytes[0..used], builders[0..kept], ids[0..kept], buffer.batches[0..kept], durable, batches[0].entries, if (self.options.skip_unchanged) fingerprints else null);
     }
 
-    fn append(self: *Store, input: []u8, builders: []frame.Builder, ids: []const u64, batches: []scan.Batch, durable: bool) !AppendResult {
+    fn append(self: *Store, input: []u8, builders: []frame.Builder, ids: []const u64, batches: []scan.Batch, durable: bool, entries: []const write_module.Entry, all_fingerprints: ?[]u32) !AppendResult {
         const result: AppendResult, const ticket: ?u64 = blk: {
             try lock.lock(&self.writer, self.io);
             defer self.writer.unlock(self.io);
             if (self.closed) return error.Closed;
             if (self.failed) return error.WriterFailed;
 
+            var fingerprints = all_fingerprints;
             // ponytail: groups keep every frame until filtering tracks earlier changes.
             const span = if (self.options.skip_unchanged and builders.len == 1) filtered: {
-                try self.dropUnchanged(&builders[0]);
+                fingerprints = fingerprints.?[0..try self.dropUnchanged(&builders[0], entries, fingerprints.?)];
                 if (builders[0].count == 0) break :blk .{
                     .{ .batch_id = self.generation.index.lastBatchId(), .start = self.offset, .end = self.offset, .synced = false },
                     if (durable) self.nextTicket() else null,
@@ -777,7 +795,7 @@ pub const Store = struct {
             const prepared = prep: {
                 self.table.lockUncancelable(self.io);
                 defer self.table.unlock(self.io);
-                break :prep try self.generation.index.prepare(batches, self.generation.count - 1);
+                break :prep try self.generation.index.prepareWith(batches, self.generation.count - 1, fingerprints);
             };
             const start = self.offset;
             const device = self.generation.devices[self.generation.count - 1];
@@ -809,7 +827,9 @@ pub const Store = struct {
         return done;
     }
 
-    fn dropUnchanged(self: *Store, builder: *frame.Builder) !void {
+    /// `entries` and `fingerprints` line up with the builder's records. Returns how many fingerprints the kept records use.
+    fn dropUnchanged(self: *Store, builder: *frame.Builder, entries: []const write_module.Entry, fingerprints: []u32) !usize {
+        std.debug.assert(entries.len == builder.count and fingerprints.len == builder.count);
         var skip: std.StaticBitSet(frame.max_records) = .empty;
         var offset: usize = frame.header_len;
         var skipped: u64 = 0;
@@ -818,12 +838,12 @@ pub const Store = struct {
             const len = record.overhead + header.stored_len;
             const bytes = builder.buffer[offset..][0..len];
             offset += len;
-            if (!self.repeated(builder, header) and try self.unchanged(header, bytes[record.header_len..][0..header.stored_len])) {
+            if (!self.repeated(builder, header) and try self.unchanged(header, bytes[record.header_len..][0..header.stored_len], entries[i].value orelse &.{}, fingerprints[i])) {
                 skip.set(i);
                 skipped += 1;
             }
         }
-        if (skipped == 0) return;
+        if (skipped == 0) return fingerprints.len;
         var kept: frame.Builder = .{ .buffer = builder.buffer };
         offset = frame.header_len;
         for (0..builder.count) |i| {
@@ -836,10 +856,12 @@ pub const Store = struct {
             std.mem.copyForwards(u8, kept.buffer[kept.len..][0..len], bytes);
             kept.checksums = crc.update(kept.checksums, kept.buffer[kept.len + len - 4 ..][0..4]);
             kept.len += len;
+            fingerprints[kept.count] = fingerprints[i];
             kept.count += 1;
         }
         builder.* = kept;
         if (self.options.stats) |s| _ = s.unchanged_write_skips.fetchAdd(skipped, .monotonic);
+        return kept.count;
     }
 
     fn repeated(_: *Store, builder: *const frame.Builder, header: record.Header) bool {
@@ -853,20 +875,24 @@ pub const Store = struct {
         return seen > 1;
     }
 
-    fn unchanged(self: *Store, header: record.Header, stored: []const u8) !bool {
+    /// Compares against the stored record's value, not its encoding, so compaction recompressing it doesn't hide a
+    /// repeated write. A fingerprint only rules records out; matching ones are always compared.
+    fn unchanged(self: *Store, header: record.Header, stored: []const u8, raw: []const u8, fingerprint: u32) !bool {
         var pinned = (try self.pinLocal(header.slot, header.local)) orelse return header.delete;
         defer self.unpin(pinned.generation);
         if (header.delete) return false;
         const location = pinned.location;
-        if (location.stored_len != header.stored_len or location.raw_len != header.raw_len or location.compression != header.compression) return false;
-        // 0 is also what records indexed without fingerprints carry, so it only means the bytes have to be compared
-        if (location.fingerprint != 0 and location.fingerprint != index_module.fingerprint(header.compression, stored)) return false;
-        const scratch = try self.borrow(location.recordLen());
+        if (location.raw_len != header.raw_len) return false;
+        // 0 stands for an unknown fingerprint too, such as 1.2's, so it only means comparing the value
+        if (location.fingerprint != 0 and location.fingerprint != fingerprint) return false;
+        const record_len = location.recordLen();
+        const scratch = try self.borrow(record_len + location.raw_len);
         defer self.giveBack(scratch);
-        const bytes = scratch.bytes[0..location.recordLen()];
+        const bytes = scratch.bytes[0..record_len];
         try pinned.generation.devices[location.segment].readExact(bytes, location.offset);
         const decoded = try checkRecord(bytes, location, header.slot, header.local);
-        return std.mem.eql(u8, decoded.value, stored);
+        if (location.compression == header.compression and std.mem.eql(u8, decoded.value, stored)) return true;
+        return std.mem.eql(u8, try decodeInto(decoded, scratch.bytes[record_len..][0..location.raw_len]), raw);
     }
 
     fn countWrites(self: *Store, builders: []const frame.Builder) void {
@@ -1430,8 +1456,7 @@ pub const Store = struct {
         var staging = try self.allocator.alloc(u8, self.options.batch_buffer_size);
         defer self.allocator.free(staging);
         var source_bytes: u64 = 0;
-        // Fingerprints hash stored bytes, so re-encoding would hide unchanged writes.
-        const dense: ?*Dense = if (self.options.skip_unchanged or self.options.compression_threshold == 0) null else try self.allocator.create(Dense);
+        const dense: ?*Dense = if (self.options.compression_threshold == 0) null else try self.allocator.create(Dense);
         defer if (dense) |d| d.destroy(self.allocator);
         if (dense) |d| d.* = .{};
         self.writeBase(old, live.items, &output, &index, snapshot.last_batch_id, &scratch, &staging, &source_bytes, dense) catch |err|
@@ -1603,6 +1628,9 @@ pub const Store = struct {
         defer reads.deinit(self.allocator);
         const places = try self.allocator.alloc(usize, frame.max_records);
         defer self.allocator.free(places);
+        // Fingerprints hash uncompressed values, so they carry over however the records are re-encoded.
+        const fingerprints = try self.allocator.alloc(u32, frame.max_records);
+        defer self.allocator.free(fingerprints);
 
         var first: usize = 0;
         while (first < live.len) {
@@ -1649,6 +1677,7 @@ pub const Store = struct {
             }
 
             for (window, 0..) |item, w| {
+                fingerprints[w] = item.location.fingerprint;
                 const in_place = staging.*[places[w]..][0..item.location.recordLen()];
                 const bytes = (if (dense) |d| try self.recompress(d, in_place) else null) orelse in_place;
                 // Records only shrink, so moving left never overwrites one still to be read.
@@ -1660,7 +1689,7 @@ pub const Store = struct {
             const bytes = builder.finish(.base, base_id, self.salt);
             const placed = try output.append(bytes);
             const batch: scan.Batch = .{ .header = builder.header(.base, base_id), .bytes = bytes, .offset = placed.offset };
-            try index.apply(batch, placed.position);
+            try index.applyWith(batch, placed.position, fingerprints[0..window.len]);
             first = last;
         }
     }

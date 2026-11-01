@@ -49,13 +49,26 @@ test "compaction re-encodes records smaller and they read back exactly" {
         const result = try store.compact();
         var after: u64 = 0;
         for (0..values.len) |i| after += (try store.generation.index.get(key(@intCast(i)))).?.stored_len;
-        if (skip_unchanged) try testing.expectEqual(before, after) else try testing.expect(after * 10 < before * 9);
-        try testing.expect(result.output_bytes < result.source_bytes or skip_unchanged);
+        try testing.expect(after * 10 < before * 9);
+        try testing.expect(result.output_bytes < result.source_bytes);
         try store.close();
-        var reopened = try db.Store.open(testing.allocator, io, tmp.dir, options);
+        var stats: db.Stats = .{};
+        var reopened_options = options;
+        reopened_options.stats = &stats;
+        var reopened = try db.Store.open(testing.allocator, io, tmp.dir, reopened_options);
         defer reopened.deinit();
         var output: [6000]u8 = undefined;
         for (values, 0..) |value, i| try testing.expectEqualSlices(u8, &value, (try reopened.get(key(@intCast(i)), &output)).?);
+        if (skip_unchanged) {
+            // the denser encoding still matches a repeated write of the same value, and a changed one is kept
+            for (values, 0..) |value, i| _ = try reopened.write(batch(0, &.{put(@intCast(i), &value)}));
+            try testing.expectEqual(@as(u64, values.len), stats.unchanged_write_skips.load(.monotonic));
+            var changed = values[3];
+            changed[100] +%= 1;
+            const written = try reopened.write(batch(0, &.{put(3, &changed)}));
+            try testing.expect(written.end > written.start);
+            try testing.expectEqualSlices(u8, &changed, (try reopened.get(key(3), &output)).?);
+        }
         try reopened.close();
     }
 }

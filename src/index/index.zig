@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const frame = @import("../format/frame.zig");
+const lz4 = @import("../compression/lz4.zig");
 const key_format = @import("../format/key.zig");
 const Key = key_format.Key;
 const KeyFilter = key_format.KeyFilter;
@@ -26,8 +27,10 @@ pub const Location = struct {
     }
 };
 
-pub fn fingerprint(compression: record.Compression, stored: []const u8) u32 {
-    return @truncate(std.hash.Wyhash.hash(@backingInt(compression), stored));
+/// Hashes a record's uncompressed value, so recompressing it, as compaction does, keeps its fingerprint.
+/// 0 also stands for an unknown fingerprint.
+pub fn fingerprint(raw: []const u8) u32 {
+    return @truncate(std.hash.Wyhash.hash(0, raw));
 }
 
 const Chunk = struct {
@@ -139,6 +142,7 @@ pub const Index = struct {
     total_bytes: u64 = 0,
     live_bytes: u64 = 0,
     changes: std.ArrayListUnmanaged(Change) = .empty,
+    raw: std.ArrayListUnmanaged(u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, region: Region, generation: u64, max_keys: u32) !Index {
         try region.validate();
@@ -151,6 +155,7 @@ pub const Index = struct {
         for (self.chunks) |*c| c.free(self.allocator);
         self.allocator.destroy(self.chunks);
         self.changes.deinit(self.allocator);
+        self.raw.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -195,16 +200,25 @@ pub const Index = struct {
 
     /// Nothing is visible until `publish`.
     pub fn prepare(self: *Index, batches: []const scan.Batch, segment: usize) !Prepared {
+        return self.prepareWith(batches, segment, null);
+    }
+
+    /// `fingerprints` holds one entry per record of `batches`, deletes included, from whoever still has the
+    /// uncompressed values. Without it, fingerprinted records are decompressed to hash them.
+    pub fn prepareWith(self: *Index, batches: []const scan.Batch, segment: usize, fingerprints: ?[]const u32) !Prepared {
         if (segment >= max_segments) return error.InvalidSegmentId;
         var order = self.order;
         var bytes: u64 = 0;
+        var next: usize = 0;
         self.changes.clearRetainingCapacity();
+        defer if (self.raw.capacity > 64 * 1024) self.raw.clearAndFree(self.allocator);
         for (batches) |batch| {
             if (batch.end() > max_segment_size) return error.SegmentFull;
             try order.accept(batch.header);
-            try frame.each(batch.body(), Visitor{ .index = self, .batch = batch, .segment = @intCast(segment) }, Visitor.visit);
+            try frame.each(batch.body(), Visitor{ .index = self, .batch = batch, .segment = @intCast(segment), .fingerprints = fingerprints, .next = &next }, Visitor.visit);
             bytes += batch.bytes.len;
         }
+        if (fingerprints) |given| if (next != given.len) return error.IndexMismatch;
         return self.finish(order, bytes);
     }
 
@@ -212,9 +226,16 @@ pub const Index = struct {
         index: *Index,
         batch: scan.Batch,
         segment: u8,
+        fingerprints: ?[]const u32,
+        next: *usize,
 
         fn visit(self: Visitor, offset: usize, header: record.Header, value: []const u8) !void {
             const index = self.index;
+            const given = if (self.fingerprints) |list| given: {
+                if (self.next.* >= list.len) return error.IndexMismatch;
+                defer self.next.* += 1;
+                break :given list[self.next.*];
+            } else null;
             try index.changes.append(index.allocator, .{
                 .slot = header.slot,
                 .local = header.local,
@@ -223,13 +244,25 @@ pub const Index = struct {
                     .offset = @intCast(self.batch.offset + offset),
                     .stored_len = header.stored_len,
                     .raw_len = header.raw_len,
-                    .fingerprint = if (index.fingerprints) fingerprint(header.compression, value) else 0,
+                    .fingerprint = if (!index.fingerprints) 0 else given orelse try index.hashStored(header, value),
                     .segment = self.segment,
                     .compression = header.compression,
                 },
             });
         }
     };
+
+    /// A record that won't decompress gets no fingerprint here; reading it reports the damage.
+    fn hashStored(self: *Index, header: record.Header, value: []const u8) !u32 {
+        switch (header.compression) {
+            .none => return fingerprint(value),
+            .lz4 => {
+                try self.raw.resize(self.allocator, header.raw_len);
+                const raw = lz4.decompress(value, self.raw.items, header.raw_len) catch return 0;
+                return fingerprint(raw);
+            },
+        }
+    }
 
     fn finish(self: *Index, order: scan.Order, bytes: u64) !Prepared {
         const changes = latest(self.changes.items);
@@ -272,6 +305,10 @@ pub const Index = struct {
 
     pub fn apply(self: *Index, batch: scan.Batch, segment: usize) !void {
         self.publish(try self.prepare(&.{batch}, segment));
+    }
+
+    pub fn applyWith(self: *Index, batch: scan.Batch, segment: usize, fingerprints: []const u32) !void {
+        self.publish(try self.prepareWith(&.{batch}, segment, fingerprints));
     }
 
     pub fn loadChunk(self: *Index, slot: u10, keys: []const u16, locations: []const Location) !void {
