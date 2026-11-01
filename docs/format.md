@@ -125,14 +125,16 @@ missing `MANIFEST` without `PENDING` is still corruption.
 `INDEX` is an optional snapshot of a region's index, written on clean close with no
 fsync of its own. It only ever describes data the close had already synced.
 
-A 64-byte header: `ZGIX`, u16 version 1, u16 flags (bit 0: fingerprints present),
+A 64-byte header: `ZGIX`, u16 version 2, u16 flags (bit 0: fingerprints present),
 generation u64 at 8, salt u64 at 16, covered segment count u32 at 24, entry count u32
 at 28, covered offset in the last covered segment u64 at 32, last batch ID u64 at 40,
 total bytes u64 at 48, u8 seen-batch flag at 56, zero to 60, CRC-32C of 0..60 at 60.
 Then the covered segment IDs (u64), 1024 per-slot entry counts (u16), the entries in
 slot and key order (24 bytes each, 28 with fingerprints: local key u16, segment u8,
 compression u8, offset u32, stored length u32, raw length u32, batch ID u64, fingerprint
-u32), and a CRC-32C of everything after the header.
+u32). That body is stored as blocks of at most 16 KiB raw, each `u32 raw length, u32 stored
+length` and then LZ4 when that's smaller or the raw bytes, followed by a CRC-32C of all the
+blocks. Version 1 checkpoints are ignored and rewritten on the next clean close.
 
 A checkpoint is used only if every check passes: checksums, version, generation, salt,
 segment IDs as a prefix of the manifest, every entry inside the covered bytes, sorted
@@ -156,7 +158,9 @@ open; none of them can be named by the manifest.
 ## Compaction
 
 Compaction snapshots the index, copies live records in chunk order into base frames of a
-new generation, verifying each record against the index, then copies frames written
+new generation, verifying each record against the index and re-encoding it with a denser LZ4
+parser when that's smaller and decodes back exactly (not with fingerprints, which hash the
+stored bytes), then copies frames written
 meanwhile, verified, after them. Writers only wait for the final tail copy, its fsync and
 the manifest swap. The old generation is removed once its readers finish. A failed
 publication keeps both generations on disk and stops writes, since the manifest may name

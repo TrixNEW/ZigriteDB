@@ -24,6 +24,8 @@ fn check(_: void, smith: *std.testing.Smith) !void {
     if (bytes.len >= db.checkpoint.header_len) _ = db.checkpoint.Header.read(bytes[0..db.checkpoint.header_len]) catch {};
     _ = db.checkpoint.readEntry(bytes, true) catch {};
     _ = db.checkpoint.readEntry(bytes, false) catch {};
+    var expanded: [4096]u8 = undefined;
+    db.checkpoint.inflate(bytes, expanded[0..smith.valueRangeAtMostWithHash(u32, 0, expanded.len, 2)]) catch {};
     var log: db.leveldb.LogReader = .{ .bytes = bytes };
     defer log.deinit(std.testing.allocator);
     while (log.next(std.testing.allocator) catch null) |_| {}

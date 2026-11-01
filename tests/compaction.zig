@@ -26,6 +26,40 @@ test "compaction packs frames within the segment size" {
     try reopened.close();
 }
 
+fn subchunkLike(buffer: []u8, seed: usize) void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const random = prng.random();
+    for (buffer, 0..) |*b, i| b.* = if (random.uintLessThan(u8, 5) == 0) random.int(u8) else @truncate((i / 3) % 97 + seed);
+}
+
+test "compaction re-encodes records smaller and they read back exactly" {
+    for ([_]bool{ false, true }) |skip_unchanged| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const options: db.store.Options = .{ .skip_unchanged = skip_unchanged };
+        var store = try db.Store.create(testing.allocator, io, tmp.dir, region, options);
+        defer store.deinit();
+        var values: [16][6000]u8 = undefined;
+        for (&values, 0..) |*value, i| {
+            subchunkLike(value, i);
+            _ = try store.write(batch(0, &.{put(@intCast(i), value)}));
+        }
+        var before: u64 = 0;
+        for (0..values.len) |i| before += (try store.generation.index.get(key(@intCast(i)))).?.stored_len;
+        const result = try store.compact();
+        var after: u64 = 0;
+        for (0..values.len) |i| after += (try store.generation.index.get(key(@intCast(i)))).?.stored_len;
+        if (skip_unchanged) try testing.expectEqual(before, after) else try testing.expect(after * 10 < before * 9);
+        try testing.expect(result.output_bytes < result.source_bytes or skip_unchanged);
+        try store.close();
+        var reopened = try db.Store.open(testing.allocator, io, tmp.dir, options);
+        defer reopened.deinit();
+        var output: [6000]u8 = undefined;
+        for (values, 0..) |value, i| try testing.expectEqualSlices(u8, &value, (try reopened.get(key(@intCast(i)), &output)).?);
+        try reopened.close();
+    }
+}
+
 test "compaction installs a new generation and reclaims old files" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

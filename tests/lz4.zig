@@ -90,3 +90,45 @@ test "decompression round-trips every match shape and stays inside the value" {
         for (output[len..]) |b| try std.testing.expectEqual(@as(u8, 0xee), b);
     }
 }
+
+test "the dense encoder round-trips, reuses its tables and beats the fast one" {
+    const dense = try testing.allocator.create(db.lz4.DenseEncoder);
+    defer testing.allocator.destroy(dense);
+    dense.* = .{};
+    var fast: db.lz4.Encoder = .{};
+    var prng = std.Random.DefaultPrng.init(9);
+    const random = prng.random();
+    const input = try testing.allocator.alloc(u8, 200_000);
+    defer testing.allocator.free(input);
+    const compressed = try testing.allocator.alloc(u8, try db.lz4.bound(input.len));
+    defer testing.allocator.free(compressed);
+    const fast_out = try testing.allocator.alloc(u8, try db.lz4.bound(input.len));
+    defer testing.allocator.free(fast_out);
+    const output = try testing.allocator.alloc(u8, input.len);
+    defer testing.allocator.free(output);
+    var dense_total: usize = 0;
+    var fast_total: usize = 0;
+    for (0..300) |round| {
+        const len = switch (round % 5) {
+            0 => random.uintAtMost(usize, 20),
+            1 => random.uintAtMost(usize, 4096),
+            2 => 65536 + random.uintAtMost(usize, 100),
+            else => random.uintAtMost(usize, input.len),
+        };
+        const period = random.intRangeAtMost(usize, 1, 300);
+        for (input[0..len], 0..) |*b, i| b.* = switch (round % 3) {
+            0 => random.int(u8),
+            1 => @truncate(i % period),
+            else => if (random.uintLessThan(u8, 6) == 0) random.int(u8) else @truncate((i / 7) % period),
+        };
+        const packed_bytes = try dense.compress(input[0..len], compressed);
+        try db.lz4.validate(packed_bytes, len);
+        try testing.expectEqualSlices(u8, input[0..len], try db.lz4.decompress(packed_bytes, output, len));
+        if (round % 3 == 0) continue;
+        dense_total += packed_bytes.len;
+        fast_total += (try fast.compress(input[0..len], fast_out)).len;
+    }
+    // A broken match finder still round-trips, so check that it finds matches.
+    try testing.expect(dense_total * 10 < fast_total * 9);
+    try testing.expectError(error.BufferTooSmall, dense.compress("hello", compressed[0..2]));
+}

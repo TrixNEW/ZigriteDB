@@ -561,7 +561,7 @@ pub const Store = struct {
         defer handle.close(io);
         const file: File = .{ .handle = handle, .io = io };
         const length = try file.length();
-        if (length < checkpoint.header_len or length > checkpoint.header_len + manifest.max_segments * 8 + 2048 + @as(u64, options.max_keys) * 28 + 4)
+        if (length < checkpoint.header_len + 4 or length > checkpoint.maxFileLen(manifest.max_segments * 8 + 2048 + @as(usize, options.max_keys) * 28))
             return error.InvalidLength;
         const bytes = try allocator.alloc(u8, @intCast(length));
         defer allocator.free(bytes);
@@ -570,10 +570,13 @@ pub const Store = struct {
         const header = try checkpoint.Header.read(bytes[0..checkpoint.header_len]);
         const valid = header.generation == metadata.generation and header.salt == metadata.salt and
             header.segments != 0 and header.segments <= metadata.segments.len and header.entries <= options.max_keys and
-            header.len() == bytes.len and (header.fingerprints or !options.skip_unchanged);
+            bytes.len <= checkpoint.maxFileLen(header.bodyLen()) and (header.fingerprints or !options.skip_unchanged);
         if (!valid) return error.StaleCheckpoint;
-        const body = bytes[checkpoint.header_len..];
-        if (std.mem.readInt(u32, body[body.len - 4 ..][0..4], .little) != crc.hash(body[0 .. body.len - 4])) return error.ChecksumMismatch;
+        const blocks = bytes[checkpoint.header_len .. bytes.len - 4];
+        if (std.mem.readInt(u32, bytes[bytes.len - 4 ..][0..4], .little) != crc.hash(blocks)) return error.ChecksumMismatch;
+        const body = try allocator.alloc(u8, header.bodyLen());
+        defer allocator.free(body);
+        try checkpoint.inflate(blocks, body);
 
         var at: usize = 0;
         for (metadata.segments[0..header.segments]) |id| {
@@ -646,8 +649,9 @@ pub const Store = struct {
         defer handle.close(self.io);
         const file: File = .{ .handle = handle, .io = self.io };
         // Keeps close free of allocations.
-        var buffer: [16 * 1024]u8 = undefined;
-        var writer: Spill = .{ .file = file, .buffer = &buffer, .offset = checkpoint.header_len };
+        var buffer: [checkpoint.block_len]u8 = undefined;
+        var block: [checkpoint.block_header_len + checkpoint.block_len + checkpoint.block_len / 255 + 16]u8 = undefined;
+        var writer: Spill = .{ .file = file, .buffer = &buffer, .block = &block, .offset = checkpoint.header_len };
         for (self.generation.segment_ids[0..cover.segments]) |id| try writer.int(u64, id);
         for (index.chunks) |c| try writer.int(u16, c.len);
         const entry_len = header.entryLen();
@@ -670,6 +674,8 @@ pub const Store = struct {
     const Spill = struct {
         file: File,
         buffer: []u8,
+        block: []u8,
+        encoder: lz4.Encoder = .{},
         used: usize = 0,
         offset: u64,
         checksum: u32 = 0xffff_ffff,
@@ -685,9 +691,20 @@ pub const Store = struct {
         }
 
         fn flush(self: *Spill) !void {
-            self.checksum = crc.update(self.checksum, self.buffer[0..self.used]);
-            try self.file.writeAll(self.buffer[0..self.used], self.offset);
-            self.offset += self.used;
+            if (self.used == 0) return;
+            const raw = self.buffer[0..self.used];
+            const payload = self.block[checkpoint.block_header_len..];
+            const encoded = try self.encoder.compress(raw, payload);
+            const stored = if (encoded.len < raw.len) encoded.len else stored: {
+                @memcpy(payload[0..raw.len], raw);
+                break :stored raw.len;
+            };
+            std.mem.writeInt(u32, self.block[0..4], @intCast(raw.len), .little);
+            std.mem.writeInt(u32, self.block[4..8], @intCast(stored), .little);
+            const bytes = self.block[0 .. checkpoint.block_header_len + stored];
+            self.checksum = crc.update(self.checksum, bytes);
+            try self.file.writeAll(bytes, self.offset);
+            self.offset += bytes.len;
             self.used = 0;
         }
     };
@@ -1446,7 +1463,11 @@ pub const Store = struct {
         var staging = try self.allocator.alloc(u8, self.options.batch_buffer_size);
         defer self.allocator.free(staging);
         var source_bytes: u64 = 0;
-        self.writeBase(old, live.items, &output, &index, snapshot.last_batch_id, &scratch, &staging, &source_bytes) catch |err|
+        // Fingerprints hash stored bytes, so re-encoding would hide unchanged writes.
+        const dense: ?*Dense = if (self.options.skip_unchanged or self.options.compression_threshold == 0) null else try self.allocator.create(Dense);
+        defer if (dense) |d| d.destroy(self.allocator);
+        if (dense) |d| d.* = .{};
+        self.writeBase(old, live.items, &output, &index, snapshot.last_batch_id, &scratch, &staging, &source_bytes, dense) catch |err|
             return if (isSourceError(err)) self.sourceFailure(err, false) else err;
         try output.sync();
 
@@ -1569,7 +1590,53 @@ pub const Store = struct {
         };
     }
 
-    fn writeBase(self: *Store, old: *Generation, live: []const Live, output: *CompactionOutput, index: *Index, base_id: u64, scratch: *[]u8, staging: *[]u8, source_bytes: *u64) !void {
+    const Dense = struct {
+        encoder: lz4.DenseEncoder = .{},
+        raw: []u8 = &.{},
+        check: []u8 = &.{},
+        out: []u8 = &.{},
+
+        fn destroy(self: *Dense, allocator: std.mem.Allocator) void {
+            allocator.free(self.raw);
+            allocator.free(self.check);
+            allocator.free(self.out);
+            allocator.destroy(self);
+        }
+
+        fn reserve(allocator: std.mem.Allocator, buffer: *[]u8, len: usize) !void {
+            if (buffer.len >= len) return;
+            allocator.free(buffer.*);
+            buffer.* = &.{};
+            buffer.* = try allocator.alloc(u8, len);
+        }
+    };
+
+    /// A smaller encoding of a verified base record, or null to copy it as is.
+    fn recompress(self: *Store, dense: *Dense, old: []const u8) !?[]const u8 {
+        const header = record.Header.read(old[0..record.header_len]) catch unreachable;
+        if (header.raw_len < self.options.compression_threshold) return null;
+        const raw_len: usize = header.raw_len;
+        const bound = try lz4.bound(raw_len);
+        try Dense.reserve(self.allocator, &dense.raw, raw_len);
+        try Dense.reserve(self.allocator, &dense.check, raw_len);
+        try Dense.reserve(self.allocator, &dense.out, record.overhead + bound);
+        // A bad stream is left for reads to report, as before.
+        const raw = decodeInto(.{ .header = header, .value = old[record.header_len..][0..header.stored_len], .checksum = 0, .len = old.len }, dense.raw) catch return null;
+        const encoded = try dense.encoder.compress(raw, dense.out[record.header_len..][0..bound]);
+        if (encoded.len >= raw_len or record.overhead + encoded.len >= old.len) return null;
+        // Only keep an encoding that reads back exactly.
+        const back = lz4.decompress(encoded, dense.check, raw_len) catch return null;
+        if (!std.mem.eql(u8, back, raw)) return null;
+        var fresh = header;
+        fresh.compression = .lz4;
+        fresh.stored_len = @intCast(encoded.len);
+        fresh.write(dense.out[0..record.header_len]);
+        const bytes = dense.out[0 .. record.overhead + encoded.len];
+        _ = record.seal(bytes);
+        return bytes;
+    }
+
+    fn writeBase(self: *Store, old: *Generation, live: []const Live, output: *CompactionOutput, index: *Index, base_id: u64, scratch: *[]u8, staging: *[]u8, source_bytes: *u64, dense: ?*Dense) !void {
         var reads: std.ArrayListUnmanaged(u32) = .empty;
         defer reads.deinit(self.allocator);
         const places = try self.allocator.alloc(usize, frame.max_records);
@@ -1620,10 +1687,13 @@ pub const Store = struct {
                 i = j;
             }
 
-            for (window) |item| {
-                const len = item.location.recordLen();
-                builder.checksums = crc.update(builder.checksums, staging.*[builder.len + len - 4 ..][0..4]);
-                builder.len += len;
+            for (window, 0..) |item, w| {
+                const in_place = staging.*[places[w]..][0..item.location.recordLen()];
+                const bytes = (if (dense) |d| try self.recompress(d, in_place) else null) orelse in_place;
+                // Records only shrink, so moving left never overwrites one still to be read.
+                std.mem.copyForwards(u8, staging.*[builder.len..][0..bytes.len], bytes);
+                builder.checksums = crc.update(builder.checksums, staging.*[builder.len + bytes.len - 4 ..][0..4]);
+                builder.len += bytes.len;
                 builder.count += 1;
             }
             const bytes = builder.finish(.base, base_id, self.salt);
