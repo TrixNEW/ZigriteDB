@@ -22,7 +22,8 @@ def main():
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = str(binaries.parent / "lib") + os.pathsep + env.get("LD_LIBRARY_PATH", "")
     checker = ["valgrind", "--leak-check=full", "--show-leak-kinds=all", "--errors-for-leak-kinds=all",
-               "--error-exitcode=99", "--track-fds=yes"] if args.leak_check else []
+               "--error-exitcode=99", "--track-fds=yes",
+               "--suppressions=" + str(Path(__file__).resolve().parent / "valgrind.supp")] if args.leak_check else []
 
     def run(binary, *arguments, expected=0):
         result = subprocess.run(checker + [str(binaries / binary)] + list(map(str, arguments)), env=env,

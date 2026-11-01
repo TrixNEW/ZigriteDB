@@ -1,0 +1,12 @@
+{
+   detached std.Io.Threaded workers can still be exiting when the process ends
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:calloc
+   ...
+   fun:_dl_allocate_tls
+   ...
+   fun:pthread_create*
+   ...
+   fun:Io.Threaded.*
+}
