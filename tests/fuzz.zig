@@ -2,7 +2,14 @@ const std = @import("std");
 const db = @import("zigritedb");
 
 test "bounded format and recovery fuzzing" {
-    try std.testing.fuzz(@as(void, {}), check, .{ .corpus = &.{ "", "ZGSG", "ZGMF" } });
+    var bytes: [128]u8 = undefined;
+    var builder = db.frame.Builder.init(&bytes);
+    try builder.add(0, 0x2c80, "seed", null, 0);
+    try builder.add(1, 0x2f7c, null, null, 0);
+    const frame = builder.finish(.batch, 1, 1);
+    var metadata: [128]u8 = undefined;
+    const manifest = try (db.manifest.Manifest{ .generation = 1, .region = .{ .dimension = 0, .x = 0, .z = 0 }, .segments = &.{1}, .salt = 1 }).encode(&metadata);
+    try std.testing.fuzz(@as(void, {}), check, .{ .corpus = &.{ "", "ZGSG", "ZGMF", frame, builder.body(), manifest, "\x50hello" } });
 }
 
 fn ignore(_: void, _: usize, _: db.record.Header, _: []const u8) void {}
@@ -15,7 +22,8 @@ fn check(_: void, smith: *std.testing.Smith) !void {
     _ = db.frame.verify(bytes, 1, {}, ignore) catch {};
     _ = db.segment.Header.decode(bytes) catch {};
     if (bytes.len >= db.checkpoint.header_len) _ = db.checkpoint.Header.read(bytes[0..db.checkpoint.header_len]) catch {};
-    if (bytes.len >= db.checkpoint.entry_len + 4) _ = db.checkpoint.readEntry(bytes, true) catch {};
+    _ = db.checkpoint.readEntry(bytes, true) catch {};
+    _ = db.checkpoint.readEntry(bytes, false) catch {};
     var log: db.leveldb.LogReader = .{ .bytes = bytes };
     defer log.deinit(std.testing.allocator);
     while (log.next(std.testing.allocator) catch null) |_| {}

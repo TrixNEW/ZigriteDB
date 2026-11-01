@@ -489,15 +489,20 @@ pub const Store = struct {
         const counts = body[at..][0 .. 1024 * 2];
         at += counts.len;
         const entry_len = header.entryLen();
-        const locals = try allocator.alloc(u16, std.math.maxInt(u16));
-        defer allocator.free(locals);
-        const locations = try allocator.alloc(Location, std.math.maxInt(u16));
-        defer allocator.free(locations);
         var total: usize = 0;
+        var largest: usize = 0;
         for (0..1024) |slot| {
             const count = std.mem.readInt(u16, counts[slot * 2 ..][0..2], .little);
             total += count;
-            if (total > header.entries) return error.StaleCheckpoint;
+            largest = @max(largest, count);
+        }
+        if (total != header.entries) return error.StaleCheckpoint;
+        const locals = try allocator.alloc(u16, largest);
+        defer allocator.free(locals);
+        const locations = try allocator.alloc(Location, largest);
+        defer allocator.free(locations);
+        for (0..1024) |slot| {
+            const count = std.mem.readInt(u16, counts[slot * 2 ..][0..2], .little);
             for (locals[0..count], locations[0..count]) |*k, *location| {
                 k.*, location.* = try checkpoint.readEntry(body[at..][0..entry_len], header.fingerprints);
                 at += entry_len;
@@ -506,7 +511,6 @@ pub const Store = struct {
             }
             try index.loadChunk(@intCast(slot), locals[0..count], locations[0..count]);
         }
-        if (total != header.entries) return error.StaleCheckpoint;
         index.order = .{ .last_batch_id = header.last_batch_id, .seen_batch = header.seen_batch };
         index.total_bytes = header.total_bytes;
         return .{ .generation = header.generation, .segments = header.segments, .offset = header.offset };
@@ -713,18 +717,29 @@ pub const Store = struct {
     }
 
     fn dropUnchanged(self: *Store, builder: *frame.Builder) !void {
-        var kept: frame.Builder = .{ .buffer = builder.buffer };
+        var skip: std.StaticBitSet(frame.max_records) = .empty;
         var offset: usize = frame.header_len;
         var skipped: u64 = 0;
-        while (offset < builder.len) {
+        // Decide what to keep before moving any records.
+        for (0..builder.count) |i| {
             const header = record.Header.read(builder.buffer[offset..][0..record.header_len]) catch unreachable;
             const len = record.overhead + header.stored_len;
             const bytes = builder.buffer[offset..][0..len];
             offset += len;
             if (!self.repeated(builder, header) and try self.unchanged(header, bytes[record.header_len..][0..header.stored_len])) {
+                skip.set(i);
                 skipped += 1;
-                continue;
             }
+        }
+        if (skipped == 0) return;
+        var kept: frame.Builder = .{ .buffer = builder.buffer };
+        offset = frame.header_len;
+        for (0..builder.count) |i| {
+            const header = record.Header.read(builder.buffer[offset..][0..record.header_len]) catch unreachable;
+            const len = record.overhead + header.stored_len;
+            const bytes = builder.buffer[offset..][0..len];
+            offset += len;
+            if (skip.isSet(i)) continue;
             // Moving left never overwrites records still to be read.
             std.mem.copyForwards(u8, kept.buffer[kept.len..][0..len], bytes);
             kept.checksums = crc.update(kept.checksums, kept.buffer[kept.len + len - 4 ..][0..4]);
@@ -1443,7 +1458,7 @@ pub const Store = struct {
 
     fn isSourceError(err: anyerror) bool {
         return switch (err) {
-            error.OutOfMemory, error.Canceled, error.TooManySegments, error.NoSpaceLeft, error.DiskQuota => false,
+            error.OutOfMemory, error.Canceled, error.TooManySegments, error.NoSpaceLeft, error.DiskQuota, error.PathAlreadyExists => false,
             else => true,
         };
     }
@@ -1461,9 +1476,10 @@ pub const Store = struct {
             if (largest > scratch.len) scratch.* = try self.allocator.realloc(scratch.*, largest);
             var last = first;
             var size: usize = frame.header_len;
+            const limit = @min(staging.len, self.options.max_segment_size - segment.encoded_len);
             while (last < live.len and last - first < frame.max_records) : (last += 1) {
                 const len = live[last].location.recordLen();
-                if (size + len > staging.len) break;
+                if (size + len > limit) break;
                 places[last - first] = size;
                 size += len;
             }

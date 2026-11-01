@@ -9,6 +9,23 @@ const key = support.key;
 const put = support.put;
 const batch = support.batch;
 
+test "compaction packs frames within the segment size" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const options: db.store.Options = .{ .max_segment_size = 256, .batch_buffer_size = 1024 };
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, options);
+    defer store.deinit();
+    for (0..20) |i| _ = try store.write(batch(0, &.{put(@intCast(i), "saved")}));
+    const result = try store.compact();
+    try testing.expect(result.segment_count > 1);
+    try store.close();
+    var reopened = try db.Store.open(testing.allocator, io, tmp.dir, options);
+    defer reopened.deinit();
+    var output: [8]u8 = undefined;
+    for (0..20) |i| try testing.expectEqualStrings("saved", (try reopened.get(key(@intCast(i)), &output)).?);
+    try reopened.close();
+}
+
 test "compaction installs a new generation and reclaims old files" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -126,9 +143,10 @@ test "compaction never overwrites an existing generation" {
     defer tmp.cleanup();
     var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{});
     defer store.deinit();
+    _ = try store.write(batch(1, &.{put(0, "saved")}));
     (try tmp.dir.createFile(io, "0000000000000002-0000000000000001.segment", .{ .exclusive = true })).close(io);
     try testing.expectError(error.PathAlreadyExists, store.compact());
-    _ = try store.write(batch(1, &.{put(0, "saved")}));
+    _ = try store.write(batch(2, &.{put(0, "newer")}));
     try store.close();
 }
 

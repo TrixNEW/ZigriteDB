@@ -173,7 +173,7 @@ pub fn FileScanner(comptime Device: type) type {
                 return self.next(scratch.*) catch |err| {
                     const limit = frame.max_bytes + frame.header_len;
                     if (err != error.BufferTooSmall or scratch.len >= limit) return err;
-                    scratch.* = try allocator.realloc(scratch.*, @min(scratch.len * 2, limit));
+                    scratch.* = try allocator.realloc(scratch.*, @min(@max(scratch.len * 2, frame.header_len), limit));
                     continue;
                 };
             }

@@ -77,7 +77,10 @@ pub fn writeEntry(bytes: []u8, local: u16, location: Location, fingerprints: boo
 }
 
 pub fn readEntry(bytes: []const u8, fingerprints: bool) !struct { u16, Location } {
+    if (bytes.len < entry_len + @as(usize, if (fingerprints) 4 else 0)) return error.InvalidLength;
     if (bytes[3] > 1) return error.InvalidFlags;
+    const local = std.mem.readInt(u16, bytes[0..2], .little);
+    if (local >> 8 != 0x2f and local & 0xff != 0x80) return error.InvalidFlags;
     const compression: record.Compression = @fromBackingInt(@intCast(bytes[3]));
     const location: Location = .{
         .segment = bytes[2],
@@ -94,5 +97,5 @@ pub fn readEntry(bytes: []const u8, fingerprints: bool) !struct { u16, Location 
         .lz4 => location.stored_len != 0 and location.stored_len < location.raw_len,
     };
     if (!valid) return error.InvalidLength;
-    return .{ std.mem.readInt(u16, bytes[0..2], .little), location };
+    return .{ local, location };
 }
