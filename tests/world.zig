@@ -66,6 +66,14 @@ test "a crash before the first flush keeps what reached the file" {
         _ = try world.write(batch(2, &.{put(1, "second")}));
     }
     try testing.expect(exists(tmp.dir, pending));
+    {
+        const region_dir = try tmp.dir.openDir(io, first_region, .{ .iterate = true });
+        defer region_dir.close(io);
+        var scratch: [4096]u8 = undefined;
+        var orphans: [4]db.inspection.Orphan = undefined;
+        const report = try db.inspection.inspect(testing.allocator, io, region_dir, .{}, &scratch, &orphans);
+        try testing.expect(report.pending and report.orphans.len == 0 and report.unknown_entries == 0 and !report.temporary_manifest);
+    }
     var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
     defer world.deinit();
     var output: [16]u8 = undefined;

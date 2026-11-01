@@ -54,7 +54,7 @@ pub fn main(init: std.process.Init) !u8 {
         var before: u64 = 0;
         var after: u64 = 0;
         for (regions) |region| {
-            const result = (try world.compact(region)).?;
+            const result = (try world.compact(region)) orelse continue;
             before += result.source_bytes;
             after += result.output_bytes;
         }

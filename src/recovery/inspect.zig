@@ -29,6 +29,8 @@ pub const Report = struct {
     active_offset: u64 = 0,
     has_tail: bool = false,
     temporary_manifest: bool = false,
+    /// A new region waiting for its first sync; opening the world finishes it.
+    pending: bool = false,
     unknown_entries: usize = 0,
     orphans: []const Orphan = &.{},
 };
@@ -65,6 +67,10 @@ pub fn inspect(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, option
         }
         report.last_batch_id = order.last_batch_id;
     } else |err| if (err != error.MissingManifest) return err;
+    if (directory.dir.access(io, "PENDING", .{})) {
+        report.pending = true;
+    } else |err| if (err != error.FileNotFound) return err;
+    const unpublished = report.pending and segments.len == 0;
 
     var iterator = directory.dir.iterate();
     var count: usize = 0;
@@ -72,9 +78,9 @@ pub fn inspect(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, option
     while (try iterator.next(io)) |entry| {
         if (count == options.max_directory_entries) return error.TooManyDirectoryEntries;
         count += 1;
-        if (std.mem.eql(u8, entry.name, "MANIFEST") or std.mem.startsWith(u8, entry.name, "INDEX")) continue;
+        if (std.mem.eql(u8, entry.name, "MANIFEST") or std.mem.eql(u8, entry.name, "PENDING") or std.mem.startsWith(u8, entry.name, "INDEX")) continue;
         if (std.mem.eql(u8, entry.name, "MANIFEST.tmp")) {
-            report.temporary_manifest = true;
+            report.temporary_manifest = !unpublished;
             continue;
         }
         const candidate = parseName(entry.name) orelse {
@@ -82,6 +88,7 @@ pub fn inspect(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, option
             continue;
         };
         if (report.generation == candidate.generation and std.mem.indexOfScalar(u64, segments, candidate.id) != null) continue;
+        if (unpublished and candidate.generation == 1 and candidate.id == 1) continue;
         if (orphan_count == orphans.len) return error.BufferTooSmall;
         orphans[orphan_count] = candidate;
         orphan_count += 1;

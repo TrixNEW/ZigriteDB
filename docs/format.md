@@ -119,7 +119,9 @@ before the final directory sync. A world syncs its directory before opening a re
 still holds `PENDING`. Until then the region can only hold segment 1 of
 generation 1, so after a crash open rebuilds that manifest from the segment header. If the
 header never reached the disk, nothing was acknowledged and the region opens empty. A
-missing `MANIFEST` without `PENDING` is still corruption.
+missing `MANIFEST` without `PENDING` is still corruption. This relies on the filesystem
+keeping directory operations in order, as ext4 and XFS do; elsewhere a power cut before
+the first sync can leave the new region unopenable, though nothing in it was acknowledged.
 
 ## Index checkpoint
 
