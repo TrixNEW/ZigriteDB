@@ -1,4 +1,4 @@
-//! zig build micro -Doptimize=ReleaseFast -- [dataset.zgds]
+//! zig build micro -Doptimize=ReleaseFast -- [dataset.zgds | reopen <empty directory>]
 const std = @import("std");
 const db = @import("zigritedb");
 
@@ -70,21 +70,23 @@ fn lz4Bench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, path:
     var raw: usize = 0;
     var t = Timer.begin(io);
     var at: usize = 0;
+    var count: usize = 0;
     for (values, 0..) |value, i| {
         offsets[i] = at;
-        if (at + value.len * 2 + 64 > compressed.len) break;
+        if (try db.lz4.bound(value.len) > compressed.len - at) break;
         at += (try encoder.compress(value.bytes, compressed[at..])).len;
         raw += value.len;
+        count += 1;
     }
-    offsets[values.len] = at;
+    offsets[count] = at;
     const compress = @as(f64, @floatFromInt(raw)) / t.seconds() / 1e6;
     t = Timer.begin(io);
-    for (values, 0..) |value, i| {
+    for (values[0..count], 0..) |value, i| {
         const stored = compressed[offsets[i]..offsets[i + 1]];
         sink +%= (try db.lz4.decompress(stored, &output, value.len)).len;
     }
     const decompress = @as(f64, @floatFromInt(raw)) / t.seconds() / 1e6;
-    try out.print(",\"lz4_subchunks\":{{\"values\":{},\"ratio\":{d:.3},\"compress_mbps\":{d:.0},\"decompress_mbps\":{d:.0}}}", .{ values.len, @as(f64, @floatFromInt(at)) / @as(f64, @floatFromInt(raw)), compress, decompress });
+    try out.print(",\"lz4_subchunks\":{{\"values\":{},\"ratio\":{d:.3},\"compress_mbps\":{d:.0},\"decompress_mbps\":{d:.0}}}", .{ count, if (raw == 0) 0 else @as(f64, @floatFromInt(at)) / @as(f64, @floatFromInt(raw)), compress, decompress });
 }
 
 /// The v1 index: packed u64 keys in a hash map of 32-byte locations.
@@ -163,6 +165,7 @@ const CountingAllocator = struct {
     parent: std.mem.Allocator,
     held: usize = 0,
     peak: usize = 0,
+    allocations: usize = 0,
 
     fn allocator(self: *CountingAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
@@ -172,6 +175,7 @@ const CountingAllocator = struct {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         const result = self.parent.rawAlloc(len, alignment, ret) orelse return null;
         self.held += len;
+        self.allocations += 1;
         self.peak = @max(self.peak, self.held);
         return result;
     }
@@ -199,6 +203,34 @@ const CountingAllocator = struct {
     }
 };
 
+fn reopenBench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, path: []const u8) !void {
+    const dir = try std.Io.Dir.cwd().openDir(io, path, .{});
+    defer dir.close(io);
+    const region: db.Region = .{ .dimension = 0, .x = 0, .z = 0 };
+    var entries: [32]db.Entry = undefined;
+    for (&entries, 0..) |*entry, i| entry.* = .put(.{ .dimension = 0, .chunk_x = 0, .chunk_z = 0, .component = .subchunk, .subchunk_y = @intCast(i) }, "value");
+    {
+        var store = try db.Store.create(allocator, io, dir, region, .{});
+        defer store.deinit();
+        _ = try store.write(.{ .entries = &entries });
+        try store.close();
+    }
+    const rounds = 256;
+    var counting: CountingAllocator = .{ .parent = allocator };
+    var retained: usize = 0;
+    const timer = Timer.begin(io);
+    for (0..rounds) |_| {
+        var store = try db.Store.open(counting.allocator(), io, dir, .{});
+        defer store.deinit();
+        if (store.checkpointed.offset == 0 or try store.lastBatchId() != 1) return error.BadCheckpoint;
+        retained = counting.held;
+    }
+    if (counting.held != 0) return error.LeakedMemory;
+    try out.print("{{\"checkpoint\":{{\"records\":{},\"rounds\":{},\"open_us\":{d:.2},\"peak_bytes\":{},\"retained_bytes\":{},\"allocations_per_open\":{}}}}}\n", .{
+        entries.len, rounds, timer.seconds() * 1e6 / rounds, counting.peak, retained, counting.allocations / rounds,
+    });
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -206,6 +238,11 @@ pub fn main(init: std.process.Init) !void {
     var stdout = std.Io.File.stdout().writer(io, &buffer);
     const out = &stdout.interface;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len > 1 and std.mem.eql(u8, args[1], "reopen")) {
+        if (args.len != 3) return error.InvalidArgument;
+        try reopenBench(allocator, io, out, args[2]);
+        return out.flush();
+    }
     try out.writeAll("{");
     try crcBench(io, out);
     try indexBench(allocator, io, out);

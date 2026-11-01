@@ -38,6 +38,15 @@ def main():
             assert all(result[phase]["calls"] == 32 for phase in ("load_cold", "load_hot", "update"))
             assert result["autosave_barrier"]["calls"] == 16 and "compaction_ms" in result
             print(f"Benchmark import/reopen/read/update/flush/compaction passed: {engine}, {read}")
+            if read == "record":
+                sampled = subprocess.run(command + ["ops=1", "threads=2", "seconds=0.5", "phases=mixed"],
+                                         check=True, capture_output=True, text=True, timeout=120)
+                mixed = json.loads(sampled.stdout)
+                for phase in ("mixed_load", "mixed_update"):
+                    result = mixed[phase]
+                    assert result["calls"] > result["samples"] == 128, (engine, phase, result)
+                    assert result["mean_us"] > 0 and result["max_us"] >= result["p999_us"]
+                print(f"Mixed throughput exceeds the bounded latency samples: {engine}")
 
 
 if __name__ == "__main__":

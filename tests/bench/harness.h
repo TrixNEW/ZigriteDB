@@ -26,13 +26,24 @@ static inline int compare(const void *a, const void *b) {
 }
 
 /* p999_us is the 99.9th percentile. */
-static inline void report(const char *name, double *samples, size_t count, double elapsed) {
+static inline void reportCounted(const char *name, double *samples, size_t count, size_t calls,
+                                 double elapsed, double sum, double maximum) {
     qsort(samples, count, sizeof(*samples), compare);
     printf("\"%s\":{\"calls\":%zu,\"calls_per_second\":%.2f,"
-           "\"p50_us\":%.2f,\"p95_us\":%.2f,\"p99_us\":%.2f,\"p999_us\":%.2f,\"max_us\":%.2f}",
-           name, count, count / elapsed, samples[(count - 1) / 2] * 1e6,
+           "\"samples\":%zu,\"mean_us\":%.2f,\"p50_us\":%.2f,\"p95_us\":%.2f,"
+           "\"p99_us\":%.2f,\"p999_us\":%.2f,\"max_us\":%.2f}",
+           name, calls, calls / elapsed, count, sum / calls * 1e6, samples[(count - 1) / 2] * 1e6,
            samples[(count - 1) * 95 / 100] * 1e6, samples[(count - 1) * 99 / 100] * 1e6,
-           samples[(count - 1) * 999 / 1000] * 1e6, samples[count - 1] * 1e6);
+           samples[(count - 1) * 999 / 1000] * 1e6, maximum * 1e6);
+}
+
+static inline void report(const char *name, double *samples, size_t count, double elapsed) {
+    double sum = 0, maximum = 0;
+    for (size_t i = 0; i < count; i++) {
+        sum += samples[i];
+        if (samples[i] > maximum) maximum = samples[i];
+    }
+    reportCounted(name, samples, count, count, elapsed, sum, maximum);
 }
 
 static inline void reportStatsAs(const char *name, zg_handle *handle) {
