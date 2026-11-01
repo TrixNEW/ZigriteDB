@@ -1,4 +1,4 @@
-//! zig build micro -Doptimize=ReleaseFast -- [dataset.zgds | reopen <empty directory>]
+//! zig build micro -Doptimize=ReleaseFast -- [dataset.zgds | reopen <empty directory> | create <empty directory>]
 const std = @import("std");
 const db = @import("zigritedb");
 
@@ -231,6 +231,40 @@ fn reopenBench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, pa
     });
 }
 
+/// First buffered write into each of 64 new regions, then the flush that makes them durable.
+fn createBench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, path: []const u8) !void {
+    const dir = try std.Io.Dir.cwd().openDir(io, path, .{});
+    defer dir.close(io);
+    var world = try db.World.open(allocator, io, dir, .{});
+    defer world.deinit();
+    var value: [4096]u8 = undefined;
+    for (&value, 0..) |*b, i| b.* = @truncate(i *% 2654435761 >> 7);
+    const regions = 64;
+    var latencies: [regions]u64 = undefined;
+    const total = Timer.begin(io);
+    for (&latencies, 0..) |*latency, r| {
+        var entries: [8]db.Entry = undefined;
+        for (&entries, 0..) |*entry, y| entry.* = .put(.{ .dimension = 0, .chunk_x = @intCast(r * 32), .chunk_z = 0, .component = .subchunk, .subchunk_y = @intCast(y) }, &value);
+        const t = Timer.begin(io);
+        _ = try world.write(.{ .entries = &entries });
+        latency.* = @intFromFloat(t.seconds() * 1e9);
+    }
+    const writes = total.seconds();
+    const flush = Timer.begin(io);
+    try world.flush();
+    const flush_ms = flush.seconds() * 1e3;
+    try world.close();
+    std.mem.sort(u64, &latencies, {}, std.sort.asc(u64));
+    try out.print("{{\"create\":{{\"regions\":{},\"first_write_p50_us\":{d:.1},\"first_write_p99_us\":{d:.1},\"first_write_max_us\":{d:.1},\"writes_ms\":{d:.2},\"flush_ms\":{d:.2}}}}}\n", .{
+        regions,
+        @as(f64, @floatFromInt(latencies[regions / 2])) / 1e3,
+        @as(f64, @floatFromInt(latencies[regions * 99 / 100])) / 1e3,
+        @as(f64, @floatFromInt(latencies[regions - 1])) / 1e3,
+        writes * 1e3,
+        flush_ms,
+    });
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -241,6 +275,11 @@ pub fn main(init: std.process.Init) !void {
     if (args.len > 1 and std.mem.eql(u8, args[1], "reopen")) {
         if (args.len != 3) return error.InvalidArgument;
         try reopenBench(allocator, io, out, args[2]);
+        return out.flush();
+    }
+    if (args.len > 1 and std.mem.eql(u8, args[1], "create")) {
+        if (args.len != 3) return error.InvalidArgument;
+        try createBench(allocator, io, out, args[2]);
         return out.flush();
     }
     try out.writeAll("{");
