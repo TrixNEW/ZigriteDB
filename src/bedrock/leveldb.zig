@@ -232,6 +232,9 @@ const TableIterator = struct {
     key: std.ArrayListUnmanaged(u8) = .empty,
     index_key: std.ArrayListUnmanaged(u8) = .empty,
     value: []const u8 = &.{},
+    // Data blocks must come in file order before the index, or a crafted index could replay one forever.
+    data_end: u64 = 0,
+    index_offset: u64 = 0,
 
     fn open(allocator: std.mem.Allocator, file: File) !TableIterator {
         var self: TableIterator = .{ .file = file };
@@ -247,6 +250,7 @@ const TableIterator = struct {
         const offset = try varint(&footer, &at);
         const size = try varint(&footer, &at);
         try self.readBlock(allocator, offset, size, &self.index);
+        self.index_offset = offset;
         self.index_end = try restartsStart(self.index.items);
         return self;
     }
@@ -298,6 +302,9 @@ const TableIterator = struct {
             var at: usize = 0;
             const offset = try varint(handle, &at);
             const size = try varint(handle, &at);
+            const end = std.math.add(u64, offset, std.math.add(u64, size, 5) catch return error.Corrupt) catch return error.Corrupt;
+            if (offset < self.data_end or end > self.index_offset) return error.Corrupt;
+            self.data_end = end;
             try self.readBlock(allocator, offset, size, &self.block);
             self.block_end = try restartsStart(self.block.items);
             self.block_at = 0;
@@ -361,7 +368,9 @@ pub const Reader = struct {
         var iterator = dir.iterate();
         while (try iterator.next(io)) |item| {
             if (!std.mem.endsWith(u8, item.name, ".log")) continue;
-            const number = std.fmt.parseInt(u64, item.name[0 .. item.name.len - 4], 10) catch continue;
+            const digits = item.name[0 .. item.name.len - 4];
+            if (digits.len == 0 or !std.ascii.isDigit(digits[0])) continue;
+            const number = std.fmt.parseInt(u64, digits, 10) catch continue;
             if (number >= version.log_number or (version.prev_log_number != 0 and number == version.prev_log_number)) try logs.append(scratch, number);
         }
         std.mem.sort(u64, logs.items, {}, std.sort.asc(u64));
