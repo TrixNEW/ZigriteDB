@@ -3,6 +3,21 @@ const db = @import("zigritedb");
 const testing = std.testing;
 const io = testing.io;
 
+test "world close leaves a caller-owned cache alive" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cache = try db.cache.Cache.init(testing.allocator, .{ .bytes = 4096, .shards = 1 });
+    defer cache.deinit();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .region = .{ .cache = &cache } });
+    defer world.deinit();
+    const probe: db.Key = .{ .dimension = 0, .chunk_x = 0, .chunk_z = 0, .component = .version };
+    _ = try world.write(.{ .entries = &.{.put(probe, "cached")} });
+    var output: [16]u8 = undefined;
+    _ = try world.get(probe, &output);
+    try world.close();
+    try testing.expectEqualStrings("cached", cache.get(io, probe, 1, &output).?);
+}
+
 const support = @import("support/region.zig");
 const key = support.key;
 const put = support.put;

@@ -179,3 +179,20 @@ test "a failed migration leaves no destination and the source untouched" {
     defer testing.allocator.free(after);
     try testing.expectEqualSlices(u8, before, after);
 }
+
+test "migration rejects overflowing manifest counts" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    _ = try buildV1(tmp.dir);
+    const name = "old/00000000-00000000-00000000.region/MANIFEST";
+    var buffer: [128]u8 = undefined;
+    const bytes = try tmp.dir.readFile(io, name, &buffer);
+    for ([_]u32{ 0, 4097, std.math.maxInt(u32) }) |count| {
+        std.mem.writeInt(u32, buffer[28..32], count, .little);
+        std.mem.writeInt(u32, buffer[44..48], crc.hash(buffer[0..44]), .little);
+        std.mem.writeInt(u32, buffer[bytes.len - 4 ..][0..4], crc.hash(buffer[0 .. bytes.len - 4]), .little);
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = buffer[0..bytes.len] });
+        try testing.expectError(error.InvalidLength, db.migrate.migrate(testing.allocator, io, tmp.dir, "old", "new"));
+        try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "new", .{}));
+    }
+}

@@ -419,8 +419,9 @@ fn getChunk(
     bytes_needed.* = 0;
     const handle = optional orelse return .invalid_argument;
     if ((buffer == null and capacity != 0) or (records == null and record_capacity != 0)) return .invalid_argument;
-    const native = if (record_capacity <= stack.len) stack[0..record_capacity] else allocator.alloc(db.ChunkRecord, record_capacity) catch return .out_of_memory;
-    defer if (record_capacity > stack.len) allocator.free(native);
+    const record_count = @min(record_capacity, std.math.maxInt(u16));
+    const native = if (record_count <= stack.len) stack[0..record_count] else allocator.alloc(db.ChunkRecord, record_count) catch return .out_of_memory;
+    defer if (record_count > stack.len) allocator.free(native);
     const output: []u8 = if (buffer) |ptr| ptr[0..capacity] else &.{};
     var result: db.ChunkResult = undefined;
     handle.world.getChunk(dimension, chunk_x, chunk_z, output, native, &result) catch |err| {

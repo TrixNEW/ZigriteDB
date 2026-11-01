@@ -75,6 +75,7 @@ fn readBucket(world: *World, allocator: std.mem.Allocator, key: Key) !?[]u8 {
 
 /// Chunk-shaped keys are chunk records.
 pub fn get(world: *World, allocator: std.mem.Allocator, key: []const u8) !?[]u8 {
+    if (key.len > record.max_value_len) return error.BatchTooLarge;
     if (parseKey(key)) |chunk| return readBucket(world, allocator, chunk);
     const bytes = (try readBucket(world, allocator, bucket(key))) orelse return null;
     defer allocator.free(bytes);
@@ -87,7 +88,7 @@ pub fn get(world: *World, allocator: std.mem.Allocator, key: []const u8) !?[]u8 
 
 /// Null deletes the key.
 pub fn put(world: *World, allocator: std.mem.Allocator, key: []const u8, value: ?[]const u8) !void {
-    if (key.len > std.math.maxInt(u32)) return error.InvalidArgument;
+    if (key.len > record.max_value_len) return error.BatchTooLarge;
     if (value) |v| if (v.len > record.max_value_len) return error.BatchTooLarge;
     if (parseKey(key)) |chunk| {
         _ = try world.write(.{ .entries = &.{.{ .key = chunk, .value = value }} });

@@ -99,7 +99,8 @@ pub const OverlayWorld = struct {
     }
 
     pub fn write(self: *OverlayWorld, entries: []const Entry) !void {
-        if (entries.len == 0) return error.EmptyBatch;
+        const size = try (@import("../batch/write.zig").WriteBatch{ .entries = entries }).validate();
+        if (size + entries.len > self.overlay.options.region.batch_buffer_size) return error.BufferTooSmall;
         var total: usize = 0;
         for (entries) |item| total += (if (item.value) |value| value.len else 0) + 1;
 

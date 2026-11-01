@@ -15,12 +15,15 @@ const Store = store_module.Store;
 const AppendResult = store_module.AppendResult;
 const Directory = @import("../storage/directory.zig").Directory;
 const File = @import("../io/file.zig").File;
+const files = @import("../storage/files.zig");
 
 const cache_module = @import("../cache/value.zig");
 
 pub const Options = struct {
     max_open_regions: usize = 64,
     region: store_module.Options = .{},
+    /// Configures a world-owned cache. With zero bytes, region.cache is borrowed
+    /// and must not be shared with other worlds.
     cache: cache_module.Options = .{},
 };
 
@@ -284,7 +287,7 @@ pub const World = struct {
     fn checkFormat(directory: *Directory) !void {
         var bytes: [12]u8 = undefined;
         const io = directory.io;
-        if (directory.dir.openFile(io, format_file, .{})) |file| {
+        if (files.openRegularFile(directory.dir, io, format_file)) |file| {
             defer file.close(io);
             const device: File = .{ .handle = file, .io = io };
             if (try device.length() != bytes.len) return error.InvalidFormatFile;
@@ -302,7 +305,10 @@ pub const World = struct {
             if (entry.kind != .directory or parseRegionName(entry.name) == null) continue;
             const region_dir = directory.dir.openDir(io, entry.name, .{ .follow_symlinks = false }) catch continue;
             defer region_dir.close(io);
-            const file = region_dir.openFile(io, "MANIFEST", .{}) catch continue;
+            const file = files.openRegularFile(region_dir, io, "MANIFEST") catch |err| {
+                if (err == error.FileNotFound) continue;
+                return err;
+            };
             defer file.close(io);
             var head: [6]u8 = undefined;
             (File{ .handle = file, .io = io }).readExact(&head, 0) catch continue;
@@ -696,11 +702,12 @@ pub const World = struct {
     }
 
     fn release(self: *World) void {
-        if (self.options.region.cache) |cache| {
+        if (self.options.cache.bytes > 0) {
+            const cache = self.options.region.cache.?;
             cache.deinit();
             self.allocator.destroy(cache);
-            self.options.region.cache = null;
         }
+        self.options.region.cache = null;
         self.table.lockUncancelable(self.io);
         defer self.table.unlock(self.io);
         self.allocator.free(self.slots);
