@@ -672,19 +672,24 @@ pub const World = struct {
         errdefer self.allocator.destroy(opened);
         opened.* = .{ .store = undefined };
         const store = &opened.store;
+        // New regions cost no fsyncs until their first sync.
         store.* = if (created)
-            try Store.create(self.allocator, self.io, dir, region, self.options.region)
+            try Store.createDeferred(self.allocator, self.io, dir, region, self.options.region, self.directory.dir)
         else
             Store.open(self.allocator, self.io, dir, self.options.region) catch |err| blk: {
-                if ((err != error.MissingManifest and err != error.NeedsRecovery) or !create) return err;
-                break :blk Store.create(self.allocator, self.io, dir, region, self.options.region) catch |create_err| {
+                if (err == error.EmptyRegion and !create) {
+                    self.allocator.destroy(opened);
+                    return null;
+                }
+                if ((err != error.MissingManifest and err != error.NeedsRecovery and err != error.EmptyRegion) or !create) return err;
+                break :blk Store.createDeferred(self.allocator, self.io, dir, region, self.options.region, self.directory.dir) catch |create_err| {
                     if (create_err == error.DirectoryNotEmpty) return err;
                     return create_err;
                 };
             };
         errdefer store.deinit();
         if (!store.region.eql(region)) return error.RegionMismatch;
-        if (created) try self.directory.syncEntries();
+        if (store.finished_creation) try self.directory.syncEntries();
         return opened;
     }
 

@@ -11,6 +11,7 @@ world/
   ZIGRITE                       "ZGWD", u16 version 2, u16 zero, CRC-32C of bytes 0..8
   dddddddd-xxxxxxxx-zzzzzzzz.region/
     MANIFEST                    authoritative segment list
+    PENDING                     only while a new region waits for its first sync
     GGGGGGGGGGGGGGGG-IIIIIIIIIIIIIIII.segment
     INDEX                       optional index checkpoint
 ```
@@ -110,6 +111,14 @@ active. At most 4096 IDs are accepted.
 The manifest is published by writing `MANIFEST.tmp`, syncing it and the directory,
 renaming it over `MANIFEST`, then syncing the directory again. Segments are synced before
 they are named in a manifest.
+
+A world creates a region without any fsync: the directory, an empty `PENDING` and segment 1
+with its header. The first flush, sync write, rotation, compaction or close syncs the
+segment, publishes the first manifest, removes `PENDING` before the final directory sync
+and then syncs the world directory. Until then the region can only hold segment 1 of
+generation 1, so after a crash open rebuilds that manifest from the segment header. If the
+header never reached the disk, nothing was acknowledged and the region opens empty. A
+missing `MANIFEST` without `PENDING` is still corruption.
 
 ## Index checkpoint
 

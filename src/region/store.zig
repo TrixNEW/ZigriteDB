@@ -221,17 +221,39 @@ pub const Store = struct {
     // What INDEX covers, so close only rewrites it after changes.
     checkpointed: Cover = .{},
 
+    // A deferred region's world directory, until its first sync publishes it. Guarded by directory_mutex.
+    parent: ?std.Io.Dir = null,
+    unpublished: std.atomic.Value(bool) = .init(false),
+    /// Open finished a deferred creation, so the parent directory still needs a sync.
+    finished_creation: bool = false,
+
     const pool_limit = 8;
     const prefetch_limit = 64 * 1024 * 1024;
     const max_pooled_len = 1024 * 1024;
+    const pending_name = "PENDING";
 
+    /// Durable on return.
     pub fn create(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, region: Region, options: Options) !Store {
+        return init(allocator, io, dir, region, options, null);
+    }
+
+    /// Syncs nothing. The first flush, sync write, rotation, compaction or close publishes the
+    /// region and syncs `parent`, which is borrowed and must outlive the store. Until then the
+    /// directory holds PENDING, and open rebuilds the manifest from segment 1 after a crash.
+    pub fn createDeferred(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, region: Region, options: Options, parent: std.Io.Dir) !Store {
+        return init(allocator, io, dir, region, options, parent);
+    }
+
+    fn init(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, region: Region, options: Options, parent: ?std.Io.Dir) !Store {
         try options.validate();
         var directory = try Directory.init(dir, io);
         errdefer directory.deinit();
         try discardUnpublished(&directory);
         var iterator = directory.dir.iterate();
         if (try iterator.next(io) != null) return error.DirectoryNotEmpty;
+        const deferred = parent != null;
+        if (deferred) (try directory.dir.createFile(io, pending_name, .{ .exclusive = true })).close(io);
+        errdefer if (deferred) directory.dir.deleteFile(io, pending_name) catch {};
 
         const salt = segment.newSalt(io);
         const handle = try files.createSegment(directory.dir, io, 1, 1);
@@ -240,11 +262,11 @@ pub const Store = struct {
         errdefer if (device_owned) {
             handle.close(io);
             files.removeSegment(directory.dir, io, 1, 1) catch {};
-            directory.syncEntries() catch {};
+            if (!deferred) directory.syncEntries() catch {};
         };
         const header = try (segment.Header{ .segment_id = 1, .generation = 1, .region = region, .salt = salt }).encode();
         try device.writeAll(&header, 0);
-        try device.sync();
+        if (!deferred) try device.sync();
 
         var index = try Index.init(allocator, region, 1, options.max_keys);
         index.stats = options.stats;
@@ -262,10 +284,11 @@ pub const Store = struct {
 
         var pool: std.ArrayListUnmanaged(*Buffer) = try .initCapacity(allocator, pool_limit);
         errdefer pool.deinit(allocator);
-        var buffer: [manifest.header_len + 12]u8 = undefined;
-        const bytes = try (manifest.Manifest{ .generation = 1, .region = region, .segments = &.{1}, .salt = salt }).encode(&buffer);
-        var publisher: publication.Publisher(*Directory) = .{ .backend = &directory };
-        try publisher.publish(bytes);
+        if (!deferred) {
+            var buffer: [manifest.header_len + 12]u8 = undefined;
+            var publisher: publication.Publisher(*Directory) = .{ .backend = &directory };
+            try publisher.publish(try firstManifest(&buffer, region, salt));
+        }
 
         return .{
             .allocator = allocator,
@@ -277,10 +300,85 @@ pub const Store = struct {
             .base_batch_id = 0,
             .segment_id = 1,
             .offset = segment.encoded_len,
-            .synced_offset = segment.encoded_len,
+            // Keeps a deferred region dirty until its header is synced.
+            .synced_offset = if (deferred) 0 else segment.encoded_len,
             .generation = generation,
             .pool = pool,
+            .parent = parent,
+            .unpublished = .init(deferred),
         };
+    }
+
+    fn firstManifest(buffer: *[manifest.header_len + 12]u8, region: Region, salt: u64) ![]u8 {
+        return (manifest.Manifest{ .generation = 1, .region = region, .segments = &.{1}, .salt = salt }).encode(buffer);
+    }
+
+    /// Segment 1 must already be synced. Takes directory_mutex, so callers may hold writer.
+    fn publishCreation(self: *Store) !void {
+        if (!self.unpublished.load(.acquire)) return;
+        lock.lockUncancelable(&self.directory_mutex, self.io);
+        defer self.directory_mutex.unlock(self.io);
+        const parent = self.parent orelse return;
+        var buffer: [manifest.header_len + 12]u8 = undefined;
+        try publishFirst(&self.directory, try firstManifest(&buffer, self.region, self.salt));
+        try (File{ .handle = .{ .handle = parent.handle, .flags = .{ .nonblocking = false } }, .io = self.io }).sync();
+        self.parent = null;
+        self.unpublished.store(false, .release);
+    }
+
+    /// Removing PENDING rides on the directory sync that makes MANIFEST durable.
+    fn publishFirst(directory: *Directory, bytes: []const u8) !void {
+        try directory.writeTemporary(bytes);
+        try directory.syncTemporary();
+        try directory.replaceManifest();
+        directory.dir.deleteFile(directory.io, pending_name) catch |err| if (err != error.FileNotFound) return err;
+        try directory.syncDirectory();
+    }
+
+    /// Finishes a deferred creation that a crash interrupted. Such a region only ever holds
+    /// segment 1 of generation 1, so its manifest follows from that segment's header.
+    fn finishCreation(directory: *Directory) !bool {
+        const io = directory.io;
+        directory.dir.access(io, pending_name, .{}) catch |err| {
+            if (err != error.FileNotFound) return err;
+            // Only the mkdir survived a crash.
+            var iterator = directory.dir.iterate();
+            return if (try iterator.next(io) == null) error.EmptyRegion else false;
+        };
+        if (directory.dir.access(io, "MANIFEST", .{})) {
+            directory.dir.deleteFile(io, "MANIFEST.tmp") catch |err| if (err != error.FileNotFound) return err;
+            try directory.dir.deleteFile(io, pending_name);
+            try directory.syncEntries();
+            return true;
+        } else |err| if (err != error.FileNotFound) return err;
+        directory.dir.deleteFile(io, "MANIFEST.tmp") catch |err| if (err != error.FileNotFound) return err;
+        const header = firstHeader(directory) catch |err| switch (err) {
+            // Nothing was synced, so nothing was acknowledged as durable.
+            error.MissingSegment, error.Truncated, error.InvalidMagic, error.ChecksumMismatch => {
+                files.removeSegment(directory.dir, io, 1, 1) catch |remove_err| if (remove_err != error.FileNotFound) return remove_err;
+                try directory.dir.deleteFile(io, pending_name);
+                try directory.syncEntries();
+                return error.EmptyRegion;
+            },
+            else => return err,
+        };
+        var buffer: [manifest.header_len + 12]u8 = undefined;
+        try publishFirst(directory, try firstManifest(&buffer, header.region, header.salt));
+        return true;
+    }
+
+    fn firstHeader(directory: *Directory) !segment.Header {
+        const handle = try files.openSegment(directory.dir, directory.io, 1, 1, false);
+        defer handle.close(directory.io);
+        const file: File = .{ .handle = handle, .io = directory.io };
+        var bytes: [segment.encoded_len]u8 = undefined;
+        if (try file.length() < bytes.len) return error.Truncated;
+        try file.readExact(&bytes, 0);
+        const header = try segment.Header.decode(&bytes);
+        if (header.generation != 1 or header.segment_id != 1) return error.IdentityMismatch;
+        // A process crash can leave the data only in the page cache.
+        try file.sync();
+        return header;
     }
 
     /// Callers set `index` afterwards.
@@ -355,6 +453,7 @@ pub const Store = struct {
         try options.validate();
         var directory = try Directory.init(dir, io);
         errdefer directory.deinit();
+        const finished = try finishCreation(&directory);
 
         const ids = try allocator.alloc(u64, manifest.max_segments);
         defer allocator.free(ids);
@@ -429,6 +528,7 @@ pub const Store = struct {
             .generation = generation,
             .pool = pool,
             .checkpointed = covered orelse .{},
+            .finished_creation = finished,
         };
     }
 
@@ -815,6 +915,10 @@ pub const Store = struct {
         if (generation.count == self.options.max_segments) return error.TooManySegments;
         const id = std.math.add(u64, self.segment_id, 1) catch return error.SegmentIdExhausted;
         try self.syncActive();
+        self.publishCreation() catch |err| {
+            self.failed = true;
+            return err;
+        };
 
         const handle = try files.createSegment(self.directory.dir, self.io, generation.index.generation, id);
         const device: File = .{ .handle = handle, .io = self.io };
@@ -913,13 +1017,13 @@ pub const Store = struct {
             defer self.writer.unlock(self.io);
             if (self.closed) return error.Closed;
             if (self.failed) return error.WriterFailed;
-            if (self.synced_offset == self.offset) return;
+            if (self.synced_offset == self.offset and !self.unpublished.load(.acquire)) return;
             const generation = self.generation;
             _ = generation.readers.fetchAdd(1, .seq_cst);
             break :blk .{ generation, generation.devices[generation.count - 1], self.epoch, self.offset };
         };
         defer self.unpin(generation);
-        const result = self.timedSync(device);
+        const result: anyerror!void = if (self.timedSync(device)) self.publishCreation() else |err| err;
         lock.lockUncancelable(&self.writer, self.io);
         defer self.writer.unlock(self.io);
         result catch |err| {
@@ -958,7 +1062,7 @@ pub const Store = struct {
     pub fn dirty(self: *Store) bool {
         lock.lockUncancelable(&self.writer, self.io);
         defer self.writer.unlock(self.io);
-        return self.synced_offset != self.offset;
+        return self.synced_offset != self.offset or self.unpublished.load(.acquire);
     }
 
     const Pinned = struct {
@@ -1299,6 +1403,8 @@ pub const Store = struct {
 
     /// Writers only wait for the final tail copy, its fsync and the manifest swap.
     pub fn compact(self: *Store) !CompactionResult {
+        // Compaction replaces the manifest, so the first one has to exist.
+        if (self.unpublished.load(.acquire)) try self.flush();
         try lock.lock(&self.compact_mutex, self.io);
         defer self.compact_mutex.unlock(self.io);
         const started: ?std.Io.Clock.Timestamp = if (self.options.stats != null) std.Io.Clock.Timestamp.now(self.io, .awake) else null;

@@ -23,6 +23,129 @@ const key = support.key;
 const put = support.put;
 const batch = support.batch;
 
+const first_region = "00000000-00000000-00000000.region";
+const pending = first_region ++ "/PENDING";
+const manifest = first_region ++ "/MANIFEST";
+
+fn exists(dir: std.Io.Dir, name: []const u8) bool {
+    dir.access(io, name, .{}) catch return false;
+    return true;
+}
+
+test "a new region syncs nothing until its first flush" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stats: db.Stats = .{};
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .region = .{ .stats = &stats } });
+    defer world.deinit();
+    _ = try world.write(batch(1, &.{put(0, "buffered")}));
+    try testing.expect(exists(tmp.dir, pending));
+    try testing.expect(!exists(tmp.dir, manifest));
+    try testing.expectEqual(@as(u64, 0), stats.fsync_count.load(.monotonic));
+
+    try world.flush();
+    try testing.expect(exists(tmp.dir, manifest));
+    try testing.expect(!exists(tmp.dir, pending));
+    _ = try world.write(batch(2, &.{put(1, "later")}));
+    try world.close();
+
+    var reopened = try db.World.open(testing.allocator, io, tmp.dir, .{});
+    defer reopened.deinit();
+    var output: [16]u8 = undefined;
+    try testing.expectEqualStrings("buffered", (try reopened.get(key(0), &output)).?);
+    try testing.expectEqualStrings("later", (try reopened.get(key(1), &output)).?);
+}
+
+test "a crash before the first flush keeps what reached the file" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+        defer world.deinit();
+        _ = try world.write(batch(1, &.{put(0, "buffered")}));
+        _ = try world.write(batch(2, &.{put(1, "second")}));
+    }
+    try testing.expect(exists(tmp.dir, pending));
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+    defer world.deinit();
+    var output: [16]u8 = undefined;
+    try testing.expectEqualStrings("buffered", (try world.get(key(0), &output)).?);
+    try testing.expectEqualStrings("second", (try world.get(key(1), &output)).?);
+    try testing.expect(!exists(tmp.dir, pending));
+    try testing.expect(exists(tmp.dir, manifest));
+    _ = try world.write(batch(3, &.{put(2, "after")}));
+    try world.close();
+}
+
+test "a new region whose segment never reached the disk opens empty" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+        defer world.deinit();
+        _ = try world.write(batch(1, &.{put(0, "lost")}));
+    }
+    const region_dir = try tmp.dir.openDir(io, first_region, .{});
+    defer region_dir.close(io);
+    const device = try support.openFile(region_dir, support.segment_name);
+    try device.handle.setLength(io, 0);
+    device.handle.close(io);
+
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+    defer world.deinit();
+    var output: [16]u8 = undefined;
+    try testing.expectEqual(null, try world.get(key(0), &output));
+    try testing.expect(!exists(tmp.dir, pending));
+    _ = try world.write(batch(1, &.{put(0, "again")}));
+    try world.close();
+    var reopened = try db.World.open(testing.allocator, io, tmp.dir, .{});
+    defer reopened.deinit();
+    try testing.expectEqualStrings("again", (try reopened.get(key(0), &output)).?);
+}
+
+test "an empty region directory left by a crash reads as missing" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, first_region, .default_dir);
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+    defer world.deinit();
+    var output: [16]u8 = undefined;
+    try testing.expectEqual(null, try world.get(key(0), &output));
+    _ = try world.write(batch(1, &.{put(0, "saved")}));
+    try testing.expectEqualStrings("saved", (try world.get(key(0), &output)).?);
+    try world.close();
+}
+
+test "a missing manifest without PENDING is still corruption" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+        defer world.deinit();
+        _ = try world.write(batch(1, &.{put(0, "saved")}));
+        try world.close();
+    }
+    try tmp.dir.deleteFile(io, manifest);
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
+    defer world.deinit();
+    var output: [16]u8 = undefined;
+    try testing.expectError(error.MissingManifest, world.get(key(0), &output));
+}
+
+test "rotation and compaction publish a new region first" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .region = .{ .max_segment_size = 4096, .compression_threshold = 0 } });
+    defer world.deinit();
+    const value: [1500]u8 = @splat('r');
+    for (0..4) |i| _ = try world.write(batch(i + 1, &.{put(@intCast(i), &value)}));
+    try testing.expect(!exists(tmp.dir, pending));
+    _ = try world.write(batch(5, &.{.{ .key = .{ .dimension = 0, .chunk_x = 64, .chunk_z = 0, .component = .version }, .value = "fresh" }}));
+    _ = (try world.compact(.{ .dimension = 0, .x = 2, .z = 0 })).?;
+    try testing.expect(!exists(tmp.dir, "00000000-00000002-00000000.region/PENDING"));
+    try world.close();
+}
+
 fn keyAt(dimension: i32, x: i32, z: i32) db.Key {
     return .{ .dimension = dimension, .chunk_x = x, .chunk_z = z, .component = .version };
 }
@@ -217,6 +340,8 @@ test "world releases its lock even when a region cannot flush" {
     var world = try db.World.open(testing.allocator, io, tmp.dir, .{});
     defer world.deinit();
     _ = try world.write(batch(1, &.{put(0, "saved")}));
+    try world.flush();
+    _ = try world.write(batch(2, &.{put(1, "unsaved")}));
     world.slots[0].opened.store.failed = true;
     try testing.expectError(error.WriterFailed, world.close());
     var reopened = try db.World.open(testing.allocator, io, tmp.dir, .{});
