@@ -170,6 +170,38 @@ test "checkpoints from older generations and other options are ignored" {
     try skipping.close();
 }
 
+test "skip_unchanged reuses a checkpoint written without fingerprints and still compares every candidate" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try populate(tmp.dir, .{});
+
+    var stats: db.Stats = .{};
+    var store = try db.Store.open(testing.allocator, io, tmp.dir, .{ .skip_unchanged = true, .stats = &stats });
+    defer store.deinit();
+    try testing.expectEqual(store.generation.count, store.checkpointed.segments);
+    try testing.expect(store.checkpointed.offset != 0);
+    try expectPopulated(&store);
+
+    var same: [64]u8 = @splat(39);
+    const skipped = try store.write(batch(0, &.{put(19, &same)}));
+    try testing.expectEqual(skipped.start, skipped.end);
+    try testing.expectEqual(@as(u64, 1), stats.unchanged_write_skips.load(.monotonic));
+
+    // same length and compression, so only the byte comparison can tell it changed
+    var changed = same;
+    changed[63] = 0;
+    const written = try store.write(batch(0, &.{put(19, &changed)}));
+    try testing.expect(written.end > written.start);
+    try testing.expectEqual(@as(u64, 1), stats.unchanged_write_skips.load(.monotonic));
+    try store.close();
+
+    var reopened = try db.Store.open(testing.allocator, io, tmp.dir, .{ .skip_unchanged = true });
+    defer reopened.deinit();
+    var output: [64]u8 = undefined;
+    try testing.expectEqualSlices(u8, &changed, (try reopened.get(key(19), &output)).?);
+    try reopened.close();
+}
+
 test "checkpoints span rotated segments" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -221,4 +253,25 @@ test "a clean checkpoint cannot hide damaged or foreign segment headers" {
     original[0] ^= 1;
     try file.writeAll(&original, 0);
     try testing.expectError(error.InvalidMagic, db.Store.open(testing.allocator, io, tmp.dir, .{}));
+}
+
+test "checkpoint headers mark fingerprints of uncompressed values apart from 1.2's" {
+    const header: db.checkpoint.Header = .{ .fingerprints = true, .generation = 1, .salt = 2, .segments = 1, .entries = 0, .offset = 48, .last_batch_id = 0, .total_bytes = 0, .seen_batch = false };
+    var bytes: [db.checkpoint.header_len]u8 = undefined;
+    header.write(&bytes);
+    try testing.expectEqual(@as(u16, 2), std.mem.readInt(u16, bytes[6..8], .little));
+    const raw = try db.checkpoint.Header.read(&bytes);
+    try testing.expect(raw.fingerprints and !raw.stored_fingerprints);
+
+    for ([_]u16{ 0, 1, 3 }) |flags| {
+        std.mem.writeInt(u16, bytes[6..8], flags, .little);
+        std.mem.writeInt(u32, bytes[60..64], db.crc.hash(bytes[0..60]), .little);
+        if (flags == 3) {
+            try testing.expectError(error.InvalidFlags, db.checkpoint.Header.read(&bytes));
+        } else {
+            const read = try db.checkpoint.Header.read(&bytes);
+            try testing.expectEqual(flags != 0, read.fingerprints);
+            try testing.expectEqual(flags == 1, read.stored_fingerprints);
+        }
+    }
 }

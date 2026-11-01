@@ -13,8 +13,16 @@ pub const entry_len = 24;
 pub const block_len = 16 * 1024;
 pub const block_header_len = 8;
 
+/// Flag values: 0 has no fingerprints, 1 has 1.2's fingerprints of stored bytes, which only count as unknown now, and 2
+/// has fingerprints of uncompressed values. Earlier releases reject 2 and rebuild the index instead.
+const fingerprints_stored = 1;
+const fingerprints_raw = 2;
+
 pub const Header = struct {
+    /// Entries carry a fingerprint field.
     fingerprints: bool,
+    /// The fields hold 1.2's fingerprints of stored bytes, which mean nothing to this version.
+    stored_fingerprints: bool = false,
     generation: u64,
     salt: u64,
     segments: u32,
@@ -28,7 +36,7 @@ pub const Header = struct {
         @memset(bytes, 0);
         @memcpy(bytes[0..4], "ZGIX");
         std.mem.writeInt(u16, bytes[4..6], version, .little);
-        std.mem.writeInt(u16, bytes[6..8], @intFromBool(self.fingerprints), .little);
+        std.mem.writeInt(u16, bytes[6..8], if (self.fingerprints) fingerprints_raw else 0, .little);
         std.mem.writeInt(u64, bytes[8..16], self.generation, .little);
         std.mem.writeInt(u64, bytes[16..24], self.salt, .little);
         std.mem.writeInt(u32, bytes[24..28], self.segments, .little);
@@ -45,9 +53,10 @@ pub const Header = struct {
         if (std.mem.readInt(u16, bytes[4..6], .little) != version) return error.UnsupportedVersion;
         if (std.mem.readInt(u32, bytes[60..64], .little) != crc.hash(bytes[0..60])) return error.ChecksumMismatch;
         const flags = std.mem.readInt(u16, bytes[6..8], .little);
-        if (flags > 1 or bytes[56] > 1 or !std.mem.allEqual(u8, bytes[57..60], 0)) return error.InvalidFlags;
+        if (flags > fingerprints_raw or bytes[56] > 1 or !std.mem.allEqual(u8, bytes[57..60], 0)) return error.InvalidFlags;
         return .{
-            .fingerprints = flags == 1,
+            .fingerprints = flags != 0,
+            .stored_fingerprints = flags == fingerprints_stored,
             .generation = std.mem.readInt(u64, bytes[8..16], .little),
             .salt = std.mem.readInt(u64, bytes[16..24], .little),
             .segments = std.mem.readInt(u32, bytes[24..28], .little),

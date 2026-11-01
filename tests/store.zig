@@ -1163,3 +1163,38 @@ test "frames larger than the reader's buffer still replay, compact and recover" 
     defer copy.cleanup();
     _ = try db.recovery_copy.recoverTo(testing.allocator, io, tmp.dir, copy.dir, .{});
 }
+
+test "skip_unchanged fingerprints uncompressed values on writes, replays and compactions" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const options: db.store.Options = .{ .skip_unchanged = true };
+    var values: [4][3000]u8 = undefined;
+    for (&values, 0..) |*value, i| {
+        for (value, 0..) |*b, j| b.* = @truncate(j / 7 + i * 31);
+    }
+    {
+        var store = try db.Store.create(testing.allocator, io, tmp.dir, region, options);
+        defer store.deinit();
+        _ = try store.write(batch(0, &.{ put(0, &values[0]), put(1, &values[1]), put(2, "short"), put(3, null) }));
+        _ = try store.writeGroup(&.{batch(0, &.{ put(4, &values[2]), put(5, &values[3]) })});
+        for ([_]u16{ 0, 1, 4, 5 }, [_]usize{ 0, 1, 2, 3 }) |x, v| {
+            const location = (try store.generation.index.get(key(x))).?;
+            try testing.expectEqual(db.index.fingerprint(&values[v]), location.fingerprint);
+        }
+        try testing.expectEqual(db.index.fingerprint("short"), (try store.generation.index.get(key(2))).?.fingerprint);
+        try store.close();
+    }
+
+    // without an INDEX the records are decompressed to fingerprint them
+    try tmp.dir.deleteFile(io, "INDEX");
+    var store = try db.Store.open(testing.allocator, io, tmp.dir, options);
+    defer store.deinit();
+    try testing.expectEqual(db.index.fingerprint(&values[0]), (try store.generation.index.get(key(0))).?.fingerprint);
+    try testing.expectEqual(db.index.fingerprint(&values[3]), (try store.generation.index.get(key(5))).?.fingerprint);
+
+    _ = try store.compact();
+    const compacted = (try store.generation.index.get(key(1))).?;
+    try testing.expect(compacted.stored_len < values[1].len);
+    try testing.expectEqual(db.index.fingerprint(&values[1]), compacted.fingerprint);
+    try store.close();
+}
