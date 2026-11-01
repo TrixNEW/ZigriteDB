@@ -170,6 +170,38 @@ test "checkpoints from older generations and other options are ignored" {
     try skipping.close();
 }
 
+test "skip_unchanged reuses a checkpoint written without fingerprints and still compares every candidate" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try populate(tmp.dir, .{});
+
+    var stats: db.Stats = .{};
+    var store = try db.Store.open(testing.allocator, io, tmp.dir, .{ .skip_unchanged = true, .stats = &stats });
+    defer store.deinit();
+    try testing.expectEqual(store.generation.count, store.checkpointed.segments);
+    try testing.expect(store.checkpointed.offset != 0);
+    try expectPopulated(&store);
+
+    var same: [64]u8 = @splat(39);
+    const skipped = try store.write(batch(0, &.{put(19, &same)}));
+    try testing.expectEqual(skipped.start, skipped.end);
+    try testing.expectEqual(@as(u64, 1), stats.unchanged_write_skips.load(.monotonic));
+
+    // same length and compression, so only the byte comparison can tell it changed
+    var changed = same;
+    changed[63] = 0;
+    const written = try store.write(batch(0, &.{put(19, &changed)}));
+    try testing.expect(written.end > written.start);
+    try testing.expectEqual(@as(u64, 1), stats.unchanged_write_skips.load(.monotonic));
+    try store.close();
+
+    var reopened = try db.Store.open(testing.allocator, io, tmp.dir, .{ .skip_unchanged = true });
+    defer reopened.deinit();
+    var output: [64]u8 = undefined;
+    try testing.expectEqualSlices(u8, &changed, (try reopened.get(key(19), &output)).?);
+    try reopened.close();
+}
+
 test "checkpoints span rotated segments" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

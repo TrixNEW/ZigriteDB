@@ -551,7 +551,7 @@ pub const Store = struct {
         const header = try checkpoint.Header.read(bytes[0..checkpoint.header_len]);
         const valid = header.generation == metadata.generation and header.salt == metadata.salt and
             header.segments != 0 and header.segments <= metadata.segments.len and header.entries <= options.max_keys and
-            bytes.len <= checkpoint.maxFileLen(header.bodyLen()) and (header.fingerprints or !options.skip_unchanged);
+            bytes.len <= checkpoint.maxFileLen(header.bodyLen());
         if (!valid) return error.StaleCheckpoint;
         const blocks = bytes[checkpoint.header_len .. bytes.len - 4];
         if (std.mem.readInt(u32, bytes[bytes.len - 4 ..][0..4], .little) != crc.hash(blocks)) return error.ChecksumMismatch;
@@ -858,8 +858,9 @@ pub const Store = struct {
         defer self.unpin(pinned.generation);
         if (header.delete) return false;
         const location = pinned.location;
-        if (location.stored_len != header.stored_len or location.raw_len != header.raw_len or
-            location.compression != header.compression or location.fingerprint != index_module.fingerprint(header.compression, stored)) return false;
+        if (location.stored_len != header.stored_len or location.raw_len != header.raw_len or location.compression != header.compression) return false;
+        // 0 is also what records indexed without fingerprints carry, so it only means the bytes have to be compared
+        if (location.fingerprint != 0 and location.fingerprint != index_module.fingerprint(header.compression, stored)) return false;
         const scratch = try self.borrow(location.recordLen());
         defer self.giveBack(scratch);
         const bytes = scratch.bytes[0..location.recordLen()];
