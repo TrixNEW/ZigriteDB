@@ -128,7 +128,7 @@ pub const Key = extern struct {
     component: u32,
 
     fn native(self: Key) !db.Key {
-        if (self.component > std.math.maxInt(u8)) return error.InvalidArgument;
+        if (self.component > std.math.maxInt(u8) or self.dimension == db.aux.dimension) return error.InvalidArgument;
         const result: db.Key = .{
             .dimension = self.dimension,
             .chunk_x = self.chunk_x,
@@ -415,16 +415,26 @@ fn getChunk(
     bytes_needed.* = 0;
     const handle = optional orelse return .invalid_argument;
     if ((buffer == null and capacity != 0) or (records == null and record_capacity != 0)) return .invalid_argument;
-    const record_count = @min(record_capacity, std.math.maxInt(u16));
-    const native = if (record_count <= stack.len) stack[0..record_count] else allocator.alloc(db.ChunkRecord, record_count) catch return .out_of_memory;
-    defer if (record_count > stack.len) allocator.free(native);
+    const record_count = @min(record_capacity, std.math.maxInt(u16) + 1);
     const output: []u8 = if (buffer) |ptr| ptr[0..capacity] else &.{};
     var result: db.ChunkResult = undefined;
-    handle.world.getChunk(dimension, chunk_x, chunk_z, output, native, &result) catch |err| {
-        total.* = result.count;
-        bytes_needed.* = result.required;
-        return status(err);
-    };
+    var native = stack[0..@min(record_count, stack.len)];
+    var heap: []db.ChunkRecord = &.{};
+    defer allocator.free(heap);
+    while (true) {
+        handle.world.getChunk(dimension, chunk_x, chunk_z, output, native, &result) catch |err| {
+            // Only pay for a big record array when the chunk really needs it.
+            if (err == error.BufferTooSmall and native.len < result.count and result.count <= record_count and result.required <= capacity and heap.len == 0) {
+                heap = allocator.alloc(db.ChunkRecord, result.count) catch return .out_of_memory;
+                native = heap;
+                continue;
+            }
+            total.* = result.count;
+            bytes_needed.* = result.required;
+            return status(err);
+        };
+        break;
+    }
     total.* = result.count;
     bytes_needed.* = result.required;
     if (result.count == 0) return .not_found;

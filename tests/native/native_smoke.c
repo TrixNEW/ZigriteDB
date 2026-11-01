@@ -206,6 +206,17 @@ int main(int argc, char **argv) {
     assert(zg_write_group(handle, large_group, 2) == ZG_OK);
     assert(zg_get(handle, &large[64].key, output, sizeof(output), &required) == ZG_OK);
     assert(required == sizeof(value) && memcmp(output, value, required) == 0);
+    zg_operation tall[100];
+    for (int y = 0; y < 100; y++) tall[y] = (zg_operation){{7, 2, 0, y - 64, ZG_SUBCHUNK}, ZG_PUT, (uint8_t *)"t", 1};
+    assert(zg_write(handle, 0, tall, 100) == ZG_OK);
+    uint8_t tall_buffer[128];
+    zg_chunk_record tall_records[200];
+    assert(zg_get_chunk(handle, 7, 2, 0, tall_buffer, sizeof(tall_buffer), tall_records, 200, &count, &required) == ZG_OK);
+    assert(count == 100 && required == 100 && tall_records[99].subchunk_y == 35);
+    assert(zg_get_chunk(handle, 7, 2, 0, tall_buffer, sizeof(tall_buffer), tall_records, 99, &count, &required) == ZG_BUFFER_TOO_SMALL);
+    assert(count == 100);
+    zg_operation reserved = {{INT32_MIN, 0, 0, 0, ZG_VERSION}, ZG_PUT, (uint8_t *)"x", 1};
+    assert(zg_write(handle, 0, &reserved, 1) == ZG_INVALID_ARGUMENT);
     assert(zg_close(handle) == ZG_OK);
     puts("C API smoke test passed");
     return 0;
