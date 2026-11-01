@@ -1,0 +1,10 @@
+before {"create":{"regions":64,"first_write_p50_us":22983.2,"first_write_p99_us":45932.0,"first_write_max_us":45932.0,"writes_ms":1562.14,"flush_ms":27.68}}
+before {"create":{"regions":64,"first_write_p50_us":23464.0,"first_write_p99_us":31103.7,"first_write_max_us":31103.7,"writes_ms":1531.24,"flush_ms":27.41}}
+before {"create":{"regions":64,"first_write_p50_us":23674.3,"first_write_p99_us":39758.1,"first_write_max_us":39758.1,"writes_ms":1588.88,"flush_ms":27.40}}
+before {"create":{"regions":64,"first_write_p50_us":23829.1,"first_write_p99_us":33735.7,"first_write_max_us":33735.7,"writes_ms":1571.73,"flush_ms":27.35}}
+before {"create":{"regions":64,"first_write_p50_us":23313.9,"first_write_p99_us":32404.1,"first_write_max_us":32404.1,"writes_ms":1533.81,"flush_ms":26.63}}
+after {"create":{"regions":64,"first_write_p50_us":563.7,"first_write_p99_us":813.3,"first_write_max_us":813.3,"writes_ms":37.15,"flush_ms":64.37}}
+after {"create":{"regions":64,"first_write_p50_us":552.3,"first_write_p99_us":808.7,"first_write_max_us":808.7,"writes_ms":36.79,"flush_ms":68.73}}
+after {"create":{"regions":64,"first_write_p50_us":579.7,"first_write_p99_us":1140.4,"first_write_max_us":1140.4,"writes_ms":38.37,"flush_ms":61.75}}
+after {"create":{"regions":64,"first_write_p50_us":565.1,"first_write_p99_us":922.2,"first_write_max_us":922.2,"writes_ms":37.70,"flush_ms":60.08}}
+after {"create":{"regions":64,"first_write_p50_us":572.9,"first_write_p99_us":929.2,"first_write_max_us":929.2,"writes_ms":38.20,"flush_ms":63.69}}

@@ -170,21 +170,24 @@ byte twice, and measured fsync costs didn't justify it (see the benchmark notes)
 Real Bedrock worlds replayed through ZigriteDB's C API and the
 [LevelDB fork](https://github.com/pmmp/leveldb) PMMP uses, with PMMP's compression and
 block size, an 8 MiB cache and checksums verified on both. Medians of 5 runs on WSL2,
-Ryzen 5 5500, ReleaseSafe. **Native code only:** no PHP, NBT or server is involved.
+Ryzen 5 5500, ReleaseSafe, 1.2.0. **Native code only:** no PHP, NBT or server is involved.
 
 | World 1 (2.8k chunks) / World 2 (16k chunks) | LevelDB | ZigriteDB |
 | --- | ---: | ---: |
-| Import | 670 / 4,242 chunks/s | 13,066 / 24,725 chunks/s |
-| Reopen and first chunk | 89 / 64 ms | 11 / 8 ms |
-| Chunk load p50, cold | 230 / 117 µs | 26 / 9 µs |
-| Chunk load p99, 4 players + autosave | 1,254 / 1,007 µs | 79 / 41 µs |
-| Chunk update p50 / p99 | 11.7 / 4.8, 1,182 / 24 µs | 2.9 / 3.7, 15 / 46 µs |
-| Autosave barrier p50 | 4.8 / 4.8 ms | 9.0 / 18.1 ms |
-| Full compaction | 3.2 / 3.5 s | 0.18 / 0.80 s |
-| Size after compaction | 11.9 / 14.6 MB | 28.6 / 41.2 MB |
+| Import | 505 / 4,086 chunks/s | 13,748 / 32,719 chunks/s |
+| Reopen and first chunk | 95 / 61 ms | 9.4 / 6.4 ms |
+| Chunk load p50, cold | 248 / 130 µs | 28 / 9.9 µs |
+| Chunk load p99, 4 players + autosave | 1,382 / 924 µs | 274 / 132 µs |
+| Chunk update p50 / p99 | 1,050 / 5.4, 1,165 / 31 µs | 2.9 / 5.9, 20 / 100 µs |
+| Autosave barrier p50 | 5.0 / 4.8 ms | 9.2 / 15.8 ms |
+| Full compaction | 3.6 / 3.5 s | 1.0 / 2.1 s |
+| Size after compaction | 11.9 / 14.6 MB | 23.5 / 33.0 MB |
+| First write into a new region | | 0.56 ms (was 23 ms) |
 
-LevelDB wins on size (zlib vs LZ4) and on save barriers, where it syncs one log and
-ZigriteDB syncs every dirty region. Setup, every phase, writer sweeps, the format 1
+LevelDB wins on size (zlib over 64 KiB blocks vs per-record LZ4) and on save barriers,
+where it syncs one log and ZigriteDB syncs every dirty region. The 4-player mixed phase
+swings by 2x between runs under WSL2 for every engine and build, so treat its tail
+figures as rough. Setup, every phase, writer sweeps, the format 1
 comparison and raw data are in [tests/bench/results](tests/bench/results/README.md).
 
 ## Limitations

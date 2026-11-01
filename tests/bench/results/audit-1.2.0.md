@@ -1,10 +1,29 @@
-# 1.1.1 audit
+# 1.2.0 audit
 
 This pass covered the region store, indexes, cache ownership, group commits,
 flush and eviction, compaction, manifests, checkpoints, recovery, compression,
 the C ABI, overlays, Bedrock conversion, migration, and validation tooling.
-The baseline is `0d46a87`. Zig remains at 0.16.0, C ABI at 3, and disk format at 2.
-The package version is 1.1.1 and the native library version is 3.1.1.
+The baseline is `0d46a87` (1.1.0). The package is 1.2.0, the native library 3.2.0,
+the C ABI stays 3 and the disk format stays 2. Zig moves from 0.16.0 to 0.17.0.
+
+## Zig 0.17
+
+Fuzzing found a panic in Zig 0.16's inflate: a raw deflate block truncated inside its
+dynamic header overflowed in `tossBitsShort`, so a damaged LevelDB world could crash a
+safe import and was undefined behaviour in ReleaseFast. Zig 0.17 fixes it upstream, so
+the project moved compilers instead of carrying a patched decoder. The input is a
+regression test in `src/bedrock/leveldb.zig`; 200,000 fuzz runs passed afterwards
+where 0.16 aborted near 19,000.
+
+## Storage changes
+
+- New regions are created without fsyncs and published by their first sync, flush,
+  rotation, compaction or close. `PENDING` marks the window, and open finishes it from
+  segment 1 after a crash, so a killed process keeps every write that reached the file.
+  The first buffered write into a new region dropped from 23 ms to 0.56 ms under WSL2.
+- Compaction re-encodes records with a hash-chain, lazy-matching LZ4 parser when the
+  result is smaller and decodes back exactly. INDEX checkpoints (version 2) store their
+  body as LZ4 blocks. Compacted worlds are 18-20% smaller. Imports compact once at the end.
 
 ## Correctness and resource fixes
 
@@ -57,9 +76,12 @@ allocation counts. Setup and its fsyncs are outside the timer.
 
 ## Remaining limits
 
-Storage remains atomic per region. Autosave still syncs each dirty region, and
-LZ4 still uses more space than LevelDB's raw zlib. Region creation still needs
-its existing publication barriers.
+Storage remains atomic per region. Autosave still syncs each dirty region, about
+2-3x LevelDB's single log fsync. LZ4 per record is still about twice LevelDB's zlib
+over 64 KiB blocks after compaction. A region's first sync carries its publication
+fsyncs. Regions with `skip_unchanged` keep their write-time encoding through
+compaction, since fingerprints hash stored bytes. The mixed benchmark phase is too
+noisy under WSL2 to rank builds.
 
 Validation runs on WSL2 and its Linux filesystem. Native Linux, real power-loss
 testing, a live Quark/PMMP server, other architectures and an hours-long soak
