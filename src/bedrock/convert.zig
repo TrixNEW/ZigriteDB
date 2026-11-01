@@ -108,8 +108,19 @@ pub fn import(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, sour
         try batch.flush(&world);
         try world.close();
     }
+    try compactAll(allocator, io, staged.dir);
     try staged.publish();
     return result;
+}
+
+/// Imports are written once, so pay for the denser compaction encoding up front.
+fn compactAll(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !void {
+    var world = try World.open(allocator, io, dir, .{});
+    defer world.deinit();
+    const regions = try world.regions(allocator);
+    defer allocator.free(regions);
+    for (regions) |region| _ = try world.compact(region);
+    try world.close();
 }
 
 const Pending = struct {
