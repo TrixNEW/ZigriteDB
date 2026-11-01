@@ -114,8 +114,9 @@ they are named in a manifest.
 
 A world creates a region without any fsync: the directory, an empty `PENDING` and segment 1
 with its header. The first flush, sync write, rotation, compaction or close syncs the
-segment, publishes the first manifest, removes `PENDING` before the final directory sync
-and then syncs the world directory. Until then the region can only hold segment 1 of
+segment and the world directory, then publishes the first manifest and removes `PENDING`
+before the final directory sync. A world syncs its directory before opening a region that
+still holds `PENDING`. Until then the region can only hold segment 1 of
 generation 1, so after a crash open rebuilds that manifest from the segment header. If the
 header never reached the disk, nothing was acknowledged and the region opens empty. A
 missing `MANIFEST` without `PENDING` is still corruption.

@@ -224,8 +224,6 @@ pub const Store = struct {
     // A deferred region's world directory, until its first sync publishes it. Guarded by directory_mutex.
     parent: ?std.Io.Dir = null,
     unpublished: std.atomic.Value(bool) = .init(false),
-    /// Open finished a deferred creation, so the parent directory still needs a sync.
-    finished_creation: bool = false,
 
     const pool_limit = 8;
     const prefetch_limit = 64 * 1024 * 1024;
@@ -237,9 +235,10 @@ pub const Store = struct {
         return init(allocator, io, dir, region, options, null);
     }
 
-    /// Syncs nothing. The first flush, sync write, rotation, compaction or close publishes the
-    /// region and syncs `parent`, which is borrowed and must outlive the store. Until then the
+    /// Syncs nothing. The first flush, sync write, rotation, compaction or close syncs `parent`,
+    /// which is borrowed and must outlive the store, then publishes the region. Until then the
     /// directory holds PENDING, and open rebuilds the manifest from segment 1 after a crash.
+    /// Whoever opens a region holding PENDING must sync its parent first.
     pub fn createDeferred(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, region: Region, options: Options, parent: std.Io.Dir) !Store {
         return init(allocator, io, dir, region, options, parent);
     }
@@ -252,8 +251,8 @@ pub const Store = struct {
         var iterator = directory.dir.iterate();
         if (try iterator.next(io) != null) return error.DirectoryNotEmpty;
         const deferred = parent != null;
+        // Left in place on failure, since open discards PENDING with a missing or bad segment.
         if (deferred) (try directory.dir.createFile(io, pending_name, .{ .exclusive = true })).close(io);
-        errdefer if (deferred) directory.dir.deleteFile(io, pending_name) catch {};
 
         const salt = segment.newSalt(io);
         const handle = try files.createSegment(directory.dir, io, 1, 1);
@@ -319,9 +318,10 @@ pub const Store = struct {
         lock.lockUncancelable(&self.directory_mutex, self.io);
         defer self.directory_mutex.unlock(self.io);
         const parent = self.parent orelse return;
+        // Once PENDING is gone nothing says the parent still needs a sync.
+        try (File{ .handle = .{ .handle = parent.handle, .flags = .{ .nonblocking = false } }, .io = self.io }).sync();
         var buffer: [manifest.header_len + 12]u8 = undefined;
         try publishFirst(&self.directory, try firstManifest(&buffer, self.region, self.salt));
-        try (File{ .handle = .{ .handle = parent.handle, .flags = .{ .nonblocking = false } }, .io = self.io }).sync();
         self.parent = null;
         self.unpublished.store(false, .release);
     }
@@ -337,19 +337,20 @@ pub const Store = struct {
 
     /// Finishes a deferred creation that a crash interrupted. Such a region only ever holds
     /// segment 1 of generation 1, so its manifest follows from that segment's header.
-    fn finishCreation(directory: *Directory) !bool {
+    fn finishCreation(directory: *Directory) !void {
         const io = directory.io;
         directory.dir.access(io, pending_name, .{}) catch |err| {
             if (err != error.FileNotFound) return err;
             // Only the mkdir survived a crash.
             var iterator = directory.dir.iterate();
-            return if (try iterator.next(io) == null) error.EmptyRegion else false;
+            if (try iterator.next(io) == null) return error.EmptyRegion;
+            return;
         };
         if (directory.dir.access(io, "MANIFEST", .{})) {
             directory.dir.deleteFile(io, "MANIFEST.tmp") catch |err| if (err != error.FileNotFound) return err;
             try directory.dir.deleteFile(io, pending_name);
             try directory.syncEntries();
-            return true;
+            return;
         } else |err| if (err != error.FileNotFound) return err;
         directory.dir.deleteFile(io, "MANIFEST.tmp") catch |err| if (err != error.FileNotFound) return err;
         const header = firstHeader(directory) catch |err| switch (err) {
@@ -364,7 +365,6 @@ pub const Store = struct {
         };
         var buffer: [manifest.header_len + 12]u8 = undefined;
         try publishFirst(directory, try firstManifest(&buffer, header.region, header.salt));
-        return true;
     }
 
     fn firstHeader(directory: *Directory) !segment.Header {
@@ -453,7 +453,7 @@ pub const Store = struct {
         try options.validate();
         var directory = try Directory.init(dir, io);
         errdefer directory.deinit();
-        const finished = try finishCreation(&directory);
+        try finishCreation(&directory);
 
         const ids = try allocator.alloc(u64, manifest.max_segments);
         defer allocator.free(ids);
@@ -528,7 +528,6 @@ pub const Store = struct {
             .generation = generation,
             .pool = pool,
             .checkpointed = covered orelse .{},
-            .finished_creation = finished,
         };
     }
 

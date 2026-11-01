@@ -72,7 +72,8 @@ pub const Header = struct {
 
 /// The most a body of `body_len` bytes can take on disk, header and checksum included.
 pub fn maxFileLen(body_len: usize) usize {
-    return header_len + body_len + (body_len / block_len + 1) * block_header_len + 4;
+    // Blocks end early rather than split an entry, losing up to an entry's length each.
+    return header_len + body_len + (body_len / (block_len - 28) + 2) * block_header_len + 4;
 }
 
 /// Expands stored blocks into `output`, which they must fill exactly.

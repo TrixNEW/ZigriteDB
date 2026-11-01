@@ -668,6 +668,8 @@ pub const World = struct {
             break :blk try self.directory.dir.openDir(self.io, name, .{ .follow_symlinks = false });
         };
         defer dir.close(self.io);
+        // A creation that never finished may still need its directory entry made durable.
+        if (!created) if (dir.access(self.io, "PENDING", .{})) try self.directory.syncEntries() else |err| if (err != error.FileNotFound) return err;
         const opened = try self.allocator.create(Opened);
         errdefer self.allocator.destroy(opened);
         opened.* = .{ .store = undefined };
@@ -689,7 +691,6 @@ pub const World = struct {
             };
         errdefer store.deinit();
         if (!store.region.eql(region)) return error.RegionMismatch;
-        if (store.finished_creation) try self.directory.syncEntries();
         return opened;
     }
 
