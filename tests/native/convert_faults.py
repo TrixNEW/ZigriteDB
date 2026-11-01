@@ -55,6 +55,26 @@ def same_keys(zigrite, a, b):
     return subprocess.run([zigrite, "compare", str(a), str(b)], capture_output=True).returncode == 0
 
 
+def check_special_files(zigrite, root, source):
+    table = next((source / "db").glob("*.ldb")).name
+    for name in ("CURRENT", "MANIFEST-000002", table, "000009.log"):
+        for kind in ("fifo", "symlink"):
+            path = root / f"special-{name}-{kind}"
+            shutil.copytree(source, path)
+            target = path / "db" / name
+            if target.exists():
+                target.rename(target.with_suffix(".original"))
+            if kind == "fifo":
+                os.mkfifo(target)
+            else:
+                target.symlink_to("CURRENT.original" if name == "CURRENT" else "CURRENT")
+            destination = root / f"invalid-{name}-{kind}"
+            result = subprocess.run([zigrite, "import", str(path), str(destination)], capture_output=True, timeout=5)
+            assert result.returncode != 0 and not destination.exists(), (name, kind, result)
+            assert not destination.with_name(destination.name + ".zigrite-partial").exists()
+    print("LevelDB control files, tables and logs reject pipes and symlinks")
+
+
 def check(zigrite, library, root, command, source, reference, stride):
     api = API(library)
     before = tree_hash(source)
@@ -88,6 +108,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="zigritedb-convert-") as temporary:
         root = Path(temporary)
         bedrock = build_source(library, zigrite, root)
+        check_special_files(zigrite, root, bedrock)
         check(zigrite, library, root, "import", bedrock, bedrock / "db", stride)
         subprocess.run([zigrite, "import", str(bedrock), str(root / "imported")], check=True, capture_output=True)
         check(zigrite, library, root, "export", root / "imported", bedrock / "db", stride)

@@ -3,6 +3,7 @@ const flate = std.compress.flate;
 
 const crc = @import("../format/crc.zig");
 const File = @import("../io/file.zig").File;
+const files = @import("../storage/files.zig");
 
 const block_size = 32 * 1024;
 const table_magic: u64 = 0xdb4775248b80fb57;
@@ -26,6 +27,7 @@ fn varint(bytes: []const u8, at: *usize) !u64 {
         if (at.* >= bytes.len) return error.Corrupt;
         const byte = bytes[at.*];
         at.* += 1;
+        if (shift == 63 and byte > 1) return error.Corrupt;
         result |= @as(u64, byte & 0x7f) << @intCast(shift);
         if (byte & 0x80 == 0) return result;
     }
@@ -65,8 +67,11 @@ pub const LogReader = struct {
         var started = false;
         while (true) {
             const left_in_block = block_size - self.at % block_size;
-            if (left_in_block < 7) self.at += left_in_block;
-            if (self.bytes.len - self.at < 7) return null;
+            if (left_in_block < 7) {
+                self.at += left_in_block;
+                continue;
+            }
+            if (self.at >= self.bytes.len or self.bytes.len - self.at < 7) return null;
             const header = self.bytes[self.at..][0..7];
             const len = std.mem.readInt(u16, header[4..6], .little);
             const kind = header[6];
@@ -74,23 +79,28 @@ pub const LogReader = struct {
                 self.at += left_in_block;
                 continue;
             }
-            if (self.bytes.len - self.at - 7 < len or 7 + @as(usize, len) > left_in_block) return null;
+            if (7 + @as(usize, len) > left_in_block) return error.Corrupt;
+            if (self.bytes.len - self.at - 7 < len) return null;
             const data = self.bytes[self.at + 7 ..][0..len];
-            if (unmask(std.mem.readInt(u32, header[0..4], .little)) != ~crc.update(crc.update(0xffff_ffff, header[6..7]), data)) return null;
+            if (unmask(std.mem.readInt(u32, header[0..4], .little)) != ~crc.update(crc.update(0xffff_ffff, header[6..7]), data)) return error.ChecksumMismatch;
             self.at += 7 + len;
             switch (kind) {
-                1 => return data,
+                1 => {
+                    if (started) return error.Corrupt;
+                    return data;
+                },
                 2 => {
+                    if (started) return error.Corrupt;
                     self.record.clearRetainingCapacity();
                     try self.record.appendSlice(allocator, data);
                     started = true;
                 },
                 3, 4 => {
-                    if (!started) continue;
+                    if (!started) return error.Corrupt;
                     try self.record.appendSlice(allocator, data);
                     if (kind == 4) return self.record.items;
                 },
-                else => return null,
+                else => return error.Corrupt,
             }
         }
     }
@@ -130,19 +140,28 @@ pub const LogWriter = struct {
 };
 
 pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) void {
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
     var version: Version = .{};
-    version.apply(allocator, bytes) catch {};
+    version.apply(arena.allocator(), bytes) catch {};
     var key: std.ArrayListUnmanaged(u8) = .empty;
     defer key.deinit(allocator);
     const end = TableIterator.restartsStart(bytes) catch return;
     var at: usize = 0;
-    while (at < end) _ = TableIterator.entry(bytes, &at, &key, allocator) catch return;
+    while (at < end) _ = TableIterator.entry(bytes[0..end], &at, &key, allocator) catch return;
 }
 
 const FileMeta = struct {
     level: u32,
     number: u64,
     smallest: []const u8,
+
+    fn lessThan(_: void, a: FileMeta, b: FileMeta) bool {
+        const order = std.mem.order(u8, a.smallest[0 .. a.smallest.len - 8], b.smallest[0 .. b.smallest.len - 8]);
+        if (order != .eq) return order == .lt;
+        return std.mem.readInt(u64, a.smallest[a.smallest.len - 8 ..][0..8], .little) >
+            std.mem.readInt(u64, b.smallest[b.smallest.len - 8 ..][0..8], .little);
+    }
 };
 
 const Version = struct {
@@ -170,7 +189,8 @@ const Version = struct {
                     const number = try varint(edit, &at);
                     _ = try varint(edit, &at);
                     const smallest = try allocator.dupe(u8, try slice(edit, &at));
-                    _ = try slice(edit, &at);
+                    const largest = try slice(edit, &at);
+                    if (smallest.len < 8 or largest.len < 8) return error.Corrupt;
                     try self.files.put(allocator, number, .{ .level = level, .number = number, .smallest = smallest });
                 },
                 9 => self.prev_log_number = try varint(edit, &at),
@@ -182,6 +202,7 @@ const Version = struct {
 
 pub fn decompress(allocator: std.mem.Allocator, kind: u8, data: []const u8, out: *std.ArrayListUnmanaged(u8)) !void {
     out.clearRetainingCapacity();
+    if (data.len > max_block) return error.Corrupt;
     const container: flate.Container = switch (kind) {
         0 => return out.appendSlice(allocator, data),
         2 => .zlib,
@@ -195,6 +216,7 @@ pub fn decompress(allocator: std.mem.Allocator, kind: u8, data: []const u8, out:
         error.OutOfMemory => return err,
         else => return error.Corrupt,
     };
+    if (out.items.len > max_block) return error.Corrupt;
 }
 
 const max_block = 64 * 1024 * 1024;
@@ -273,7 +295,7 @@ const TableIterator = struct {
     fn next(self: *TableIterator, allocator: std.mem.Allocator) !bool {
         while (self.block_at >= self.block_end) {
             if (self.index_at >= self.index_end) return false;
-            const handle = try entry(self.index.items, &self.index_at, &self.index_key, allocator);
+            const handle = try entry(self.index.items[0..self.index_end], &self.index_at, &self.index_key, allocator);
             var at: usize = 0;
             const offset = try varint(handle, &at);
             const size = try varint(handle, &at);
@@ -282,7 +304,7 @@ const TableIterator = struct {
             self.block_at = 0;
             self.key.clearRetainingCapacity();
         }
-        self.value = try entry(self.block.items, &self.block_at, &self.key, allocator);
+        self.value = try entry(self.block.items[0..self.block_end], &self.block_at, &self.key, allocator);
         if (self.key.items.len < 8) return error.Corrupt;
         return true;
     }
@@ -329,10 +351,9 @@ pub const Reader = struct {
         errdefer arena.deinit();
         const scratch = arena.allocator();
 
-        var current_buffer: [256]u8 = undefined;
-        const current = std.mem.trimEnd(u8, try dir.readFile(io, "CURRENT", &current_buffer), "\n");
+        const current = std.mem.trimEnd(u8, try files.readRegularAlloc(dir, io, "CURRENT", scratch, 256), "\n");
         if (!std.mem.startsWith(u8, current, "MANIFEST-") or std.mem.indexOfScalar(u8, current, '/') != null) return error.Corrupt;
-        const manifest_bytes = try dir.readFileAlloc(io, current, scratch, .limited(1 << 30));
+        const manifest_bytes = try files.readRegularAlloc(dir, io, try scratch.dupeSentinel(u8, current, 0), scratch, 1 << 30);
         var version: Version = .{};
         var log: LogReader = .{ .bytes = manifest_bytes };
         while (try log.next(scratch)) |edit| try version.apply(scratch, edit);
@@ -341,7 +362,7 @@ pub const Reader = struct {
         var logs: std.ArrayListUnmanaged(u64) = .empty;
         var iterator = dir.iterate();
         while (try iterator.next(io)) |item| {
-            if (item.kind != .file or !std.mem.endsWith(u8, item.name, ".log")) continue;
+            if (!std.mem.endsWith(u8, item.name, ".log")) continue;
             const number = std.fmt.parseInt(u64, item.name[0 .. item.name.len - 4], 10) catch continue;
             if (number >= version.log_number or (version.prev_log_number != 0 and number == version.prev_log_number)) try logs.append(scratch, number);
         }
@@ -349,7 +370,7 @@ pub const Reader = struct {
         var memos: std.ArrayListUnmanaged(Memo) = .empty;
         for (logs.items) |number| {
             var name: [32]u8 = undefined;
-            const bytes = try dir.readFileAlloc(io, try std.fmt.bufPrint(&name, "{d:0>6}.log", .{number}), scratch, .limited(1 << 32));
+            const bytes = try files.readRegularAlloc(dir, io, try std.mem.printSentinel(&name, "{d:0>6}.log", .{number}, 0), scratch, 1 << 32);
             var reader: LogReader = .{ .bytes = bytes };
             while (try reader.next(scratch)) |record| try applyBatch(scratch, record, &memos);
         }
@@ -365,11 +386,7 @@ pub const Reader = struct {
         try sources.append(scratch, .{ .memtable = memos.items });
         for (levels[0].items) |meta| try sources.append(scratch, .{ .tables = try scratch.dupe(u64, &.{meta.number}) });
         for (levels[1..]) |level| {
-            std.mem.sort(FileMeta, level.items, {}, struct {
-                fn lessThan(_: void, a: FileMeta, b: FileMeta) bool {
-                    return std.mem.order(u8, a.smallest, b.smallest) == .lt;
-                }
-            }.lessThan);
+            std.mem.sort(FileMeta, level.items, {}, FileMeta.lessThan);
             const numbers = try scratch.alloc(u64, level.items.len);
             for (level.items, numbers) |meta, *n| n.* = meta.number;
             if (numbers.len != 0) try sources.append(scratch, .{ .tables = numbers });
@@ -388,6 +405,8 @@ pub const Reader = struct {
         if (record.len < 12) return error.Corrupt;
         var sequence = std.mem.readInt(u64, record[0..8], .little);
         const count = std.mem.readInt(u32, record[8..12], .little);
+        const max_sequence = std.math.maxInt(u56);
+        if (sequence > max_sequence or (count != 0 and count - 1 > max_sequence - sequence)) return error.Corrupt;
         var at: usize = 12;
         for (0..count) |_| {
             if (at >= record.len) return error.Corrupt;
@@ -402,6 +421,7 @@ pub const Reader = struct {
             try memos.append(allocator, .{ .key = key, .sequence = sequence, .value = value });
             sequence += 1;
         }
+        if (at != record.len) return error.Corrupt;
     }
 
     fn advance(self: *Reader, source: *Source) !void {
@@ -426,9 +446,9 @@ pub const Reader = struct {
                 var name: [32]u8 = undefined;
                 const number = source.tables[source.position];
                 source.position += 1;
-                const handle = self.dir.openFile(self.io, try std.fmt.bufPrint(&name, "{d:0>6}.ldb", .{number}), .{}) catch |err| switch (err) {
-                    error.FileNotFound => try self.dir.openFile(self.io, try std.fmt.bufPrint(&name, "{d:0>6}.sst", .{number}), .{}),
-                    else => return err,
+                const handle = files.openRegularFile(self.dir, self.io, try std.mem.printSentinel(&name, "{d:0>6}.ldb", .{number}, 0)) catch |err| blk: {
+                    if (err != error.FileNotFound) return err;
+                    break :blk try files.openRegularFile(self.dir, self.io, try std.mem.printSentinel(&name, "{d:0>6}.sst", .{number}, 0));
                 };
                 source.table = try TableIterator.open(self.allocator, .{ .handle = handle, .io = self.io });
             }
@@ -515,6 +535,7 @@ pub const Writer = struct {
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, compression: Compression) !Writer {
         var self: Writer = .{ .allocator = allocator, .io = io, .dir = dir, .compression = compression };
+        errdefer self.deinit();
         self.window = try allocator.alloc(u8, flate.max_window_len);
         try self.edit.append(allocator, 1);
         try putSlice(&self.edit, allocator, "leveldb.BytewiseComparator");
@@ -602,6 +623,7 @@ pub const Writer = struct {
             self.compressed.clearRetainingCapacity();
             try self.compressed.ensureTotalCapacity(self.allocator, contents.len + 1024);
             var out: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &self.compressed);
+            errdefer self.compressed = out.toArrayList();
             var deflate = try flate.Compress.init(&out.writer, self.window, if (self.compression == .zlib) .zlib else .raw, .level_6);
             try deflate.writer.writeAll(contents);
             try deflate.finish();
@@ -692,11 +714,20 @@ test "a block that inflates past the limit is refused" {
     defer allocator.free(window);
     var deflate = try flate.Compress.init(&compressed.writer, window, .raw, .fastest);
     const zeros: [64 * 1024]u8 = @splat(0);
-    for (0..max_block / zeros.len + 1) |_| try deflate.writer.writeAll(&zeros);
+    for (0..max_block / zeros.len) |_| try deflate.writer.writeAll(&zeros);
+    try deflate.writer.writeAll(&.{0});
     try deflate.finish();
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(allocator);
     try std.testing.expectError(error.Corrupt, decompress(allocator, 4, compressed.written(), &out));
+}
+
+test "a block truncated inside its dynamic header is refused" {
+    // Zig 0.16 overflowed on this input instead of reporting EndOfStream.
+    const truncated = [_]u8{ 0x15, 0xd5, 0x07, 0x3b, 0x16, 0x0c, 0x03, 0x86, 0x61, 0x2b, 0xa3, 0xec, 0xec, 0x15, 0x95, 0x6c, 0x92, 0x4d, 0x19, 0x95, 0x4a, 0xb6, 0x22, 0x23, 0xc9 };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try std.testing.expectError(error.Corrupt, decompress(std.testing.allocator, 4, &truncated, &out));
 }
 
 test "log records span blocks and survive a round trip" {
@@ -719,4 +750,107 @@ test "log records span blocks and survive a round trip" {
     try std.testing.expectEqualSlices(u8, &big, (try reader.next(std.testing.allocator)).?);
     try std.testing.expectEqualStrings("after", (try reader.next(std.testing.allocator)).?);
     try std.testing.expectEqual(null, try reader.next(std.testing.allocator));
+}
+
+test "log records after every block padding length remain visible" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const handle = try tmp.dir.createFile(io, "padding", .{ .read = true });
+    defer handle.close(io);
+    const data = try allocator.alloc(u8, block_size);
+    defer allocator.free(data);
+    @memset(data, 'x');
+    for (0..7) |padding| {
+        try handle.setLength(io, 0);
+        var writer: LogWriter = .{ .file = .{ .handle = handle, .io = io } };
+        try writer.add(data[0 .. block_size - 7 - padding]);
+        try writer.add("after padding");
+        const bytes = try tmp.dir.readFileAlloc(io, "padding", allocator, .unlimited);
+        defer allocator.free(bytes);
+        var reader: LogReader = .{ .bytes = bytes };
+        defer reader.deinit(allocator);
+        try std.testing.expectEqualSlices(u8, data[0 .. block_size - 7 - padding], (try reader.next(allocator)).?);
+        try std.testing.expectEqualStrings("after padding", (try reader.next(allocator)).?);
+        try std.testing.expectEqual(null, try reader.next(allocator));
+        for (block_size - padding..block_size + 7) |end| {
+            var torn: LogReader = .{ .bytes = bytes[0..end], .at = block_size - padding };
+            defer torn.deinit(allocator);
+            try std.testing.expectEqual(null, try torn.next(allocator));
+        }
+    }
+}
+
+test "overflowing varints and invalid log sequences are rejected" {
+    var encoded: [10]u8 = @splat(0xff);
+    encoded[9] = 1;
+    var at: usize = 0;
+    try std.testing.expectEqual(std.math.maxInt(u64), try varint(&encoded, &at));
+    at = 0;
+    encoded[9] = 2;
+    try std.testing.expectError(error.Corrupt, varint(&encoded, &at));
+
+    var memos: std.ArrayListUnmanaged(Memo) = .empty;
+    defer memos.deinit(std.testing.allocator);
+    var batch: [12]u8 = @splat(0);
+    std.mem.writeInt(u64, batch[0..8], std.math.maxInt(u64), .little);
+    try std.testing.expectError(error.Corrupt, Reader.applyBatch(std.testing.allocator, &batch, &memos));
+    try std.testing.expectError(error.Corrupt, Reader.applyBatch(std.testing.allocator, &@as([13]u8, @splat(0)), &memos));
+}
+
+test "log checksum corruption is reported instead of ending the import" {
+    var bytes: [8]u8 = @splat(0);
+    bytes[4] = 1;
+    bytes[6] = 1;
+    var reader: LogReader = .{ .bytes = &bytes };
+    defer reader.deinit(std.testing.allocator);
+    try std.testing.expectError(error.ChecksumMismatch, reader.next(std.testing.allocator));
+}
+
+test "log fragment ordering is validated" {
+    for ([_][2]u8{ .{ 3, 1 }, .{ 4, 1 }, .{ 2, 1 }, .{ 2, 2 } }) |kinds| {
+        var bytes: [16]u8 = @splat(0);
+        for (kinds, 0..) |kind, i| {
+            const entry = bytes[i * 8 ..][0..8];
+            entry[4] = 1;
+            entry[6] = kind;
+            entry[7] = 'x';
+            std.mem.writeInt(u32, entry[0..4], mask(crc.hash(entry[6..8])), .little);
+        }
+        var reader: LogReader = .{ .bytes = &bytes };
+        defer reader.deinit(std.testing.allocator);
+        try std.testing.expectError(error.Corrupt, reader.next(std.testing.allocator));
+    }
+}
+
+test "parser scratch allocations are released" {
+    const edit = [_]u8{ 7, 0, 1, 0, 8 } ++ @as([8]u8, @splat(0)) ++ [_]u8{8} ++ @as([8]u8, @splat(0));
+    parse(std.testing.allocator, &edit);
+}
+
+test "files sharing a user key sort newer sequences first" {
+    var keys: [2][9]u8 = undefined;
+    for (&keys, 1..) |*key, sequence| {
+        key[0] = 'a';
+        std.mem.writeInt(u64, key[1..9], @as(u64, @intCast(sequence)) << 8 | 1, .little);
+    }
+    const older: FileMeta = .{ .level = 1, .number = 1, .smallest = &keys[0] };
+    const newer: FileMeta = .{ .level = 1, .number = 2, .smallest = &keys[1] };
+    try std.testing.expect(FileMeta.lessThan({}, newer, older));
+    try std.testing.expect(!FileMeta.lessThan({}, older, newer));
+}
+
+fn writeWithAllocator(allocator: std.mem.Allocator) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var writer = try Writer.init(allocator, std.testing.io, tmp.dir, .zlib_raw);
+    defer writer.deinit();
+    const value: [4096]u8 = @splat('a');
+    try writer.add("key", &value);
+    try writer.finish();
+}
+
+test "LevelDB writer cleans up allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, writeWithAllocator, .{});
 }

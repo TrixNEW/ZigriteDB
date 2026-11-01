@@ -27,7 +27,7 @@ fn chunkTag(tag: u8) bool {
 pub fn parseKey(bytes: []const u8) ?Key {
     if ((bytes.len == 12 or bytes.len == 16) and std.mem.eql(u8, bytes[0..4], "digp")) {
         const dim: i32 = if (bytes.len == 16) std.mem.readInt(i32, bytes[12..16], .little) else 0;
-        if (bytes.len == 16 and dim == 0) return null;
+        if ((bytes.len == 16 and dim == 0) or dim == aux.dimension) return null;
         return .{ .dimension = dim, .chunk_x = std.mem.readInt(i32, bytes[4..8], .little), .chunk_z = std.mem.readInt(i32, bytes[8..12], .little), .component = .actor_digest };
     }
     const with_dim = bytes.len == 13 or bytes.len == 14;
@@ -37,7 +37,7 @@ pub fn parseKey(bytes: []const u8) ?Key {
     const has_y = bytes.len == tag_at + 2;
     if (!chunkTag(tag) or has_y != (tag == @backingInt(Component.subchunk))) return null;
     const dim: i32 = if (with_dim) std.mem.readInt(i32, bytes[8..12], .little) else 0;
-    if (with_dim and dim == 0) return null;
+    if ((with_dim and dim == 0) or dim == aux.dimension) return null;
     return .{
         .dimension = dim,
         .chunk_x = std.mem.readInt(i32, bytes[0..4], .little),

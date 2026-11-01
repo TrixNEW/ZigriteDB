@@ -44,6 +44,7 @@ there as `u32 key length, key, u32 value length, value`, sorted by key.
 newest version per key) without changing it. Keys in Bedrock's exact chunk layout become
 chunk components with their bytes unchanged, `digp` included; everything else goes to the
 auxiliary keys as-is. Other world files such as `level.dat` are copied to `bedrock/`.
+Chunk-shaped keys using the reserved auxiliary dimension also stay raw.
 `zigrite export` writes them back with sorted LevelDB tables, a MANIFEST and CURRENT, so the
 result opens in Bedrock and PMMP without Zigrite. Both build the output under a temporary
 name and rename it into place only once complete and synced.
