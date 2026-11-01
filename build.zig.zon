@@ -2,7 +2,7 @@
     .name = .zigritedb,
     .version = "1.1.0",
     .fingerprint = 0xd895bd3f30b4e1af, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{},
     .paths = .{
         "build.zig",

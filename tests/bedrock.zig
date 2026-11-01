@@ -6,7 +6,7 @@ const io = testing.io;
 const leveldb = db.leveldb;
 
 fn chunkKey(x: i32, z: i32, dim: i32, tag: u8, y: ?i8, out: *[16]u8) []const u8 {
-    return db.bedrock.levelKey(.{ .dimension = dim, .chunk_x = x, .chunk_z = z, .component = @enumFromInt(tag), .subchunk_y = y orelse 0 }, out);
+    return db.bedrock.levelKey(.{ .dimension = dim, .chunk_x = x, .chunk_z = z, .component = @fromBackingInt(@intCast(tag)), .subchunk_y = y orelse 0 }, out);
 }
 
 const Expected = std.StringArrayHashMapUnmanaged([]const u8);

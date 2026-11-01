@@ -134,7 +134,7 @@ pub const Key = extern struct {
             .chunk_x = self.chunk_x,
             .chunk_z = self.chunk_z,
             .subchunk_y = self.subchunk_y,
-            .component = @enumFromInt(@as(u8, @intCast(self.component))),
+            .component = @fromBackingInt(@intCast(@as(u8, @intCast(self.component)))),
         };
         try result.validate();
         return result;
@@ -146,7 +146,7 @@ pub const Key = extern struct {
             .chunk_x = key.chunk_x,
             .chunk_z = key.chunk_z,
             .subchunk_y = key.subchunk_y,
-            .component = @intFromEnum(key.component),
+            .component = @backingInt(key.component),
         };
     }
 };
@@ -433,7 +433,7 @@ fn getChunk(
     if (result.count == 0) return .not_found;
     for (native[0..result.count], records.?[0..result.count]) |record, *target| {
         target.* = .{
-            .component = @intFromEnum(record.component),
+            .component = @backingInt(record.component),
             .subchunk_y = record.subchunk_y,
             .offset = @intFromPtr(record.value.ptr) - @intFromPtr(output.ptr),
             .length = record.value.len,
@@ -503,8 +503,8 @@ pub const StatsSnapshot = extern struct {
 pub export fn zg_stats_get(optional: ?*Handle, out: ?*StatsSnapshot) Status {
     const handle = optional orelse return .invalid_argument;
     const target = out orelse return .invalid_argument;
-    inline for (std.meta.fields(StatsSnapshot)) |field| {
-        @field(target, field.name) = @field(handle.stats, field.name).load(.monotonic);
+    inline for (@typeInfo(StatsSnapshot).@"struct".field_names) |name| {
+        @field(target, name) = @field(handle.stats, name).load(.monotonic);
     }
     return .ok;
 }
@@ -582,7 +582,7 @@ pub export fn zg_list_keys(optional: ?*Handle, dimension: i32, x: i32, z: i32, c
     const filter: db.KeyFilter = if (component == std.math.maxInt(u32))
         .{}
     else if (component <= std.math.maxInt(u8))
-        .only(&.{@enumFromInt(@as(u8, @intCast(component)))})
+        .only(&.{@fromBackingInt(@intCast(@as(u8, @intCast(component))))})
     else
         return .invalid_argument;
     const region: db.Region = .{ .dimension = dimension, .x = x, .z = z };

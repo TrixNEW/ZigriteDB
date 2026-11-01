@@ -35,14 +35,14 @@ pub fn parseKey(bytes: []const u8) ?Key {
     const tag_at: usize = if (with_dim) 12 else 8;
     const tag = bytes[tag_at];
     const has_y = bytes.len == tag_at + 2;
-    if (!chunkTag(tag) or has_y != (tag == @intFromEnum(Component.subchunk))) return null;
+    if (!chunkTag(tag) or has_y != (tag == @backingInt(Component.subchunk))) return null;
     const dim: i32 = if (with_dim) std.mem.readInt(i32, bytes[8..12], .little) else 0;
     if (with_dim and dim == 0) return null;
     return .{
         .dimension = dim,
         .chunk_x = std.mem.readInt(i32, bytes[0..4], .little),
         .chunk_z = std.mem.readInt(i32, bytes[4..8], .little),
-        .component = @enumFromInt(tag),
+        .component = @fromBackingInt(@intCast(tag)),
         .subchunk_y = if (has_y) @as(i8, @bitCast(bytes[tag_at + 1])) else 0,
     };
 }
@@ -61,7 +61,7 @@ pub fn levelKey(key: Key, out: *[16]u8) []const u8 {
         len += 4;
     }
     if (key.component == .actor_digest) return out[0..len];
-    out[len] = @intFromEnum(key.component);
+    out[len] = @backingInt(key.component);
     len += 1;
     if (key.component == .subchunk) {
         out[len] = @bitCast(@as(i8, @intCast(key.subchunk_y)));

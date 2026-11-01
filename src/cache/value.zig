@@ -27,7 +27,7 @@ fn hashKey(key: Key) u64 {
     const words = [3]u64{
         @as(u64, @as(u32, @bitCast(key.chunk_x))) | @as(u64, @as(u32, @bitCast(key.chunk_z))) << 32,
         @as(u64, @as(u32, @bitCast(key.dimension))) | @as(u64, @as(u32, @bitCast(key.subchunk_y))) << 32,
-        @intFromEnum(key.component),
+        @backingInt(key.component),
     };
     return std.hash.Wyhash.hash(0, std.mem.asBytes(&words));
 }

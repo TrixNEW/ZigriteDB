@@ -1,6 +1,6 @@
 # Native release checks
 
-Run on Linux with Zig 0.16.0, a C compiler and Python 3. Build the C API drivers
+Run on Linux with Zig 0.17.0, a C compiler and Python 3. Build the C API drivers
 and conversion tool, then run the model workload:
 
 ```sh

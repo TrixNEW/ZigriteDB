@@ -40,7 +40,7 @@ pub const Header = struct {
     }
 
     pub fn write(self: Header, bytes: *[header_len]u8) void {
-        const flags: u16 = @as(u16, self.slot) | @as(u16, @intFromBool(self.delete)) << 10 | @as(u16, @intFromEnum(self.compression)) << 11;
+        const flags: u16 = @as(u16, self.slot) | @as(u16, @intFromBool(self.delete)) << 10 | @as(u16, @backingInt(self.compression)) << 11;
         std.mem.writeInt(u16, bytes[0..2], flags, .little);
         bytes[2] = @truncate(self.local >> 8);
         bytes[3] = @as(u8, @truncate(self.local)) ^ 0x80;

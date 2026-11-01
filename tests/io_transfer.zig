@@ -3,7 +3,7 @@ const transfer = @import("zigritedb").storage.transfer;
 const testing = std.testing;
 
 const Device = struct {
-    bytes: [8]u8 = [_]u8{0} ** 8,
+    bytes: [8]u8 = @splat(0),
     step: usize = 2,
     fail_at: ?u64 = null,
     calls: usize = 0,
@@ -47,7 +47,7 @@ test "disk errors after a partial transfer are returned" {
     var device: Device = .{ .fail_at = 2 };
     try testing.expectError(error.NoSpaceLeft, transfer.writeAll(&device, "abcd", 0));
     try testing.expectEqualStrings("ab", device.bytes[0..2]);
-    var output = [_]u8{0xaa} ** 4;
+    var output: [4]u8 = @splat(0xaa);
     try testing.expectError(error.InputOutput, transfer.readExact(&device, &output, 0));
     try testing.expectEqualSlices(u8, &.{ 'a', 'b', 0xaa, 0xaa }, &output);
 }

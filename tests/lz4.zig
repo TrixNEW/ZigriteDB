@@ -38,7 +38,7 @@ test "compressed records survive reopen and compaction, and damaged streams fail
     const support = @import("support/region.zig");
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const raw = [_]u8{'x'} ** 1024;
+    const raw: [1024]u8 = @splat('x');
     {
         var store = try db.Store.create(testing.allocator, io, tmp.dir, support.region, .{ .batch_buffer_size = 2048 });
         defer store.deinit();

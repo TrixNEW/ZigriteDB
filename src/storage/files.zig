@@ -38,7 +38,7 @@ fn segmentName(buffer: []u8, generation: u64, id: u64) ![:0]u8 {
     if (generation == 0) return error.InvalidGeneration;
     if (id == 0) return error.InvalidSegmentId;
 
-    return std.fmt.bufPrintZ(buffer, "{x:0>16}-{x:0>16}.segment", .{ generation, id });
+    return std.mem.printSentinel(buffer, "{x:0>16}-{x:0>16}.segment", .{ generation, id }, 0);
 }
 
 fn openRegular(dir: std.Io.Dir, io: std.Io, name: [:0]const u8, writable: bool) !std.Io.File {

@@ -15,7 +15,7 @@ test "keys validate subchunk Y and reject it elsewhere" {
     try testing.expectError(error.InvalidSubchunkY, bad.validate());
     bad = .{ .dimension = 0, .chunk_x = 0, .chunk_z = 0, .component = .version, .subchunk_y = 1 };
     try testing.expectError(error.InvalidSubchunkY, bad.validate());
-    const unknown: db.Key = .{ .dimension = 0, .chunk_x = 0, .chunk_z = 0, .component = @enumFromInt(0x99) };
+    const unknown: db.Key = .{ .dimension = 0, .chunk_x = 0, .chunk_z = 0, .component = @fromBackingInt(@intCast(0x99)) };
     try unknown.validate();
 }
 

@@ -470,7 +470,7 @@ test "a region whose creation crashed before its manifest was published is rebui
             const dir = try regionDir(tmp.dir);
             defer dir.close(io);
             const segment_file = try dir.createFile(io, support.segment_name, .{});
-            const zeros = [_]u8{0} ** db.segment.encoded_len;
+            const zeros: [db.segment.encoded_len]u8 = @splat(0);
             try segment_file.writePositionalAll(io, zeros[0..segment_len], 0);
             segment_file.close(io);
             if (temporary) (try dir.createFile(io, "MANIFEST.tmp", .{})).close(io);
@@ -491,7 +491,7 @@ test "a region with records but no manifest is never discarded" {
     const dir = try regionDir(tmp.dir);
     defer dir.close(io);
     const segment_file = try dir.createFile(io, support.segment_name, .{});
-    const bytes = [_]u8{1} ** (db.segment.encoded_len + 1);
+    const bytes: [db.segment.encoded_len + 1]u8 = @splat(1);
     try segment_file.writePositionalAll(io, &bytes, 0);
     segment_file.close(io);
 

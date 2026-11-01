@@ -56,12 +56,12 @@ pub const KeyFilter = struct {
 
     pub fn only(components: []const Component) KeyFilter {
         var filter: KeyFilter = .{ .components = @splat(0) };
-        for (components) |c| filter.components[@intFromEnum(c) >> 5] |= @as(u32, 1) << @intCast(@intFromEnum(c) & 31);
+        for (components) |c| filter.components[@backingInt(c) >> 5] |= @as(u32, 1) << @intCast(@backingInt(c) & 31);
         return filter;
     }
 
     pub fn matches(self: KeyFilter, key: Key) bool {
-        const c = @intFromEnum(key.component);
+        const c = @backingInt(key.component);
         return self.components[c >> 5] & (@as(u32, 1) << @intCast(c & 31)) != 0 and
             key.chunk_x >= self.min_chunk_x and key.chunk_x <= self.max_chunk_x and
             key.chunk_z >= self.min_chunk_z and key.chunk_z <= self.max_chunk_z;
@@ -111,7 +111,7 @@ pub const Key = struct {
     }
 
     pub fn fromLocal(region_: Region, chunk_slot: u10, value: u16) Key {
-        const component: Component = @enumFromInt(value >> 8);
+        const component: Component = @fromBackingInt(@intCast(value >> 8));
         const y: i8 = @bitCast(@as(u8, @truncate(value)) ^ 0x80);
         return .{
             .dimension = region_.dimension,
@@ -124,7 +124,7 @@ pub const Key = struct {
 };
 
 pub fn localKey(component: Component, y: i8) u16 {
-    return @as(u16, @intFromEnum(component)) << 8 | (@as(u8, @bitCast(y)) ^ 0x80);
+    return @as(u16, @backingInt(component)) << 8 | (@as(u8, @bitCast(y)) ^ 0x80);
 }
 
 test "region and slot use floor division for negative coordinates" {

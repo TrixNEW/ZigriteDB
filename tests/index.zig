@@ -88,7 +88,7 @@ test "subchunk Y and components never collide, and keys come back sorted" {
         .{ .component = .subchunk, .y = -128, .value = "low" },
         .{ .component = .subchunk, .y = 127, .value = "high" },
         .{ .component = .data3d, .value = "d" },
-        .{ .component = @enumFromInt(0xfe), .value = "unknown" },
+        .{ .component = @fromBackingInt(@intCast(0xfe)), .value = "unknown" },
     }), 0);
     try testing.expectEqual(@as(u32, 6), index.count);
     for ([_]i8{ 1, -1, -128, 127 }) |y| try testing.expect(lookup(&index, 0, .subchunk, y) != null);
@@ -100,7 +100,7 @@ test "subchunk Y and components never collide, and keys come back sorted" {
     const ys = [_]i32{ -128, -1, 1, 127 };
     try testing.expectEqual(db.Component.data3d, list.items[0].component);
     for (list.items[1..5], ys) |k, y| try testing.expectEqual(y, k.subchunk_y);
-    try testing.expectEqual(@as(u8, 0xfe), @intFromEnum(list.items[5].component));
+    try testing.expectEqual(@as(u8, 0xfe), @backingInt(list.items[5].component));
 }
 
 test "negative regions map chunks to slots 0..1023" {

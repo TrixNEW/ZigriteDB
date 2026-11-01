@@ -28,7 +28,7 @@ pub const Location = struct {
 };
 
 pub fn fingerprint(compression: record.Compression, stored: []const u8) u32 {
-    return @truncate(std.hash.Wyhash.hash(@intFromEnum(compression), stored));
+    return @truncate(std.hash.Wyhash.hash(@backingInt(compression), stored));
 }
 
 /// One chunk's sorted components; keys and locations share one allocation.

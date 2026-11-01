@@ -16,7 +16,7 @@ const V1 = struct {
     }
 
     fn segment(self: *V1, id: u64) !void {
-        var header = [_]u8{0} ** 48;
+        var header: [48]u8 = @splat(0);
         @memcpy(header[0..4], "ZGSG");
         std.mem.writeInt(u16, header[4..6], 1, .little);
         std.mem.writeInt(u64, header[8..16], id, .little);
@@ -28,7 +28,7 @@ const V1 = struct {
     }
 
     fn recordHeader(kind: u8, compression: u8, stored: u32, raw: u32, id: u64) [32]u8 {
-        var header = [_]u8{0} ** 32;
+        var header: [32]u8 = @splat(0);
         @memcpy(header[0..4], "ZGRC");
         header[4] = 1;
         header[5] = kind;
@@ -79,7 +79,7 @@ const V1 = struct {
 };
 
 fn writeManifest(dir: std.Io.Dir, ids: []const u64) !void {
-    var bytes: [48 + 16 + 4]u8 = [_]u8{0} ** (48 + 16 + 4);
+    var bytes: [48 + 16 + 4]u8 = @splat(0);
     const len = 48 + ids.len * 8 + 4;
     @memcpy(bytes[0..4], "ZGMF");
     std.mem.writeInt(u16, bytes[4..6], 1, .little);

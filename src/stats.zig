@@ -24,8 +24,8 @@ pub const Stats = struct {
 
     /// Call only when the handle is idle.
     pub fn reset(self: *Stats) void {
-        inline for (std.meta.fields(Stats)) |field| {
-            @field(self, field.name).store(0, .monotonic);
+        inline for (@typeInfo(Stats).@"struct".field_names) |name| {
+            @field(self, name).store(0, .monotonic);
         }
     }
 };
@@ -38,7 +38,7 @@ test "reset zeroes every counter even while a concurrent op is mid-flight" {
 
     stats.reset();
 
-    inline for (std.meta.fields(Stats)) |field| {
-        try std.testing.expectEqual(@as(u64, 0), @field(stats, field.name).load(.monotonic));
+    inline for (@typeInfo(Stats).@"struct".field_names) |name| {
+        try std.testing.expectEqual(@as(u64, 0), @field(stats, name).load(.monotonic));
     }
 }

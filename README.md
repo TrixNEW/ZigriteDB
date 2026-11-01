@@ -38,7 +38,7 @@ The on-disk layout is described in [docs/format.md](docs/format.md).
 
 ## Build
 
-Requires **Zig 0.16.0** and **Linux** for storage operations.
+Requires **Zig 0.17.0** and **Linux** for storage operations.
 
 ```sh
 zig build -Doptimize=ReleaseSafe

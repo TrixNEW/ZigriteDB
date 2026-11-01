@@ -30,7 +30,7 @@ pub const Header = struct {
     pub fn write(self: Header, salt: u64, bytes: *[header_len]u8) void {
         std.mem.writeInt(u32, bytes[0..4], self.body_len, .little);
         std.mem.writeInt(u16, bytes[4..6], self.count, .little);
-        bytes[6] = @intFromEnum(self.kind);
+        bytes[6] = @backingInt(self.kind);
         bytes[7] = 0;
         std.mem.writeInt(u64, bytes[8..16], self.batch_id, .little);
         std.mem.writeInt(u32, bytes[16..20], self.body_crc, .little);

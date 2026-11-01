@@ -106,7 +106,7 @@ pub const LogWriter = struct {
         while (true) {
             const left_in_block = block_size - self.offset % block_size;
             if (left_in_block < 7) {
-                const zeros = [_]u8{0} ** 7;
+                const zeros: [7]u8 = @splat(0);
                 try self.file.writeAll(zeros[0..@intCast(left_in_block)], self.offset);
                 self.offset += left_in_block;
                 continue;
@@ -608,7 +608,7 @@ pub const Writer = struct {
             self.compressed = out.toArrayList();
             // LevelDB's rule: keep it raw unless it saves an eighth.
             if (self.compressed.items.len < contents.len - contents.len / 8) {
-                kind = @intFromEnum(self.compression);
+                kind = @backingInt(self.compression);
                 data = self.compressed.items;
             }
         }

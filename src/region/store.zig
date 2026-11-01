@@ -803,27 +803,14 @@ pub const Store = struct {
 
         const handle = try files.createSegment(self.directory.dir, self.io, generation.index.generation, id);
         const device: File = .{ .handle = handle, .io = self.io };
-        errdefer handle.close(self.io);
         // The manifest may name the file once publishing starts.
         var publishing = false;
-        errdefer |err| {
+        self.publishSegment(device, id, &publishing) catch |err| {
             const removed = !publishing and if (files.removeSegment(self.directory.dir, self.io, generation.index.generation, id)) true else |_| false;
             if (!removed or (err != error.NoSpaceLeft and err != error.DiskQuota)) self.failed = true;
-        }
-        const header = try (segment.Header{ .segment_id = id, .generation = generation.index.generation, .region = self.region, .salt = self.salt }).encode();
-        try device.writeAll(&header, 0);
-        try device.sync();
-
-        generation.segment_ids[generation.count] = id;
-        var buffer: [manifest.max_encoded_len]u8 = undefined;
-        const bytes = try self.manifestBytes(&buffer, generation.index.generation, generation.segment_ids[0 .. generation.count + 1], self.base_batch_id);
-        {
-            lock.lockUncancelable(&self.directory_mutex, self.io);
-            defer self.directory_mutex.unlock(self.io);
-            var publisher: publication.Publisher(*Directory) = .{ .backend = &self.directory };
-            publishing = true;
-            try publisher.publish(bytes);
-        }
+            handle.close(self.io);
+            return err;
+        };
         {
             self.table.lockUncancelable(self.io);
             defer self.table.unlock(self.io);
@@ -835,6 +822,22 @@ pub const Store = struct {
         self.synced_offset = segment.encoded_len;
         self.epoch += 1;
         if (self.options.stats) |s| _ = s.segment_rotations.fetchAdd(1, .monotonic);
+    }
+
+    fn publishSegment(self: *Store, device: File, id: u64, publishing: *bool) !void {
+        const generation = self.generation;
+        const header = try (segment.Header{ .segment_id = id, .generation = generation.index.generation, .region = self.region, .salt = self.salt }).encode();
+        try device.writeAll(&header, 0);
+        try device.sync();
+
+        generation.segment_ids[generation.count] = id;
+        var buffer: [manifest.max_encoded_len]u8 = undefined;
+        const bytes = try self.manifestBytes(&buffer, generation.index.generation, generation.segment_ids[0 .. generation.count + 1], self.base_batch_id);
+        lock.lockUncancelable(&self.directory_mutex, self.io);
+        defer self.directory_mutex.unlock(self.io);
+        var publisher: publication.Publisher(*Directory) = .{ .backend = &self.directory };
+        publishing.* = true;
+        try publisher.publish(bytes);
     }
 
     fn manifestBytes(self: *Store, buffer: []u8, generation: u64, ids: []const u64, base: u64) ![]u8 {

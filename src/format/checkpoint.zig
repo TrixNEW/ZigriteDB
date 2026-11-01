@@ -68,7 +68,7 @@ pub const Header = struct {
 pub fn writeEntry(bytes: []u8, local: u16, location: Location, fingerprints: bool) void {
     std.mem.writeInt(u16, bytes[0..2], local, .little);
     bytes[2] = location.segment;
-    bytes[3] = @intFromEnum(location.compression);
+    bytes[3] = @backingInt(location.compression);
     std.mem.writeInt(u32, bytes[4..8], location.offset, .little);
     std.mem.writeInt(u32, bytes[8..12], location.stored_len, .little);
     std.mem.writeInt(u32, bytes[12..16], location.raw_len, .little);
@@ -78,7 +78,7 @@ pub fn writeEntry(bytes: []u8, local: u16, location: Location, fingerprints: boo
 
 pub fn readEntry(bytes: []const u8, fingerprints: bool) !struct { u16, Location } {
     if (bytes[3] > 1) return error.InvalidFlags;
-    const compression: record.Compression = @enumFromInt(bytes[3]);
+    const compression: record.Compression = @fromBackingInt(@intCast(bytes[3]));
     const location: Location = .{
         .segment = bytes[2],
         .compression = compression,

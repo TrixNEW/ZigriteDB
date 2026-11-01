@@ -98,7 +98,7 @@ fn indexBench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer) !vo
     defer allocator.free(keys);
     for (0..1024) |slot| {
         for (0..per_chunk) |c| {
-            const local = if (c < 24) db.key.localKey(.subchunk, @intCast(@as(i32, @intCast(c)) - 4)) else db.key.localKey(@enumFromInt(0x31 + c - 24), 0);
+            const local = if (c < 24) db.key.localKey(.subchunk, @intCast(@as(i32, @intCast(c)) - 4)) else db.key.localKey(@fromBackingInt(@intCast(0x31 + c - 24)), 0);
             keys[slot * per_chunk + c] = .{ .slot = @intCast(slot), .local = local };
         }
     }

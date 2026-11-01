@@ -24,7 +24,7 @@ fn bucket(key: []const u8) Key {
         .dimension = dimension,
         .chunk_x = @as(i32, @intCast(h & 3)) * 32 + @mod(slot, 32),
         .chunk_z = @as(i32, @intCast((h >> 2) & 3)) * 32 + @divFloor(slot, 32),
-        .component = @enumFromInt(@as(u8, @intCast((h >> 14) & 63))),
+        .component = @fromBackingInt(@intCast(@as(u8, @intCast((h >> 14) & 63)))),
     };
 }
 
