@@ -1,6 +1,5 @@
 const std = @import("std");
 
-/// Errors may leave `buffer` partially filled
 pub fn readExact(device: anytype, buffer: []u8, offset: u64) !void {
     try checkRange(offset, buffer.len);
 
@@ -17,7 +16,6 @@ pub fn readExact(device: anytype, buffer: []u8, offset: u64) !void {
     }
 }
 
-/// Errors may leave a partial write on disk
 pub fn writeAll(device: anytype, bytes: []const u8, offset: u64) !void {
     try checkRange(offset, bytes.len);
 

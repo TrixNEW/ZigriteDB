@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
         .name = "zigritedb_native",
         .linkage = .dynamic,
         .root_module = native_module,
-        .version = .{ .major = 3, .minor = 1, .patch = 0 },
+        .version = .{ .major = 3, .minor = 2, .patch = 0 },
     });
     b.installArtifact(native);
     b.installFile("include/zigritedb.h", "include/zigritedb.h");
@@ -67,7 +67,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "zigritedb", .module = module }},
     });
     const micro = b.addRunArtifact(b.addExecutable(.{ .name = "micro", .root_module = micro_module }));
-    if (b.args) |args| micro.addArgs(args);
+    micro.addPassthruArgs();
     b.step("micro", "Run component micro-benchmarks").dependOn(&micro.step);
 
     const unit_tests = b.addTest(.{ .root_module = module });

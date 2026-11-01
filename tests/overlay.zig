@@ -22,6 +22,18 @@ test "overlay reads fall through to the base, tombstones hide it and reset disca
 
     var overlay = try db.OverlayWorld.open(testing.allocator, io, &base, tmp.dir, "arena", .{});
     defer overlay.deinit();
+    {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        overlay.allocator = failing.allocator();
+        defer overlay.allocator = testing.allocator;
+        var invalid = key(0);
+        invalid.subchunk_y = 1;
+        try testing.expectError(error.InvalidSubchunkY, overlay.write(&.{.put(invalid, "bad")}));
+        try testing.expectError(error.EmptyBatch, overlay.write(&.{}));
+        overlay.overlay.options.region.batch_buffer_size = 40;
+        defer overlay.overlay.options.region.batch_buffer_size = overlay.options.region.batch_buffer_size;
+        try testing.expectError(error.BufferTooSmall, overlay.write(&.{put(0, "large")}));
+    }
     var output: [16384]u8 = undefined;
 
     try overlay.write(&.{ put(0, "mine"), put(1, null), put(3, &big) });

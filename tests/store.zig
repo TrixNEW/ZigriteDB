@@ -1017,6 +1017,29 @@ test "skip_unchanged preserves changes across a group and rejects a failed write
     try testing.expectError(error.WriterFailed, reopened.close());
 }
 
+test "skip_unchanged handles mixed lengths and repeated keys after a skipped record" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const options: db.store.Options = .{ .skip_unchanged = true, .compression_threshold = 0 };
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, options);
+    defer store.deinit();
+    _ = try store.write(batch(1, &.{ put(0, "same"), put(1, "old"), put(2, "before") }));
+    _ = try store.write(batch(2, &.{
+        put(0, "same"),
+        put(1, "a longer replacement that crosses the skipped record"),
+        put(2, "after"),
+        put(1, "old"),
+    }));
+    try store.close();
+    var reopened = try db.Store.open(testing.allocator, io, tmp.dir, options);
+    defer reopened.deinit();
+    var output: [80]u8 = undefined;
+    try testing.expectEqualStrings("same", (try reopened.get(key(0), &output)).?);
+    try testing.expectEqualStrings("old", (try reopened.get(key(1), &output)).?);
+    try testing.expectEqualStrings("after", (try reopened.get(key(2), &output)).?);
+    try reopened.close();
+}
+
 test "stats count gets, writes, bytes and real reads only" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

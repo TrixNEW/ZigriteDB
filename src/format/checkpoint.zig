@@ -1,14 +1,17 @@
 const std = @import("std");
 const crc = @import("crc.zig");
 const index_module = @import("../index/index.zig");
+const lz4 = @import("../compression/lz4.zig");
 const Location = index_module.Location;
 const record = @import("record.zig");
 
 // Index snapshot written on clean close. Never synced; ignored on any mismatch.
 pub const name = "INDEX";
 pub const header_len = 64;
-pub const version = 1;
+pub const version = 2;
 pub const entry_len = 24;
+pub const block_len = 16 * 1024;
+pub const block_header_len = 8;
 
 pub const Header = struct {
     fingerprints: bool,
@@ -56,8 +59,8 @@ pub const Header = struct {
         };
     }
 
-    pub fn len(self: Header) usize {
-        return header_len + @as(usize, self.segments) * 8 + 1024 * 2 + @as(usize, self.entries) * self.entryLen() + 4;
+    pub fn bodyLen(self: Header) usize {
+        return @as(usize, self.segments) * 8 + 1024 * 2 + @as(usize, self.entries) * self.entryLen();
     }
 
     pub fn entryLen(self: Header) usize {
@@ -65,10 +68,45 @@ pub const Header = struct {
     }
 };
 
+pub fn maxFileLen(body_len: usize) usize {
+    return header_len + body_len + (body_len / (block_len - 28) + 2) * block_header_len + 4;
+}
+
+pub fn inflate(blocks: []const u8, output: []u8) !void {
+    var at: usize = 0;
+    var written: usize = 0;
+    while (at < blocks.len) {
+        if (blocks.len - at < block_header_len) return error.InvalidLength;
+        const raw_len = std.mem.readInt(u32, blocks[at..][0..4], .little);
+        const stored = std.mem.readInt(u32, blocks[at + 4 ..][0..4], .little);
+        at += block_header_len;
+        if (raw_len == 0 or raw_len > block_len or stored == 0 or stored > raw_len or stored > blocks.len - at or raw_len > output.len - written)
+            return error.InvalidLength;
+        const piece = blocks[at..][0..stored];
+        const target = output[written..][0..raw_len];
+        if (stored == raw_len) @memcpy(target, piece) else _ = try lz4.decompress(piece, target, raw_len);
+        at += stored;
+        written += raw_len;
+    }
+    if (written != output.len) return error.InvalidLength;
+}
+
+test "inflate refuses blocks that don't fill the body exactly" {
+    var output: [8]u8 = undefined;
+    const raw = [_]u8{ 8, 0, 0, 0, 8, 0, 0, 0 } ++ "abcdefgh".*;
+    try inflate(&raw, &output);
+    try std.testing.expectEqualStrings("abcdefgh", &output);
+    try std.testing.expectError(error.InvalidLength, inflate(&raw, output[0..7]));
+    try std.testing.expectError(error.InvalidLength, inflate(raw[0..12], &output));
+    try std.testing.expectError(error.InvalidLength, inflate(&([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }), &output));
+    try std.testing.expectError(error.InvalidLength, inflate(&([_]u8{ 8, 0, 0, 0, 9, 0, 0, 0 } ++ "abcdefghi".*), &output));
+    try std.testing.expectError(error.InvalidCompressedData, inflate(&([_]u8{ 8, 0, 0, 0, 2, 0, 0, 0, 0xf0, 0 }), &output));
+}
+
 pub fn writeEntry(bytes: []u8, local: u16, location: Location, fingerprints: bool) void {
     std.mem.writeInt(u16, bytes[0..2], local, .little);
     bytes[2] = location.segment;
-    bytes[3] = @intFromEnum(location.compression);
+    bytes[3] = @backingInt(location.compression);
     std.mem.writeInt(u32, bytes[4..8], location.offset, .little);
     std.mem.writeInt(u32, bytes[8..12], location.stored_len, .little);
     std.mem.writeInt(u32, bytes[12..16], location.raw_len, .little);
@@ -77,8 +115,11 @@ pub fn writeEntry(bytes: []u8, local: u16, location: Location, fingerprints: boo
 }
 
 pub fn readEntry(bytes: []const u8, fingerprints: bool) !struct { u16, Location } {
+    if (bytes.len < entry_len + @as(usize, if (fingerprints) 4 else 0)) return error.InvalidLength;
     if (bytes[3] > 1) return error.InvalidFlags;
-    const compression: record.Compression = @enumFromInt(bytes[3]);
+    const local = std.mem.readInt(u16, bytes[0..2], .little);
+    if (local >> 8 != 0x2f and local & 0xff != 0x80) return error.InvalidFlags;
+    const compression: record.Compression = @fromBackingInt(@intCast(bytes[3]));
     const location: Location = .{
         .segment = bytes[2],
         .compression = compression,
@@ -94,5 +135,5 @@ pub fn readEntry(bytes: []const u8, fingerprints: bool) !struct { u16, Location 
         .lz4 => location.stored_len != 0 and location.stored_len < location.raw_len,
     };
     if (!valid) return error.InvalidLength;
-    return .{ std.mem.readInt(u16, bytes[0..2], .little), location };
+    return .{ local, location };
 }

@@ -23,11 +23,10 @@ fn chunkTag(tag: u8) bool {
     return (tag >= 0x2b and tag <= 0x41) or tag == 0x76;
 }
 
-/// Exact Bedrock layout only, so mapping back is lossless.
 pub fn parseKey(bytes: []const u8) ?Key {
     if ((bytes.len == 12 or bytes.len == 16) and std.mem.eql(u8, bytes[0..4], "digp")) {
         const dim: i32 = if (bytes.len == 16) std.mem.readInt(i32, bytes[12..16], .little) else 0;
-        if (bytes.len == 16 and dim == 0) return null;
+        if ((bytes.len == 16 and dim == 0) or dim == aux.dimension) return null;
         return .{ .dimension = dim, .chunk_x = std.mem.readInt(i32, bytes[4..8], .little), .chunk_z = std.mem.readInt(i32, bytes[8..12], .little), .component = .actor_digest };
     }
     const with_dim = bytes.len == 13 or bytes.len == 14;
@@ -35,14 +34,14 @@ pub fn parseKey(bytes: []const u8) ?Key {
     const tag_at: usize = if (with_dim) 12 else 8;
     const tag = bytes[tag_at];
     const has_y = bytes.len == tag_at + 2;
-    if (!chunkTag(tag) or has_y != (tag == @intFromEnum(Component.subchunk))) return null;
+    if (!chunkTag(tag) or has_y != (tag == @backingInt(Component.subchunk))) return null;
     const dim: i32 = if (with_dim) std.mem.readInt(i32, bytes[8..12], .little) else 0;
-    if (with_dim and dim == 0) return null;
+    if ((with_dim and dim == 0) or dim == aux.dimension) return null;
     return .{
         .dimension = dim,
         .chunk_x = std.mem.readInt(i32, bytes[0..4], .little),
         .chunk_z = std.mem.readInt(i32, bytes[4..8], .little),
-        .component = @enumFromInt(tag),
+        .component = @fromBackingInt(@intCast(tag)),
         .subchunk_y = if (has_y) @as(i8, @bitCast(bytes[tag_at + 1])) else 0,
     };
 }
@@ -61,7 +60,7 @@ pub fn levelKey(key: Key, out: *[16]u8) []const u8 {
         len += 4;
     }
     if (key.component == .actor_digest) return out[0..len];
-    out[len] = @intFromEnum(key.component);
+    out[len] = @backingInt(key.component);
     len += 1;
     if (key.component == .subchunk) {
         out[len] = @bitCast(@as(i8, @intCast(key.subchunk_y)));
@@ -108,8 +107,18 @@ pub fn import(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, sour
         try batch.flush(&world);
         try world.close();
     }
+    try compactAll(allocator, io, staged.dir);
     try staged.publish();
     return result;
+}
+
+fn compactAll(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !void {
+    var world = try World.open(allocator, io, dir, .{});
+    defer world.deinit();
+    const regions = try world.regions(allocator);
+    defer allocator.free(regions);
+    for (regions) |region| _ = try world.compact(region);
+    try world.close();
 }
 
 const Pending = struct {
@@ -212,7 +221,6 @@ pub fn exportWorld(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir,
                     result.chunk_records += 1;
                     break :blk (try world.get(key, value.items)).?;
                 },
-                // Aux keys point into their bucket, still held by the arena.
                 .aux => blk: {
                     result.aux_records += 1;
                     break :blk auxValue(item.key);

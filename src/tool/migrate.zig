@@ -1,4 +1,3 @@
-//! One-time conversion of format 1 worlds.
 const std = @import("std");
 
 const crc = @import("../format/crc.zig");
@@ -11,6 +10,10 @@ const write_module = @import("../batch/write.zig");
 const world_module = @import("../world/world.zig");
 const World = world_module.World;
 const stage = @import("stage.zig");
+const frame = @import("../format/frame.zig");
+const record = @import("../format/record.zig");
+const index = @import("../index/index.zig");
+const files = @import("../storage/files.zig");
 
 pub const Result = struct {
     regions: usize = 0,
@@ -31,7 +34,6 @@ pub fn component(old: u8) !Component {
     };
 }
 
-/// The source is only read; the destination appears once complete.
 pub fn migrate(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, source: []const u8, destination: []const u8) !Result {
     const input = try parent.openDir(io, source, .{ .iterate = true, .follow_symlinks = false });
     defer input.close(io);
@@ -44,6 +46,7 @@ pub fn migrate(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, sou
         defer world.deinit();
         var iterator = input.iterate();
         while (try iterator.next(io)) |entry| {
+            if (World.parseRegionName(entry.name) != null and entry.kind != .directory) return error.NotDir;
             if (entry.kind == .directory) {
                 if (World.parseRegionName(entry.name) == null) continue;
                 const dir = try input.openDir(io, entry.name, .{ .follow_symlinks = false });
@@ -66,26 +69,31 @@ const commit_len = 80;
 const max_bytes = 64 * 1024 * 1024;
 
 fn migrateRegion(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, world: *World, result: *Result) !void {
-    const manifest = try dir.readFileAlloc(io, "MANIFEST", allocator, .limited(48 + 4096 * 8 + 4));
+    const manifest = try files.readRegularAlloc(dir, io, "MANIFEST", allocator, 48 + 4096 * 8 + 4);
     defer allocator.free(manifest);
     if (manifest.len < 52 or !std.mem.eql(u8, manifest[0..4], "ZGMF")) return error.InvalidMagic;
     if (std.mem.readInt(u16, manifest[4..6], .little) != 1) return error.UnsupportedVersion;
     if (std.mem.readInt(u32, manifest[44..48], .little) != crc.hash(manifest[0..44])) return error.ChecksumMismatch;
     if (std.mem.readInt(u32, manifest[manifest.len - 4 ..][0..4], .little) != crc.hash(manifest[0 .. manifest.len - 4])) return error.ChecksumMismatch;
     const generation = std.mem.readInt(u64, manifest[8..16], .little);
+    if (generation == 0) return error.InvalidGeneration;
     const region: Region = .{
         .dimension = std.mem.readInt(i32, manifest[16..20], .little),
         .x = std.mem.readInt(i32, manifest[20..24], .little),
         .z = std.mem.readInt(i32, manifest[24..28], .little),
     };
     const count = std.mem.readInt(u32, manifest[28..32], .little);
-    if (manifest.len != 48 + count * 8 + 4 or count == 0) return error.InvalidLength;
+    if (count == 0 or count > 4096 or manifest.len != 48 + @as(usize, count) * 8 + 4) return error.InvalidLength;
+    try region.validate();
 
     var last_id: u64 = 0;
+    var previous: u64 = 0;
     for (0..count) |i| {
         const id = std.mem.readInt(u64, manifest[48 + i * 8 ..][0..8], .little);
+        if (id == 0 or id <= previous) return error.InvalidSegmentOrder;
+        previous = id;
         var name: [48]u8 = undefined;
-        const bytes = try dir.readFileAlloc(io, try std.fmt.bufPrint(&name, "{x:0>16}-{x:0>16}.segment", .{ generation, id }), allocator, .unlimited);
+        const bytes = try files.readRegularAlloc(dir, io, try std.mem.printSentinel(&name, "{x:0>16}-{x:0>16}.segment", .{ generation, id }, 0), allocator, index.max_segment_size);
         defer allocator.free(bytes);
         try checkSegment(bytes, generation, id, region);
         var reader: Reader = .{ .bytes = bytes, .offset = 48, .region = region };
@@ -97,7 +105,6 @@ fn migrateRegion(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, worl
             result.records += batch.entries.len;
         }
         if (reader.offset != bytes.len) {
-            // Only the active segment may end in a torn batch.
             if (i != count - 1) return error.IncompleteBatch;
             result.omitted_tail_bytes += bytes.len - reader.offset;
         }
@@ -114,7 +121,6 @@ fn checkSegment(bytes: []const u8, generation: u64, id: u64, region: Region) !vo
     if (!same) return error.IdentityMismatch;
 }
 
-/// Stops at a torn or damaged tail.
 const Reader = struct {
     bytes: []const u8,
     offset: usize,
@@ -139,6 +145,7 @@ const Reader = struct {
         var sha = std.crypto.hash.sha2.Sha256.init(.{});
         var batch_id: u64 = 0;
         var count: u32 = 0;
+        var raw_bytes: usize = 0;
         while (true) {
             if (self.bytes.len - at < record_len) return self.tail(allocator);
             const header = self.bytes[at..][0..record_len];
@@ -163,7 +170,14 @@ const Reader = struct {
             if (kind != 1 and kind != 2) return self.tail(allocator);
             const stored = std.mem.readInt(u32, header[8..12], .little);
             const raw = std.mem.readInt(u32, header[12..16], .little);
+            if (stored > lz4.max_size or raw > lz4.max_size or count == frame.max_records or at - self.offset > max_bytes)
+                return error.BatchTooLarge;
+            if (kind == 2 and (stored != 0 or raw != 0 or header[6] != 0)) return error.InvalidLength;
+            if (kind == 1 and header[6] == 0 and stored != raw) return error.InvalidLength;
             const len = record_len + key_len + @as(usize, stored) + 4;
+            if (len > max_bytes - (at - self.offset)) return error.BatchTooLarge;
+            raw_bytes += @as(usize, raw) + record.overhead;
+            if (raw_bytes > max_bytes) return error.BatchTooLarge;
             if (self.bytes.len - at < len) return self.tail(allocator);
             const bytes = self.bytes[at..][0..len];
             if (std.mem.readInt(u32, bytes[len - 4 ..][0..4], .little) != crc.hash(bytes[0 .. len - 4])) return self.tail(allocator);
@@ -185,7 +199,10 @@ const Reader = struct {
                 0 => stored_value,
                 1 => blk: {
                     const buffer = try allocator.alloc(u8, raw);
-                    try self.values.append(allocator, buffer);
+                    self.values.append(allocator, buffer) catch |err| {
+                        allocator.free(buffer);
+                        return err;
+                    };
                     break :blk try lz4.decompress(stored_value, buffer, raw);
                 },
                 else => return error.UnsupportedCompression,
@@ -202,3 +219,32 @@ const Reader = struct {
         return null;
     }
 };
+
+fn readWithAllocator(allocator: std.mem.Allocator, raw_len: u32) !void {
+    const raw: [128]u8 = @splat('a');
+    var packed_bytes: [160]u8 = undefined;
+    var encoder: lz4.Encoder = .{};
+    const compressed = try encoder.compress(&raw, &packed_bytes);
+    var bytes: [256]u8 = @splat(0);
+    @memcpy(bytes[0..4], "ZGRC");
+    bytes[4] = 1;
+    bytes[5] = 1;
+    bytes[6] = 1;
+    std.mem.writeInt(u32, bytes[8..12], @intCast(compressed.len), .little);
+    std.mem.writeInt(u32, bytes[12..16], raw_len, .little);
+    std.mem.writeInt(u64, bytes[16..24], 1, .little);
+    std.mem.writeInt(u32, bytes[28..32], crc.hash(bytes[0..28]), .little);
+    bytes[record_len + 12] = 5;
+    const end = record_len + key_len + compressed.len;
+    @memcpy(bytes[record_len + key_len .. end], compressed);
+    std.mem.writeInt(u32, bytes[end..][0..4], crc.hash(bytes[0..end]), .little);
+    var reader: Reader = .{ .bytes = bytes[0 .. end + 4], .offset = 0, .region = .{ .dimension = 0, .x = 0, .z = 0 } };
+    defer reader.deinit(allocator);
+    var last_id: u64 = 0;
+    _ = try reader.next(allocator, &last_id);
+}
+
+test "migration bounds decompression and cleans up allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, readWithAllocator, .{128});
+    try std.testing.expectError(error.BatchTooLarge, readWithAllocator(std.testing.allocator, std.math.maxInt(u32)));
+}

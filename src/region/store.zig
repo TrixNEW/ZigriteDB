@@ -36,15 +36,12 @@ pub const Options = struct {
     max_keys: u32 = 65536,
     max_segments: usize = 64,
     max_segment_size: u64 = 256 * 1024 * 1024,
-    /// Largest uncompressed frame.
     batch_buffer_size: usize = 1024 * 1024,
     durability: Durability = .buffered,
-    /// 0 disables compression.
     compression_threshold: u32 = 256,
     stats: ?*Stats = null,
     cache: ?*Cache = null,
     skip_unchanged: bool = false,
-    // Ask for compaction once live data drops below this share of a store this big.
     compact_min_bytes: u64 = 16 * 1024 * 1024,
     compact_live_percent: u8 = 50,
 
@@ -190,7 +187,6 @@ pub const Store = struct {
     segment_id: u64,
     offset: u64,
     synced_offset: u64,
-    // Bumped when the active segment changes.
     epoch: u64 = 0,
     failed: bool = false,
     closed: bool = false,
@@ -218,20 +214,36 @@ pub const Store = struct {
     pool_mutex: std.Io.Mutex = .init,
     pool: std.ArrayListUnmanaged(*Buffer) = .empty,
 
-    // What INDEX covers, so close only rewrites it after changes.
     checkpointed: Cover = .{},
+
+    // A deferred region's world directory, until its first sync publishes it. Guarded by directory_mutex.
+    parent: ?std.Io.Dir = null,
+    unpublished: std.atomic.Value(bool) = .init(false),
 
     const pool_limit = 8;
     const prefetch_limit = 64 * 1024 * 1024;
     const max_pooled_len = 1024 * 1024;
+    const pending_name = "PENDING";
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, region: Region, options: Options) !Store {
+        return init(allocator, io, dir, region, options, null);
+    }
+
+    /// Syncs nothing until the first sync, which also syncs `parent` (borrowed) and publishes the
+    /// region. Whoever opens a region still holding PENDING must sync its parent first.
+    pub fn createDeferred(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, region: Region, options: Options, parent: std.Io.Dir) !Store {
+        return init(allocator, io, dir, region, options, parent);
+    }
+
+    fn init(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, region: Region, options: Options, parent: ?std.Io.Dir) !Store {
         try options.validate();
         var directory = try Directory.init(dir, io);
         errdefer directory.deinit();
         try discardUnpublished(&directory);
         var iterator = directory.dir.iterate();
         if (try iterator.next(io) != null) return error.DirectoryNotEmpty;
+        const deferred = parent != null;
+        if (deferred) (try directory.dir.createFile(io, pending_name, .{ .exclusive = true })).close(io);
 
         const salt = segment.newSalt(io);
         const handle = try files.createSegment(directory.dir, io, 1, 1);
@@ -240,11 +252,11 @@ pub const Store = struct {
         errdefer if (device_owned) {
             handle.close(io);
             files.removeSegment(directory.dir, io, 1, 1) catch {};
-            directory.syncEntries() catch {};
+            if (!deferred) directory.syncEntries() catch {};
         };
         const header = try (segment.Header{ .segment_id = 1, .generation = 1, .region = region, .salt = salt }).encode();
         try device.writeAll(&header, 0);
-        try device.sync();
+        if (!deferred) try device.sync();
 
         var index = try Index.init(allocator, region, 1, options.max_keys);
         index.stats = options.stats;
@@ -262,10 +274,11 @@ pub const Store = struct {
 
         var pool: std.ArrayListUnmanaged(*Buffer) = try .initCapacity(allocator, pool_limit);
         errdefer pool.deinit(allocator);
-        var buffer: [manifest.header_len + 12]u8 = undefined;
-        const bytes = try (manifest.Manifest{ .generation = 1, .region = region, .segments = &.{1}, .salt = salt }).encode(&buffer);
-        var publisher: publication.Publisher(*Directory) = .{ .backend = &directory };
-        try publisher.publish(bytes);
+        if (!deferred) {
+            var buffer: [manifest.header_len + 12]u8 = undefined;
+            var publisher: publication.Publisher(*Directory) = .{ .backend = &directory };
+            try publisher.publish(try firstManifest(&buffer, region, salt));
+        }
 
         return .{
             .allocator = allocator,
@@ -277,13 +290,83 @@ pub const Store = struct {
             .base_batch_id = 0,
             .segment_id = 1,
             .offset = segment.encoded_len,
-            .synced_offset = segment.encoded_len,
+            .synced_offset = if (deferred) 0 else segment.encoded_len,
             .generation = generation,
             .pool = pool,
+            .parent = parent,
+            .unpublished = .init(deferred),
         };
     }
 
-    /// Callers set `index` afterwards.
+    fn firstManifest(buffer: *[manifest.header_len + 12]u8, region: Region, salt: u64) ![]u8 {
+        return (manifest.Manifest{ .generation = 1, .region = region, .segments = &.{1}, .salt = salt }).encode(buffer);
+    }
+
+    /// Segment 1 must already be synced. Takes directory_mutex, so callers may hold writer.
+    fn publishCreation(self: *Store) !void {
+        if (!self.unpublished.load(.acquire)) return;
+        lock.lockUncancelable(&self.directory_mutex, self.io);
+        defer self.directory_mutex.unlock(self.io);
+        const parent = self.parent orelse return;
+        // Once PENDING is gone nothing says the parent still needs a sync.
+        try (File{ .handle = .{ .handle = parent.handle, .flags = .{ .nonblocking = false } }, .io = self.io }).sync();
+        var buffer: [manifest.header_len + 12]u8 = undefined;
+        try publishFirst(&self.directory, try firstManifest(&buffer, self.region, self.salt));
+        self.parent = null;
+        self.unpublished.store(false, .release);
+    }
+
+    fn publishFirst(directory: *Directory, bytes: []const u8) !void {
+        try directory.writeTemporary(bytes);
+        try directory.syncTemporary();
+        try directory.replaceManifest();
+        directory.dir.deleteFile(directory.io, pending_name) catch |err| if (err != error.FileNotFound) return err;
+        try directory.syncDirectory();
+    }
+
+    /// Finishes a deferred creation that a crash interrupted. Such a region only ever holds
+    /// segment 1 of generation 1, so its manifest follows from that segment's header.
+    fn finishCreation(directory: *Directory) !void {
+        const io = directory.io;
+        directory.dir.access(io, pending_name, .{}) catch |err| {
+            if (err != error.FileNotFound) return err;
+            var iterator = directory.dir.iterate();
+            if (try iterator.next(io) == null) return error.EmptyRegion;
+            return;
+        };
+        if (directory.dir.access(io, "MANIFEST", .{})) {
+            directory.dir.deleteFile(io, "MANIFEST.tmp") catch |err| if (err != error.FileNotFound) return err;
+            try directory.dir.deleteFile(io, pending_name);
+            try directory.syncEntries();
+            return;
+        } else |err| if (err != error.FileNotFound) return err;
+        directory.dir.deleteFile(io, "MANIFEST.tmp") catch |err| if (err != error.FileNotFound) return err;
+        const header = firstHeader(directory) catch |err| switch (err) {
+            error.MissingSegment, error.Truncated, error.InvalidMagic, error.ChecksumMismatch => {
+                files.removeSegment(directory.dir, io, 1, 1) catch |remove_err| if (remove_err != error.FileNotFound) return remove_err;
+                try directory.dir.deleteFile(io, pending_name);
+                try directory.syncEntries();
+                return error.EmptyRegion;
+            },
+            else => return err,
+        };
+        var buffer: [manifest.header_len + 12]u8 = undefined;
+        try publishFirst(directory, try firstManifest(&buffer, header.region, header.salt));
+    }
+
+    fn firstHeader(directory: *Directory) !segment.Header {
+        const handle = try files.openSegment(directory.dir, directory.io, 1, 1, false);
+        defer handle.close(directory.io);
+        const file: File = .{ .handle = handle, .io = directory.io };
+        var bytes: [segment.encoded_len]u8 = undefined;
+        if (try file.length() < bytes.len) return error.Truncated;
+        try file.readExact(&bytes, 0);
+        const header = try segment.Header.decode(&bytes);
+        if (header.generation != 1 or header.segment_id != 1) return error.IdentityMismatch;
+        try file.sync();
+        return header;
+    }
+
     fn newGeneration(allocator: std.mem.Allocator, io: std.Io, capacity: usize) !*Generation {
         const devices = try allocator.alloc(File, capacity);
         errdefer allocator.free(devices);
@@ -355,6 +438,7 @@ pub const Store = struct {
         try options.validate();
         var directory = try Directory.init(dir, io);
         errdefer directory.deinit();
+        try finishCreation(&directory);
 
         const ids = try allocator.alloc(u64, manifest.max_segments);
         defer allocator.free(ids);
@@ -395,13 +479,11 @@ pub const Store = struct {
             break :blk try replay(allocator, &generation.index, generation.devices[0..generation.count], metadata, options, &scratch, start.segments - 1, start.offset);
         };
         if (try active.length() != end) return error.FileChanged;
-        // An exact INDEX means the last close synced everything.
         const clean = if (covered) |c| c.segments == generation.count and c.offset == end else false;
         if (!clean) {
             try directory.syncEntries();
             try active.sync();
         }
-        // Nothing was read, so prefetch like a replay would.
         if (covered != null) {
             var budget: u64 = prefetch_limit;
             var i = generation.count;
@@ -438,7 +520,6 @@ pub const Store = struct {
         offset: u64 = 0,
     };
 
-    /// Any doubt leaves the index empty for a full replay.
     fn loadCheckpoint(allocator: std.mem.Allocator, io: std.Io, directory: *Directory, index: *Index, devices: []const File, metadata: manifest.Manifest, options: Options) !?Cover {
         const cover = readCheckpoint(allocator, io, directory, index, devices, metadata, options) catch |err| switch (err) {
             error.OutOfMemory => return err,
@@ -461,7 +542,7 @@ pub const Store = struct {
         defer handle.close(io);
         const file: File = .{ .handle = handle, .io = io };
         const length = try file.length();
-        if (length < checkpoint.header_len or length > checkpoint.header_len + manifest.max_segments * 8 + 2048 + @as(u64, options.max_keys) * 28 + 4)
+        if (length < checkpoint.header_len + 4 or length > checkpoint.maxFileLen(manifest.max_segments * 8 + 2048 + @as(usize, options.max_keys) * 28))
             return error.InvalidLength;
         const bytes = try allocator.alloc(u8, @intCast(length));
         defer allocator.free(bytes);
@@ -470,10 +551,13 @@ pub const Store = struct {
         const header = try checkpoint.Header.read(bytes[0..checkpoint.header_len]);
         const valid = header.generation == metadata.generation and header.salt == metadata.salt and
             header.segments != 0 and header.segments <= metadata.segments.len and header.entries <= options.max_keys and
-            header.len() == bytes.len and (header.fingerprints or !options.skip_unchanged);
+            bytes.len <= checkpoint.maxFileLen(header.bodyLen()) and (header.fingerprints or !options.skip_unchanged);
         if (!valid) return error.StaleCheckpoint;
-        const body = bytes[checkpoint.header_len..];
-        if (std.mem.readInt(u32, body[body.len - 4 ..][0..4], .little) != crc.hash(body[0 .. body.len - 4])) return error.ChecksumMismatch;
+        const blocks = bytes[checkpoint.header_len .. bytes.len - 4];
+        if (std.mem.readInt(u32, bytes[bytes.len - 4 ..][0..4], .little) != crc.hash(blocks)) return error.ChecksumMismatch;
+        const body = try allocator.alloc(u8, header.bodyLen());
+        defer allocator.free(body);
+        try checkpoint.inflate(blocks, body);
 
         var at: usize = 0;
         for (metadata.segments[0..header.segments]) |id| {
@@ -489,15 +573,20 @@ pub const Store = struct {
         const counts = body[at..][0 .. 1024 * 2];
         at += counts.len;
         const entry_len = header.entryLen();
-        const locals = try allocator.alloc(u16, std.math.maxInt(u16));
-        defer allocator.free(locals);
-        const locations = try allocator.alloc(Location, std.math.maxInt(u16));
-        defer allocator.free(locations);
         var total: usize = 0;
+        var largest: usize = 0;
         for (0..1024) |slot| {
             const count = std.mem.readInt(u16, counts[slot * 2 ..][0..2], .little);
             total += count;
-            if (total > header.entries) return error.StaleCheckpoint;
+            largest = @max(largest, count);
+        }
+        if (total != header.entries) return error.StaleCheckpoint;
+        const locals = try allocator.alloc(u16, largest);
+        defer allocator.free(locals);
+        const locations = try allocator.alloc(Location, largest);
+        defer allocator.free(locations);
+        for (0..1024) |slot| {
+            const count = std.mem.readInt(u16, counts[slot * 2 ..][0..2], .little);
             for (locals[0..count], locations[0..count]) |*k, *location| {
                 k.*, location.* = try checkpoint.readEntry(body[at..][0..entry_len], header.fingerprints);
                 at += entry_len;
@@ -506,13 +595,11 @@ pub const Store = struct {
             }
             try index.loadChunk(@intCast(slot), locals[0..count], locations[0..count]);
         }
-        if (total != header.entries) return error.StaleCheckpoint;
         index.order = .{ .last_batch_id = header.last_batch_id, .seen_batch = header.seen_batch };
         index.total_bytes = header.total_bytes;
         return .{ .generation = header.generation, .segments = header.segments, .offset = header.offset };
     }
 
-    /// Failure only costs a slower open.
     fn writeCheckpoint(self: *Store) void {
         const generation = self.generation;
         const cover: Cover = .{ .generation = generation.index.generation, .segments = generation.count, .offset = self.offset };
@@ -541,9 +628,9 @@ pub const Store = struct {
         const handle = try self.directory.dir.createFile(self.io, checkpoint.name ++ ".tmp", .{ .truncate = true });
         defer handle.close(self.io);
         const file: File = .{ .handle = handle, .io = self.io };
-        // Keeps close free of allocations.
-        var buffer: [16 * 1024]u8 = undefined;
-        var writer: Spill = .{ .file = file, .buffer = &buffer, .offset = checkpoint.header_len };
+        var buffer: [checkpoint.block_len]u8 = undefined;
+        var block: [checkpoint.block_header_len + checkpoint.block_len + checkpoint.block_len / 255 + 16]u8 = undefined;
+        var writer: Spill = .{ .file = file, .buffer = &buffer, .block = &block, .offset = checkpoint.header_len };
         for (self.generation.segment_ids[0..cover.segments]) |id| try writer.int(u64, id);
         for (index.chunks) |c| try writer.int(u16, c.len);
         const entry_len = header.entryLen();
@@ -566,6 +653,8 @@ pub const Store = struct {
     const Spill = struct {
         file: File,
         buffer: []u8,
+        block: []u8,
+        encoder: lz4.Encoder = .{},
         used: usize = 0,
         offset: u64,
         checksum: u32 = 0xffff_ffff,
@@ -581,9 +670,20 @@ pub const Store = struct {
         }
 
         fn flush(self: *Spill) !void {
-            self.checksum = crc.update(self.checksum, self.buffer[0..self.used]);
-            try self.file.writeAll(self.buffer[0..self.used], self.offset);
-            self.offset += self.used;
+            if (self.used == 0) return;
+            const raw = self.buffer[0..self.used];
+            const payload = self.block[checkpoint.block_header_len..];
+            const encoded = try self.encoder.compress(raw, payload);
+            const stored = if (encoded.len < raw.len) encoded.len else stored: {
+                @memcpy(payload[0..raw.len], raw);
+                break :stored raw.len;
+            };
+            std.mem.writeInt(u32, self.block[0..4], @intCast(raw.len), .little);
+            std.mem.writeInt(u32, self.block[4..8], @intCast(stored), .little);
+            const bytes = self.block[0 .. checkpoint.block_header_len + stored];
+            self.checksum = crc.update(self.checksum, bytes);
+            try self.file.writeAll(bytes, self.offset);
+            self.offset += bytes.len;
             self.used = 0;
         }
     };
@@ -606,18 +706,15 @@ pub const Store = struct {
         return end;
     }
 
-    /// Durable on return only with `.sync`.
     pub fn write(self: *Store, batch: WriteBatch) !AppendResult {
         return self.commit(&.{batch}, self.options.durability == .sync);
     }
 
-    /// Durable on return whatever the durability.
     pub fn writeGroup(self: *Store, batches: []const WriteBatch) !AppendResult {
         return self.commit(batches, true);
     }
 
     fn commit(self: *Store, batches: []const WriteBatch, durable: bool) !AppendResult {
-        // Callers must not race close.
         if (self.closed) return error.Closed;
         const size = try write_module.validateGroup(batches);
         if (size > self.options.batch_buffer_size) return error.BufferTooSmall;
@@ -713,18 +810,28 @@ pub const Store = struct {
     }
 
     fn dropUnchanged(self: *Store, builder: *frame.Builder) !void {
-        var kept: frame.Builder = .{ .buffer = builder.buffer };
+        var skip: std.StaticBitSet(frame.max_records) = .empty;
         var offset: usize = frame.header_len;
         var skipped: u64 = 0;
-        while (offset < builder.len) {
+        for (0..builder.count) |i| {
             const header = record.Header.read(builder.buffer[offset..][0..record.header_len]) catch unreachable;
             const len = record.overhead + header.stored_len;
             const bytes = builder.buffer[offset..][0..len];
             offset += len;
             if (!self.repeated(builder, header) and try self.unchanged(header, bytes[record.header_len..][0..header.stored_len])) {
+                skip.set(i);
                 skipped += 1;
-                continue;
             }
+        }
+        if (skipped == 0) return;
+        var kept: frame.Builder = .{ .buffer = builder.buffer };
+        offset = frame.header_len;
+        for (0..builder.count) |i| {
+            const header = record.Header.read(builder.buffer[offset..][0..record.header_len]) catch unreachable;
+            const len = record.overhead + header.stored_len;
+            const bytes = builder.buffer[offset..][0..len];
+            offset += len;
+            if (skip.isSet(i)) continue;
             // Moving left never overwrites records still to be read.
             std.mem.copyForwards(u8, kept.buffer[kept.len..][0..len], bytes);
             kept.checksums = crc.update(kept.checksums, kept.buffer[kept.len + len - 4 ..][0..4]);
@@ -735,7 +842,6 @@ pub const Store = struct {
         if (self.options.stats) |s| _ = s.unchanged_write_skips.fetchAdd(skipped, .monotonic);
     }
 
-    /// Repeated keys are kept so the last one wins.
     fn repeated(_: *Store, builder: *const frame.Builder, header: record.Header) bool {
         var seen: usize = 0;
         var offset: usize = frame.header_len;
@@ -789,7 +895,6 @@ pub const Store = struct {
         if (stale or crowded) self.compaction_hint.store(true, .monotonic);
     }
 
-    /// True once each time the store goes stale.
     pub fn wantsCompaction(self: *Store) bool {
         return self.compaction_hint.swap(false, .monotonic);
     }
@@ -800,30 +905,21 @@ pub const Store = struct {
         if (generation.count == self.options.max_segments) return error.TooManySegments;
         const id = std.math.add(u64, self.segment_id, 1) catch return error.SegmentIdExhausted;
         try self.syncActive();
+        self.publishCreation() catch |err| {
+            self.failed = true;
+            return err;
+        };
 
         const handle = try files.createSegment(self.directory.dir, self.io, generation.index.generation, id);
         const device: File = .{ .handle = handle, .io = self.io };
-        errdefer handle.close(self.io);
         // The manifest may name the file once publishing starts.
         var publishing = false;
-        errdefer |err| {
+        self.publishSegment(device, id, &publishing) catch |err| {
             const removed = !publishing and if (files.removeSegment(self.directory.dir, self.io, generation.index.generation, id)) true else |_| false;
             if (!removed or (err != error.NoSpaceLeft and err != error.DiskQuota)) self.failed = true;
-        }
-        const header = try (segment.Header{ .segment_id = id, .generation = generation.index.generation, .region = self.region, .salt = self.salt }).encode();
-        try device.writeAll(&header, 0);
-        try device.sync();
-
-        generation.segment_ids[generation.count] = id;
-        var buffer: [manifest.max_encoded_len]u8 = undefined;
-        const bytes = try self.manifestBytes(&buffer, generation.index.generation, generation.segment_ids[0 .. generation.count + 1], self.base_batch_id);
-        {
-            lock.lockUncancelable(&self.directory_mutex, self.io);
-            defer self.directory_mutex.unlock(self.io);
-            var publisher: publication.Publisher(*Directory) = .{ .backend = &self.directory };
-            publishing = true;
-            try publisher.publish(bytes);
-        }
+            handle.close(self.io);
+            return err;
+        };
         {
             self.table.lockUncancelable(self.io);
             defer self.table.unlock(self.io);
@@ -835,6 +931,22 @@ pub const Store = struct {
         self.synced_offset = segment.encoded_len;
         self.epoch += 1;
         if (self.options.stats) |s| _ = s.segment_rotations.fetchAdd(1, .monotonic);
+    }
+
+    fn publishSegment(self: *Store, device: File, id: u64, publishing: *bool) !void {
+        const generation = self.generation;
+        const header = try (segment.Header{ .segment_id = id, .generation = generation.index.generation, .region = self.region, .salt = self.salt }).encode();
+        try device.writeAll(&header, 0);
+        try device.sync();
+
+        generation.segment_ids[generation.count] = id;
+        var buffer: [manifest.max_encoded_len]u8 = undefined;
+        const bytes = try self.manifestBytes(&buffer, generation.index.generation, generation.segment_ids[0 .. generation.count + 1], self.base_batch_id);
+        lock.lockUncancelable(&self.directory_mutex, self.io);
+        defer self.directory_mutex.unlock(self.io);
+        var publisher: publication.Publisher(*Directory) = .{ .backend = &self.directory };
+        publishing.* = true;
+        try publisher.publish(bytes);
     }
 
     fn manifestBytes(self: *Store, buffer: []u8, generation: u64, ids: []const u64, base: u64) ![]u8 {
@@ -867,7 +979,6 @@ pub const Store = struct {
         return self.appended_ticket;
     }
 
-    /// One waiter syncs for everyone appended before it started.
     fn waitDurable(self: *Store, ticket: u64) !void {
         lock.lockUncancelable(&self.commit_mutex, self.io);
         defer self.commit_mutex.unlock(self.io);
@@ -888,20 +999,19 @@ pub const Store = struct {
         }
     }
 
-    /// Appends continue during the fsync.
     fn syncAppended(self: *Store) !void {
         const generation, const device, const epoch, const offset = blk: {
             try lock.lock(&self.writer, self.io);
             defer self.writer.unlock(self.io);
             if (self.closed) return error.Closed;
             if (self.failed) return error.WriterFailed;
-            if (self.synced_offset == self.offset) return;
+            if (self.synced_offset == self.offset and !self.unpublished.load(.acquire)) return;
             const generation = self.generation;
             _ = generation.readers.fetchAdd(1, .seq_cst);
             break :blk .{ generation, generation.devices[generation.count - 1], self.epoch, self.offset };
         };
         defer self.unpin(generation);
-        const result = self.timedSync(device);
+        const result: anyerror!void = if (self.timedSync(device)) self.publishCreation() else |err| err;
         lock.lockUncancelable(&self.writer, self.io);
         defer self.writer.unlock(self.io);
         result catch |err| {
@@ -940,7 +1050,7 @@ pub const Store = struct {
     pub fn dirty(self: *Store) bool {
         lock.lockUncancelable(&self.writer, self.io);
         defer self.writer.unlock(self.io);
-        return self.synced_offset != self.offset;
+        return self.synced_offset != self.offset or self.unpublished.load(.acquire);
     }
 
     const Pinned = struct {
@@ -1072,7 +1182,6 @@ pub const Store = struct {
         value: []const u8 = &.{},
     };
 
-    // Kept small: ReleaseSafe fills undefined stack arrays.
     const max_gap = 4096;
     const max_span = 256 * 1024;
 
@@ -1181,8 +1290,6 @@ pub const Store = struct {
         }
     }
 
-    /// Values are packed into `buffer` in key order.
-    /// BufferTooSmall fills `result` for a retry.
     pub fn getChunk(self: *Store, chunk_x: i32, chunk_z: i32, buffer: []u8, records: []ChunkRecord, result: *ChunkResult) !void {
         const probe: Key = .{ .dimension = self.region.dimension, .chunk_x = chunk_x, .chunk_z = chunk_z, .component = .version };
         if (!probe.region().eql(self.region)) return error.RegionMismatch;
@@ -1279,8 +1386,8 @@ pub const Store = struct {
         return location.raw_len;
     }
 
-    /// Writers only wait for the final tail copy, its fsync and the manifest swap.
     pub fn compact(self: *Store) !CompactionResult {
+        if (self.unpublished.load(.acquire)) try self.flush();
         try lock.lock(&self.compact_mutex, self.io);
         defer self.compact_mutex.unlock(self.io);
         const started: ?std.Io.Clock.Timestamp = if (self.options.stats != null) std.Io.Clock.Timestamp.now(self.io, .awake) else null;
@@ -1322,7 +1429,11 @@ pub const Store = struct {
         var staging = try self.allocator.alloc(u8, self.options.batch_buffer_size);
         defer self.allocator.free(staging);
         var source_bytes: u64 = 0;
-        self.writeBase(old, live.items, &output, &index, snapshot.last_batch_id, &scratch, &staging, &source_bytes) catch |err|
+        // Fingerprints hash stored bytes, so re-encoding would hide unchanged writes.
+        const dense: ?*Dense = if (self.options.skip_unchanged or self.options.compression_threshold == 0) null else try self.allocator.create(Dense);
+        defer if (dense) |d| d.destroy(self.allocator);
+        if (dense) |d| d.* = .{};
+        self.writeBase(old, live.items, &output, &index, snapshot.last_batch_id, &scratch, &staging, &source_bytes, dense) catch |err|
             return if (isSourceError(err)) self.sourceFailure(err, false) else err;
         try output.sync();
 
@@ -1388,7 +1499,6 @@ pub const Store = struct {
         };
         if (self.options.stats) |s| {
             _ = s.compactions.fetchAdd(1, .monotonic);
-            // One per new segment plus the manifest file and two directory syncs.
             _ = s.fsync_count.fetchAdd(output_count + 3, .monotonic);
             _ = s.compaction_input_bytes.fetchAdd(source_bytes, .monotonic);
             _ = s.compaction_output_bytes.fetchAdd(output_bytes, .monotonic);
@@ -1422,7 +1532,6 @@ pub const Store = struct {
         defer self.writer.unlock(self.io);
         if (self.closed) return error.Closed;
         if (self.failed) return error.WriterFailed;
-        // Only appends change the index, under the writer lock.
         const generation = self.generation;
         try live.ensureTotalCapacity(self.allocator, generation.index.count);
         const Collect = struct {
@@ -1440,12 +1549,55 @@ pub const Store = struct {
 
     fn isSourceError(err: anyerror) bool {
         return switch (err) {
-            error.OutOfMemory, error.Canceled, error.TooManySegments, error.NoSpaceLeft, error.DiskQuota => false,
+            error.OutOfMemory, error.Canceled, error.TooManySegments, error.NoSpaceLeft, error.DiskQuota, error.PathAlreadyExists => false,
             else => true,
         };
     }
 
-    fn writeBase(self: *Store, old: *Generation, live: []const Live, output: *CompactionOutput, index: *Index, base_id: u64, scratch: *[]u8, staging: *[]u8, source_bytes: *u64) !void {
+    const Dense = struct {
+        encoder: lz4.DenseEncoder = .{},
+        raw: []u8 = &.{},
+        check: []u8 = &.{},
+        out: []u8 = &.{},
+
+        fn destroy(self: *Dense, allocator: std.mem.Allocator) void {
+            allocator.free(self.raw);
+            allocator.free(self.check);
+            allocator.free(self.out);
+            allocator.destroy(self);
+        }
+
+        fn reserve(allocator: std.mem.Allocator, buffer: *[]u8, len: usize) !void {
+            if (buffer.len >= len) return;
+            allocator.free(buffer.*);
+            buffer.* = &.{};
+            buffer.* = try allocator.alloc(u8, len);
+        }
+    };
+
+    fn recompress(self: *Store, dense: *Dense, old: []const u8) !?[]const u8 {
+        const header = record.Header.read(old[0..record.header_len]) catch unreachable;
+        if (header.raw_len < self.options.compression_threshold) return null;
+        const raw_len: usize = header.raw_len;
+        const bound = try lz4.bound(raw_len);
+        try Dense.reserve(self.allocator, &dense.raw, raw_len);
+        try Dense.reserve(self.allocator, &dense.check, raw_len);
+        try Dense.reserve(self.allocator, &dense.out, record.overhead + bound);
+        const raw = decodeInto(.{ .header = header, .value = old[record.header_len..][0..header.stored_len], .checksum = 0, .len = old.len }, dense.raw) catch return null;
+        const encoded = try dense.encoder.compress(raw, dense.out[record.header_len..][0..bound]);
+        if (encoded.len >= raw_len or record.overhead + encoded.len >= old.len) return null;
+        const back = lz4.decompress(encoded, dense.check, raw_len) catch return null;
+        if (!std.mem.eql(u8, back, raw)) return null;
+        var fresh = header;
+        fresh.compression = .lz4;
+        fresh.stored_len = @intCast(encoded.len);
+        fresh.write(dense.out[0..record.header_len]);
+        const bytes = dense.out[0 .. record.overhead + encoded.len];
+        _ = record.seal(bytes);
+        return bytes;
+    }
+
+    fn writeBase(self: *Store, old: *Generation, live: []const Live, output: *CompactionOutput, index: *Index, base_id: u64, scratch: *[]u8, staging: *[]u8, source_bytes: *u64, dense: ?*Dense) !void {
         var reads: std.ArrayListUnmanaged(u32) = .empty;
         defer reads.deinit(self.allocator);
         const places = try self.allocator.alloc(usize, frame.max_records);
@@ -1458,16 +1610,16 @@ pub const Store = struct {
             if (largest > scratch.len) scratch.* = try self.allocator.realloc(scratch.*, largest);
             var last = first;
             var size: usize = frame.header_len;
+            const limit = @min(staging.len, self.options.max_segment_size - segment.encoded_len);
             while (last < live.len and last - first < frame.max_records) : (last += 1) {
                 const len = live[last].location.recordLen();
-                if (size + len > staging.len) break;
+                if (size + len > limit) break;
                 places[last - first] = size;
                 size += len;
             }
             const window = live[first..last];
             var builder = frame.Builder.init(staging.*);
 
-            // Read in file order, then place each record in chunk order.
             reads.clearRetainingCapacity();
             for (0..window.len) |i| try reads.append(self.allocator, @intCast(i));
             std.mem.sort(u32, reads.items, window, liveLessThan);
@@ -1495,10 +1647,13 @@ pub const Store = struct {
                 i = j;
             }
 
-            for (window) |item| {
-                const len = item.location.recordLen();
-                builder.checksums = crc.update(builder.checksums, staging.*[builder.len + len - 4 ..][0..4]);
-                builder.len += len;
+            for (window, 0..) |item, w| {
+                const in_place = staging.*[places[w]..][0..item.location.recordLen()];
+                const bytes = (if (dense) |d| try self.recompress(d, in_place) else null) orelse in_place;
+                // Records only shrink, so moving left never overwrites one still to be read.
+                std.mem.copyForwards(u8, staging.*[builder.len..][0..bytes.len], bytes);
+                builder.checksums = crc.update(builder.checksums, staging.*[builder.len + bytes.len - 4 ..][0..4]);
+                builder.len += bytes.len;
                 builder.count += 1;
             }
             const bytes = builder.finish(.base, base_id, self.salt);
@@ -1521,7 +1676,6 @@ pub const Store = struct {
         offset: u64,
     };
 
-    /// `locked` means the writer lock is held.
     fn copyTail(self: *Store, old: *Generation, tail: *Tail, output: *CompactionOutput, index: *Index, scratch: *[]u8, locked: bool) !u64 {
         const end_position, const end_offset = if (locked) .{ old.count - 1, self.offset } else blk: {
             try lock.lock(&self.writer, self.io);

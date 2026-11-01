@@ -121,6 +121,7 @@ int zg_get_many(zg_handle *handle, const zg_read_request *requests, zg_read_resu
    ZG_NOT_FOUND means the chunk has no records. */
 int zg_get_chunk(zg_handle *handle, int32_t dimension, int32_t chunk_x, int32_t chunk_z, uint8_t *buffer, size_t capacity,
                  zg_chunk_record *records, size_t record_capacity, size_t *count, size_t *required);
+/* Keys or values larger than 16 MiB return ZG_LIMIT. Chunk keys can't use dimension INT32_MIN, which holds these. */
 int zg_aux_get(zg_handle *handle, const uint8_t *key, size_t key_len, uint8_t *output, size_t capacity, size_t *required);
 int zg_aux_put(zg_handle *handle, const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len);
 int zg_aux_delete(zg_handle *handle, const uint8_t *key, size_t key_len);

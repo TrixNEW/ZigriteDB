@@ -128,13 +128,13 @@ pub const Key = extern struct {
     component: u32,
 
     fn native(self: Key) !db.Key {
-        if (self.component > std.math.maxInt(u8)) return error.InvalidArgument;
+        if (self.component > std.math.maxInt(u8) or self.dimension == db.aux.dimension) return error.InvalidArgument;
         const result: db.Key = .{
             .dimension = self.dimension,
             .chunk_x = self.chunk_x,
             .chunk_z = self.chunk_z,
             .subchunk_y = self.subchunk_y,
-            .component = @enumFromInt(@as(u8, @intCast(self.component))),
+            .component = @fromBackingInt(@intCast(@as(u8, @intCast(self.component)))),
         };
         try result.validate();
         return result;
@@ -146,7 +146,7 @@ pub const Key = extern struct {
             .chunk_x = key.chunk_x,
             .chunk_z = key.chunk_z,
             .subchunk_y = key.subchunk_y,
-            .component = @intFromEnum(key.component),
+            .component = @backingInt(key.component),
         };
     }
 };
@@ -176,7 +176,6 @@ pub const Handle = struct {
     threaded: std.Io.Threaded,
     world: db.World,
     maintenance: Maintenance.Queue(db.World, compactRegion),
-    // Stale regions found by writes; dropped on close.
     compaction: Maintenance.WorkQueue(db.World, db.Region, 16, false, compactStale),
     prefetch: Maintenance.WorkQueue(db.World, db.Key, 256, false, warmKey),
     stats: db.Stats = .{},
@@ -269,8 +268,6 @@ fn entries(operations: []const Operation, buffer: []db.Entry) ![]db.Entry {
     return buffer[0..operations.len];
 }
 
-// These wrappers only declare scratch arrays, which ReleaseSafe would otherwise fill on every call.
-
 pub export fn zg_write(optional: ?*Handle, id: u64, operations: ?[*]const Operation, count: usize) Status {
     @setRuntimeSafety(false);
     var stack: [inline_entries]db.Entry = undefined;
@@ -334,7 +331,6 @@ pub const ReadResult = extern struct {
 };
 
 const max_c_batch = db.World.max_read_batch;
-// Kept small: ReleaseSafe fills undefined stack arrays.
 const read_chunk = 32;
 
 pub export fn zg_get_many(optional: ?*Handle, requests: ?[*]const ReadRequest, results: ?[*]ReadResult, count: usize) Status {
@@ -419,21 +415,32 @@ fn getChunk(
     bytes_needed.* = 0;
     const handle = optional orelse return .invalid_argument;
     if ((buffer == null and capacity != 0) or (records == null and record_capacity != 0)) return .invalid_argument;
-    const native = if (record_capacity <= stack.len) stack[0..record_capacity] else allocator.alloc(db.ChunkRecord, record_capacity) catch return .out_of_memory;
-    defer if (record_capacity > stack.len) allocator.free(native);
+    const record_count = @min(record_capacity, std.math.maxInt(u16) + 1);
     const output: []u8 = if (buffer) |ptr| ptr[0..capacity] else &.{};
     var result: db.ChunkResult = undefined;
-    handle.world.getChunk(dimension, chunk_x, chunk_z, output, native, &result) catch |err| {
-        total.* = result.count;
-        bytes_needed.* = result.required;
-        return status(err);
-    };
+    var native = stack[0..@min(record_count, stack.len)];
+    var heap: []db.ChunkRecord = &.{};
+    defer allocator.free(heap);
+    while (true) {
+        handle.world.getChunk(dimension, chunk_x, chunk_z, output, native, &result) catch |err| {
+            // Only pay for a big record array when the chunk really needs it.
+            if (err == error.BufferTooSmall and native.len < result.count and result.count <= record_count and result.required <= capacity and heap.len == 0) {
+                heap = allocator.alloc(db.ChunkRecord, result.count) catch return .out_of_memory;
+                native = heap;
+                continue;
+            }
+            total.* = result.count;
+            bytes_needed.* = result.required;
+            return status(err);
+        };
+        break;
+    }
     total.* = result.count;
     bytes_needed.* = result.required;
     if (result.count == 0) return .not_found;
     for (native[0..result.count], records.?[0..result.count]) |record, *target| {
         target.* = .{
-            .component = @intFromEnum(record.component),
+            .component = @backingInt(record.component),
             .subchunk_y = record.subchunk_y,
             .offset = @intFromPtr(record.value.ptr) - @intFromPtr(output.ptr),
             .length = record.value.len,
@@ -503,8 +510,8 @@ pub const StatsSnapshot = extern struct {
 pub export fn zg_stats_get(optional: ?*Handle, out: ?*StatsSnapshot) Status {
     const handle = optional orelse return .invalid_argument;
     const target = out orelse return .invalid_argument;
-    inline for (std.meta.fields(StatsSnapshot)) |field| {
-        @field(target, field.name) = @field(handle.stats, field.name).load(.monotonic);
+    inline for (@typeInfo(StatsSnapshot).@"struct".field_names) |name| {
+        @field(target, name) = @field(handle.stats, name).load(.monotonic);
     }
     return .ok;
 }
@@ -582,7 +589,7 @@ pub export fn zg_list_keys(optional: ?*Handle, dimension: i32, x: i32, z: i32, c
     const filter: db.KeyFilter = if (component == std.math.maxInt(u32))
         .{}
     else if (component <= std.math.maxInt(u8))
-        .only(&.{@enumFromInt(@as(u8, @intCast(component)))})
+        .only(&.{@fromBackingInt(@intCast(@as(u8, @intCast(component))))})
     else
         return .invalid_argument;
     const region: db.Region = .{ .dimension = dimension, .x = x, .z = z };

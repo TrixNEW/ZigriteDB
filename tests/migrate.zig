@@ -5,7 +5,6 @@ const io = testing.io;
 
 const crc = db.crc;
 
-/// Minimal format 1 writer.
 const V1 = struct {
     bytes: std.ArrayListUnmanaged(u8) = .empty,
     batch_start: usize = 0,
@@ -16,7 +15,7 @@ const V1 = struct {
     }
 
     fn segment(self: *V1, id: u64) !void {
-        var header = [_]u8{0} ** 48;
+        var header: [48]u8 = @splat(0);
         @memcpy(header[0..4], "ZGSG");
         std.mem.writeInt(u16, header[4..6], 1, .little);
         std.mem.writeInt(u64, header[8..16], id, .little);
@@ -28,7 +27,7 @@ const V1 = struct {
     }
 
     fn recordHeader(kind: u8, compression: u8, stored: u32, raw: u32, id: u64) [32]u8 {
-        var header = [_]u8{0} ** 32;
+        var header: [32]u8 = @splat(0);
         @memcpy(header[0..4], "ZGRC");
         header[4] = 1;
         header[5] = kind;
@@ -79,7 +78,7 @@ const V1 = struct {
 };
 
 fn writeManifest(dir: std.Io.Dir, ids: []const u64) !void {
-    var bytes: [48 + 16 + 4]u8 = [_]u8{0} ** (48 + 16 + 4);
+    var bytes: [48 + 16 + 4]u8 = @splat(0);
     const len = 48 + ids.len * 8 + 4;
     @memcpy(bytes[0..4], "ZGMF");
     std.mem.writeInt(u16, bytes[4..6], 1, .little);
@@ -178,4 +177,21 @@ test "a failed migration leaves no destination and the source untouched" {
     const after = try region.readFileAlloc(io, "0000000000000001-0000000000000001.segment", testing.allocator, .unlimited);
     defer testing.allocator.free(after);
     try testing.expectEqualSlices(u8, before, after);
+}
+
+test "migration rejects overflowing manifest counts" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    _ = try buildV1(tmp.dir);
+    const name = "old/00000000-00000000-00000000.region/MANIFEST";
+    var buffer: [128]u8 = undefined;
+    const bytes = try tmp.dir.readFile(io, name, &buffer);
+    for ([_]u32{ 0, 4097, std.math.maxInt(u32) }) |count| {
+        std.mem.writeInt(u32, buffer[28..32], count, .little);
+        std.mem.writeInt(u32, buffer[44..48], crc.hash(buffer[0..44]), .little);
+        std.mem.writeInt(u32, buffer[bytes.len - 4 ..][0..4], crc.hash(buffer[0 .. bytes.len - 4]), .little);
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = buffer[0..bytes.len] });
+        try testing.expectError(error.InvalidLength, db.migrate.migrate(testing.allocator, io, tmp.dir, "old", "new"));
+        try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "new", .{}));
+    }
 }

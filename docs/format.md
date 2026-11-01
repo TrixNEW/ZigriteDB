@@ -11,6 +11,7 @@ world/
   ZIGRITE                       "ZGWD", u16 version 2, u16 zero, CRC-32C of bytes 0..8
   dddddddd-xxxxxxxx-zzzzzzzz.region/
     MANIFEST                    authoritative segment list
+    PENDING                     only while a new region waits for its first sync
     GGGGGGGGGGGGGGGG-IIIIIIIIIIIIIIII.segment
     INDEX                       optional index checkpoint
 ```
@@ -44,6 +45,7 @@ there as `u32 key length, key, u32 value length, value`, sorted by key.
 newest version per key) without changing it. Keys in Bedrock's exact chunk layout become
 chunk components with their bytes unchanged, `digp` included; everything else goes to the
 auxiliary keys as-is. Other world files such as `level.dat` are copied to `bedrock/`.
+Chunk-shaped keys using the reserved auxiliary dimension also stay raw.
 `zigrite export` writes them back with sorted LevelDB tables, a MANIFEST and CURRENT, so the
 result opens in Bedrock and PMMP without Zigrite. Both build the output under a temporary
 name and rename it into place only once complete and synced.
@@ -110,19 +112,32 @@ The manifest is published by writing `MANIFEST.tmp`, syncing it and the director
 renaming it over `MANIFEST`, then syncing the directory again. Segments are synced before
 they are named in a manifest.
 
+A world creates a region without any fsync: the directory, an empty `PENDING` and segment 1
+with its header. The first flush, sync write, rotation, compaction or close syncs the
+segment and the world directory, then publishes the first manifest and removes `PENDING`
+before the final directory sync. A world syncs its directory before opening a region that
+still holds `PENDING`. Until then the region can only hold segment 1 of
+generation 1, so after a crash open rebuilds that manifest from the segment header. If the
+header never reached the disk, nothing was acknowledged and the region opens empty. A
+missing `MANIFEST` without `PENDING` is still corruption. This relies on the filesystem
+keeping directory operations in order, as ext4 and XFS do; elsewhere a power cut before
+the first sync can leave the new region unopenable, though nothing in it was acknowledged.
+
 ## Index checkpoint
 
 `INDEX` is an optional snapshot of a region's index, written on clean close with no
 fsync of its own. It only ever describes data the close had already synced.
 
-A 64-byte header: `ZGIX`, u16 version 1, u16 flags (bit 0: fingerprints present),
+A 64-byte header: `ZGIX`, u16 version 2, u16 flags (bit 0: fingerprints present),
 generation u64 at 8, salt u64 at 16, covered segment count u32 at 24, entry count u32
 at 28, covered offset in the last covered segment u64 at 32, last batch ID u64 at 40,
 total bytes u64 at 48, u8 seen-batch flag at 56, zero to 60, CRC-32C of 0..60 at 60.
 Then the covered segment IDs (u64), 1024 per-slot entry counts (u16), the entries in
 slot and key order (24 bytes each, 28 with fingerprints: local key u16, segment u8,
 compression u8, offset u32, stored length u32, raw length u32, batch ID u64, fingerprint
-u32), and a CRC-32C of everything after the header.
+u32). That body is stored as blocks of at most 16 KiB raw, each `u32 raw length, u32 stored
+length` and then LZ4 when that's smaller or the raw bytes, followed by a CRC-32C of all the
+blocks. Version 1 checkpoints are ignored and rewritten on the next clean close.
 
 A checkpoint is used only if every check passes: checksums, version, generation, salt,
 segment IDs as a prefix of the manifest, every entry inside the covered bytes, sorted
@@ -146,7 +161,9 @@ open; none of them can be named by the manifest.
 ## Compaction
 
 Compaction snapshots the index, copies live records in chunk order into base frames of a
-new generation, verifying each record against the index, then copies frames written
+new generation, verifying each record against the index and re-encoding it with a denser LZ4
+parser when that's smaller and decodes back exactly (not with fingerprints, which hash the
+stored bytes), then copies frames written
 meanwhile, verified, after them. Writers only wait for the final tail copy, its fsync and
 the manifest swap. The old generation is removed once its readers finish. A failed
 publication keeps both generations on disk and stops writes, since the manifest may name

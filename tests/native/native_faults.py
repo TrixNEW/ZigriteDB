@@ -540,6 +540,69 @@ def check_concurrency(library, root, region_limit=16):
     print(f"Concurrent C API reads, writes and maintenance passed with {region_limit} open regions")
 
 
+def check_recovery_faults(library, root):
+    api = API(library)
+    source = root / "recovery-source"
+    source.mkdir()
+    handle = api.open(source)
+    assert api.write(handle, 1, [b"saved0", b"saved1"]) == 0
+    assert api.lib.zg_close(handle) == 0
+    original = {p: p.read_bytes() for p in source.rglob("*") if p.is_file()}
+
+    def recover(_api, path, ack):
+        src, dst = os.fsencode(source / REGION), os.fsencode(path / REGION)
+        result = api.lib.zg_recover_region(src, len(src), dst, len(dst), c.byref(api.options))
+        assert result in (0, 7, 14, 15), result
+        if result == 0:
+            os.write(ack, b"R")
+
+    def check(path):
+        assert all(p.read_bytes() == data for p, data in original.items()), "recovery changed its source"
+        if (path / REGION / "MANIFEST").exists():
+            handle = api.open(path)
+            try:
+                assert api.read(handle, 0) == (0, b"saved0")
+                assert api.read(handle, 1) == (0, b"saved1")
+            finally:
+                assert api.lib.zg_close(handle) == 0
+
+    baseline = root / "recovery-baseline"
+    (baseline / REGION).mkdir(parents=True)
+    events, acks = trace(api, baseline, work=recover)
+    assert acks == b"R"
+    check(baseline)
+    for mode in ("kill", "enospc", "eio", "readonly"):
+        for point in range(1, len(events) + 1):
+            case = root / f"recovery-{mode}-{point}"
+            (case / REGION).mkdir(parents=True)
+            trace(api, case, point, mode, work=recover)
+            check(case)
+    print(f"{len(events) * 4} recovery publication crash and I/O fault cases passed")
+
+
+def check_special_files(api, root):
+    for name in ("ZIGRITE", f"{REGION}/MANIFEST"):
+        for kind in ("fifo", "symlink"):
+            path = root / f"special-{Path(name).name}-{kind}"
+            path.mkdir()
+            handle = api.open(path)
+            assert api.write(handle, 1, [b"saved"]) == 0
+            assert api.lib.zg_close(handle) == 0
+            target = path / name
+            target.rename(target.with_suffix(".original"))
+            if kind == "fifo":
+                os.mkfifo(target)
+            else:
+                target.symlink_to(target.name + ".original")
+            if name.endswith("MANIFEST"):
+                (path / "ZIGRITE").unlink()
+            handle = c.c_void_p()
+            encoded = os.fsencode(path)
+            assert api.lib.zg_open(encoded, len(encoded), c.byref(api.options), c.byref(handle)) == 7
+            assert not handle.value
+    print("World markers and manifests reject pipes and symlinks")
+
+
 def check_stats(library, root):
     api = API(library)
     path = root / "stats"
@@ -575,6 +638,17 @@ def check_stats(library, root):
         assert batch_id.value == 2, batch_id.value
         assert api.read(handle, 0) == (0, b"next")
 
+        records, count, required = (ChunkRecord * 1)(), c.c_size_t(), c.c_size_t()
+        output = c.create_string_buffer(16)
+        assert api.lib.zg_get_chunk(handle, 0, 0, 0, output, len(output), records, c.c_size_t(-1).value,
+                                    c.byref(count), c.byref(required)) == 0
+        assert count.value == 1 and required.value == len(b"next")
+        assert output.raw[:required.value] == b"next"
+        oversized = 16 * 1024 * 1024 + 1
+        assert api.lib.zg_aux_get(handle, b"key", oversized, output, len(output), c.byref(required)) == 11
+        assert api.lib.zg_aux_put(handle, b"key", oversized, b"v", 1) == 11
+        assert api.lib.zg_aux_delete(handle, b"key", oversized) == 11
+
         keys = (Key * 3)(Key(0, 0, 0, 0, VERSION), Key(0, 0, 0, 0, VERSION), Key(0, 1, 0, 0, VERSION))
         assert api.lib.zg_prefetch(handle, keys, 3) == 0
         assert api.lib.zg_prefetch(handle, None, 0) == 0
@@ -606,6 +680,7 @@ def main():
         root = Path(temporary)
         check_permissions(api, root)
         check_stats(library, root)
+        check_special_files(api, root)
         c_root = root / "c-smoke"
         c_root.mkdir()
         env = dict(os.environ, LD_LIBRARY_PATH=str(library.parent))
@@ -640,6 +715,7 @@ def main():
             print(f"{len(events) * 4} syscall-boundary crash and I/O fault cases passed: {sorted(set(events))}")
         check_group_commit(library, root)
         check_multi_region_flush(library, root)
+        check_recovery_faults(library, root)
         for region_limit in (1, 2, 16):
             check_concurrency(library, root, region_limit)
     signal.alarm(0)

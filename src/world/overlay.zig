@@ -5,7 +5,6 @@ const Key = @import("../format/key.zig").Key;
 const world_module = @import("world.zig");
 const World = world_module.World;
 
-/// Copy-on-write view that checks overlay values before the base.
 pub const OverlayWorld = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -99,7 +98,8 @@ pub const OverlayWorld = struct {
     }
 
     pub fn write(self: *OverlayWorld, entries: []const Entry) !void {
-        if (entries.len == 0) return error.EmptyBatch;
+        const size = try (@import("../batch/write.zig").WriteBatch{ .entries = entries }).validate();
+        if (size + entries.len > self.overlay.options.region.batch_buffer_size) return error.BufferTooSmall;
         var total: usize = 0;
         for (entries) |item| total += (if (item.value) |value| value.len else 0) + 1;
 

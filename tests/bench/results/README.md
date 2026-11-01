@@ -24,7 +24,7 @@ medians from [`summarize_world.py`](../summarize_world.py).
   (16,384 chunks, 334 MB raw).
 - 5 runs per row for workloads, 3 for writer sweeps.
 
-Reproduce from the repository root on Linux with Zig 0.16.0, a C/C++ compiler,
+Reproduce from the repository root on Linux with Zig 0.17.0 (0.16.0 before 1.2), a C/C++ compiler,
 CMake, Git and Python 3. [`build.sh`](../build.sh) builds the pinned PMMP LevelDB
 fork and the current harness; it does not need Snappy, Zstd or TCMalloc.
 
@@ -109,6 +109,40 @@ instead of one `zg_get` per record; it matches per-record reads within noise her
 - **Sync writes to many regions.** Each region needs its own fsync, so 16 threads in
   16 regions manage 563 saves/s vs LevelDB's 1,045 (see Writers).
 - **Update tail on Zhyrr:** p99 24 µs vs 46 µs.
+
+## 1.1 vs 1.2 (`v1.2-*`)
+
+Same machine and session, ReleaseSafe, 8 MiB cache, 5 runs each, builds alternating:
+1.1.0 (`0d46a87`, Zig 0.16), 1.2.0 (Zig 0.17) and LevelDB. Medians, Rave / Zhyrr.
+
+| | 1.1.0 | 1.2.0 | LevelDB |
+| --- | ---: | ---: | ---: |
+| import chunks/s | 9,867 / 19,518 | 13,748 / 32,719 | 505 / 4,086 |
+| reopen + first load | 11.8 / 9.8 ms | 9.4 / 6.4 ms | 95 / 61 ms |
+| cold load p50 | 26 / 10 µs | 28 / 9.9 µs | 248 / 130 µs |
+| hot load p50 | 23 / 11 µs | 25 / 10 µs | 281 / 123 µs |
+| walk p50 | 15 / 8.3 µs | 16 / 11 µs | 129 / 19 µs |
+| update p50 | 2.9 / 4.9 µs | 2.9 / 5.9 µs | 1,050 / 5.4 µs |
+| autosave barrier p50 | 8.7 / 13.6 ms | 9.2 / 15.8 ms | 5.0 / 4.8 ms |
+| compaction | 228 / 947 ms | 1,040 / 2,091 ms | 3,625 / 3,519 ms |
+| size after compaction | 28.6 / 41.2 MB | 23.5 / 33.0 MB | 11.9 / 14.6 MB |
+| peak RSS | 168 / 387 MiB | 166 / 385 MiB | 174 / 384 MiB |
+
+- Import is faster because creating a region no longer costs five fsyncs; its first
+  sync publishes it instead (`v1.2-create.txt`: the first buffered write into each of
+  64 new regions went from 23 ms to 0.56 ms p50, total writes from 1.56 s to 37 ms, while
+  the flush that makes them durable went from 27 to 64 ms).
+- Compaction re-encodes records with a hash-chain LZ4 parser and INDEX checkpoints are
+  stored as LZ4 blocks: 18-20% smaller compacted worlds, at 2-4x the compaction CPU,
+  which runs in the background. LZ4 decoding of the denser records is faster.
+- The mixed phase is bimodal under WSL2: every build, 1.1.0 included, lands near either
+  ~125k or ~250k loads/s per run (`v1.2-mixed-ab.jsonl`, `v1.2-bisect.jsonl`), so its
+  medians and tails over 5 runs don't separate the builds. Six alternating runs of 1.2
+  against the commit before its storage changes ranged 127k-289k vs 113k-255k.
+- Measured but not adopted: a shared 16-64 KiB LZ4 dictionary trained on one world
+  shrinks the other's records by a further 20% (26-33% total), but needs a format
+  change and an embedded dictionary. Per-chunk zlib would match LevelDB's size but
+  inflates at 0.6-1.3 GB/s instead of LZ4's 3-7 GB/s.
 
 ## 1.0 vs 1.1 (`v1.0-ab-*.jsonl`, `v1.1-ab-*.jsonl`)
 

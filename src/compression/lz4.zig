@@ -70,6 +70,108 @@ pub const Encoder = struct {
     }
 };
 
+pub const DenseEncoder = struct {
+    head: [1 << dense_hash_bits]u32 = undefined,
+    chain: [1 << 16]u32 = undefined,
+    // Entries below base are from earlier inputs.
+    base: u32 = 0,
+
+    const dense_hash_bits = 15;
+    const attempts = 16;
+
+    pub fn compress(self: *DenseEncoder, input: []const u8, output: []u8) Error![]u8 {
+        if (output.len < try bound(input.len)) return error.BufferTooSmall;
+        if (self.base == 0 or self.base > std.math.maxInt(u32) - max_size - 1) {
+            @memset(&self.head, 0);
+            self.base = 1;
+        }
+        const base = self.base;
+        defer self.base += @intCast(input.len + 1);
+        var anchor: usize = 0;
+        var used: usize = 0;
+        if (input.len >= 13) {
+            const last = input.len - 12;
+            const limit = input.len - 5;
+            var pos: usize = 0;
+            var inserted: usize = 0;
+            while (pos <= last) {
+                while (inserted < pos) : (inserted += 1) self.insert(input, base, inserted);
+                var match = self.longest(input, base, pos, limit);
+                if (match.length == 0) {
+                    pos += 1;
+                    continue;
+                }
+                while (pos + 1 <= last) {
+                    while (inserted < pos + 1) : (inserted += 1) self.insert(input, base, inserted);
+                    const next = self.longest(input, base, pos + 1, limit);
+                    if (next.length <= match.length + 1) break;
+                    pos += 1;
+                    match = next;
+                }
+                const literals = pos - anchor;
+                output[used] = @as(u8, @intCast(@min(literals, 15))) << 4 | @as(u8, @intCast(@min(match.length - 4, 15)));
+                used += 1;
+                if (literals >= 15) writeLength(output, &used, literals - 15);
+                @memcpy(output[used..][0..literals], input[anchor..pos]);
+                used += literals;
+                std.mem.writeInt(u16, output[used..][0..2], @intCast(match.offset), .little);
+                used += 2;
+                if (match.length >= 19) writeLength(output, &used, match.length - 19);
+                pos += match.length;
+                anchor = pos;
+            }
+        }
+        const literals = input.len - anchor;
+        output[used] = @as(u8, @intCast(@min(literals, 15))) << 4;
+        used += 1;
+        if (literals >= 15) writeLength(output, &used, literals - 15);
+        @memcpy(output[used..][0..literals], input[anchor..]);
+        return output[0 .. used + literals];
+    }
+
+    const Match = struct { offset: usize = 0, length: usize = 0 };
+
+    fn hash(input: []const u8, pos: usize) usize {
+        return (std.mem.readInt(u32, input[pos..][0..4], .little) *% 2654435761) >> (32 - dense_hash_bits);
+    }
+
+    fn insert(self: *DenseEncoder, input: []const u8, base: u32, pos: usize) void {
+        const h = hash(input, pos);
+        self.chain[pos & 0xffff] = self.head[h];
+        self.head[h] = base + @as(u32, @intCast(pos));
+    }
+
+    fn longest(self: *DenseEncoder, input: []const u8, base: u32, pos: usize, limit: usize) Match {
+        var best: Match = .{};
+        var candidate = self.head[hash(input, pos)];
+        var tries: usize = 0;
+        // Chain links only point backwards, and anything below base or out of reach ends the walk.
+        while (tries < attempts and candidate >= base) : (tries += 1) {
+            const at = candidate - base;
+            if (at >= pos or pos - at > 65535) break;
+            const next = self.chain[at & 0xffff];
+            candidate = if (next < candidate) next else 0;
+            if (input[at + best.length] != input[pos + best.length] or
+                !std.mem.eql(u8, input[at..][0..4], input[pos..][0..4])) continue;
+            var length: usize = 4;
+            while (pos + length + 8 <= limit) {
+                const diff = std.mem.readInt(u64, input[at + length ..][0..8], .little) ^
+                    std.mem.readInt(u64, input[pos + length ..][0..8], .little);
+                if (diff != 0) {
+                    length += @ctz(diff) / 8;
+                    break;
+                }
+                length += 8;
+            } else while (pos + length < limit and input[at + length] == input[pos + length]) : (length += 1) {}
+            if (length > best.length) {
+                best = .{ .offset = pos - at, .length = length };
+                if (pos + length >= limit) break;
+            }
+        }
+        return best;
+    }
+};
+
 pub fn validate(input: []const u8, raw_len: usize) Error!void {
     try decodeBlock(input, raw_len, null);
 }

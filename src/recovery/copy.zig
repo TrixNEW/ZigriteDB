@@ -28,8 +28,12 @@ pub const Result = struct {
     output_bytes: u64 = 0,
 };
 
-/// Drops a torn active tail; the source is never modified.
 pub fn recoverTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, destination: std.Io.Dir, options: Options) !Result {
+    try (@import("../region/store.zig").Options{
+        .max_segments = options.max_segments,
+        .max_segment_size = options.max_segment_size,
+        .batch_buffer_size = options.batch_buffer_size,
+    }).validate();
     if (options.stats) |s| _ = s.recovery_attempts.fetchAdd(1, .monotonic);
     errdefer if (options.stats) |s| {
         _ = s.recovery_errors.fetchAdd(1, .monotonic);
@@ -53,7 +57,10 @@ pub fn recoverTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, d
     var result: Result = .{ .segment_count = metadata.segments.len };
     var order: scan.Order = .{ .last_batch_id = metadata.base_batch_id };
     var created: usize = 0;
-    errdefer for (metadata.segments[0..created]) |id| files.removeSegment(output.dir, io, metadata.generation, id) catch {};
+    var publishing = false;
+    errdefer if (!publishing) {
+        for (metadata.segments[0..created]) |id| files.removeSegment(output.dir, io, metadata.generation, id) catch {};
+    };
     for (metadata.segments, 0..) |id, position| {
         const original = try files.openSegment(input.dir, io, metadata.generation, id, false);
         defer original.close(io);
@@ -84,6 +91,8 @@ pub fn recoverTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, d
     result.last_batch_id = order.last_batch_id;
 
     var publisher: publication.Publisher(*Directory) = .{ .backend = &output };
+    // A failed directory sync can leave the new manifest visible.
+    publishing = true;
     try publisher.publish(bytes);
     return result;
 }

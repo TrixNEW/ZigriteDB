@@ -49,6 +49,29 @@ test "a clean close leaves an INDEX that reopens without replaying" {
     try testing.expectError(error.ChecksumMismatch, damaged.get(key(0), &output));
 }
 
+test "checkpoint loading fits a small region in a bounded allocator" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try populate(tmp.dir, .{});
+    var buffer: [256 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&buffer);
+    var store = try db.Store.open(fixed.allocator(), io, tmp.dir, .{});
+    defer store.deinit();
+    try testing.expect(store.checkpointed.offset != 0);
+    try expectPopulated(&store);
+    try store.close();
+}
+
+test "checkpoint entries reject truncated bytes and invalid component keys" {
+    var bytes: [db.checkpoint.entry_len]u8 = undefined;
+    const location: db.index.Location = .{ .batch_id = 1, .offset = 48, .stored_len = 1, .raw_len = 1, .fingerprint = 0, .segment = 0, .compression = .none };
+    db.checkpoint.writeEntry(&bytes, 0x2c80, location, false);
+    for (0..bytes.len) |len| try testing.expectError(error.InvalidLength, db.checkpoint.readEntry(bytes[0..len], false));
+    try testing.expectError(error.InvalidLength, db.checkpoint.readEntry(&bytes, true));
+    bytes[0] = 0;
+    try testing.expectError(error.InvalidFlags, db.checkpoint.readEntry(&bytes, false));
+}
+
 test "damaged checkpoints are ignored and rebuilt from segments" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -137,7 +160,6 @@ test "checkpoints from older generations and other options are ignored" {
     try testing.expectEqual(@as(u64, 2), store.generation.index.generation);
     try store.close();
 
-    // INDEX without fingerprints can't serve skip_unchanged.
     var stats: db.Stats = .{};
     var skipping = try db.Store.open(testing.allocator, io, tmp.dir, .{ .skip_unchanged = true, .stats = &stats });
     defer skipping.deinit();

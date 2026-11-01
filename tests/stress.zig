@@ -13,7 +13,7 @@ const regions = 4;
 
 const Shared = struct {
     world: *db.World,
-    acknowledged: [writers]std.atomic.Value(u64) = .{std.atomic.Value(u64).init(0)} ** writers,
+    acknowledged: [writers]std.atomic.Value(u64) = @splat(.init(0)),
     done: std.atomic.Value(bool) = .init(false),
     failure: std.atomic.Value(u32) = .init(0),
 
@@ -41,7 +41,7 @@ fn write(shared: *Shared, writer: usize) void {
 fn read(shared: *Shared, seed: u64) void {
     var rng = std.Random.DefaultPrng.init(seed);
     var output: [16]u8 = undefined;
-    var seen = [_][regions]u64{[_]u64{0} ** regions} ** writers;
+    var seen: [writers][regions]u64 = @splat(@splat(0));
     while (!shared.done.load(.acquire)) {
         const writer = rng.random().uintLessThan(usize, writers);
         const region = rng.random().uintLessThan(usize, regions);
@@ -91,7 +91,7 @@ test "readers, writers, compaction, eviction and the cache all agree with the wr
     defer reopened.deinit();
     var output: [16]u8 = undefined;
     for (0..writers) |writer| {
-        var last = [_]u64{0} ** regions;
+        var last: [regions]u64 = @splat(0);
         var rng = std.Random.DefaultPrng.init(writer);
         for (1..rounds + 1) |sequence| last[rng.random().uintLessThan(usize, regions)] = sequence;
         for (last, 0..) |sequence, region| {
@@ -174,7 +174,6 @@ fn readHotMany(hot: *Hot) void {
 }
 
 fn compactHot(hot: *Hot) void {
-    // Compact every few writes so the writer does not starve.
     var last: usize = 0;
     while (!hot.done.load(.acquire)) {
         const progress = hot.progress.load(.acquire);

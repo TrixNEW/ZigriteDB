@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// CRC-32C, using the CPU's instruction when it has one.
 pub const Implementation = enum { hardware, software };
 
 const native = switch (builtin.cpu.arch) {
@@ -12,7 +11,6 @@ const native = switch (builtin.cpu.arch) {
 
 const Update = *const fn (u32, []const u8) u32;
 
-// Picks the implementation on first use.
 var selected: Update = &resolve;
 
 pub fn hash(bytes: []const u8) u32 {
@@ -113,7 +111,7 @@ test "every implementation matches the reference CRC-32C for each length and ali
     for (0..bytes.len) |len| {
         for (0..@min(9, bytes.len - len + 1)) |start| {
             const slice = bytes[start..][0..len];
-            const expected = std.hash.crc.Crc32Iscsi.hash(slice);
+            const expected = std.hash.crc.@"CRC-32/ISCSI".hash(slice);
             try std.testing.expectEqual(expected, hash(slice));
             try std.testing.expectEqual(expected, ~software(0xffff_ffff, slice));
             if (has_hardware) try std.testing.expectEqual(expected, ~hardware(0xffff_ffff, slice));

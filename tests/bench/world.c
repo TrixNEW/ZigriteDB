@@ -10,7 +10,7 @@
 #include <sys/resource.h>
 #include <unistd.h>
 
-enum { MAX_THREADS = 16, RADIUS = 8, MAX_RECORDS = 256 };
+enum { MAX_THREADS = 64, RADIUS = 8, MAX_RECORDS = 256 };
 
 typedef struct {
     uint8_t tag;
@@ -337,6 +337,9 @@ typedef struct {
     uint32_t random;
     double *samples, *extra;
     size_t calls, extra_calls;
+    size_t completed[2];
+    double latency_sum[2], latency_max[2];
+    uint64_t sampling;
     uint8_t *output;
     uint8_t *values[2];
     const Chunk *fixed;
@@ -387,8 +390,8 @@ static void saveWhole(Store *store, const Chunk *chunk) {
 static Worker workers[MAX_THREADS + 1];
 
 static void initWorkers(size_t samples) {
-    for (int t = 0; t <= MAX_THREADS; t++) {
-        Worker *w = &workers[t];
+    for (int t = 0; t <= threads; t++) {
+        Worker *w = &workers[t < threads ? t : MAX_THREADS];
         if (!w->output) {
             w->output = malloc(max_chunk_bytes + 1);
             w->values[0] = malloc(max_value + 1);
@@ -399,14 +402,24 @@ static void initWorkers(size_t samples) {
         w->samples = malloc(samples * sizeof(double));
         w->extra = malloc(samples * sizeof(double));
         w->calls = w->extra_calls = 0;
+        memset(w->completed, 0, sizeof(w->completed));
+        memset(w->latency_sum, 0, sizeof(w->latency_sum));
+        memset(w->latency_max, 0, sizeof(w->latency_max));
         w->index = t;
         w->random = 42u + (uint32_t)t * 7919u;
+        w->sampling = 42u + (uint32_t)t * 7919u;
     }
 }
 
 static void reportSamples(const char *name, int count, int use_extra, double elapsed) {
-    size_t total = 0;
-    for (int t = 0; t < count; t++) total += use_extra ? workers[t].extra_calls : workers[t].calls;
+    size_t total = 0, completed = 0;
+    double sum = 0, maximum = 0;
+    for (int t = 0; t < count; t++) {
+        total += use_extra ? workers[t].extra_calls : workers[t].calls;
+        completed += workers[t].completed[use_extra];
+        sum += workers[t].latency_sum[use_extra];
+        if (workers[t].latency_max[use_extra] > maximum) maximum = workers[t].latency_max[use_extra];
+    }
     double *merged = malloc((total ? total : 1) * sizeof(double));
     size_t at = 0;
     for (int t = 0; t < count; t++) {
@@ -415,7 +428,8 @@ static void reportSamples(const char *name, int count, int use_extra, double ela
         at += n;
     }
     printf(",");
-    if (total) report(name, merged, total, elapsed);
+    if (completed) reportCounted(name, merged, total, completed, elapsed, sum, maximum);
+    else if (total) report(name, merged, total, elapsed);
     else printf("\"%s\":null", name);
     free(merged);
 }
@@ -530,6 +544,24 @@ static void phaseAutosave(Store *store) {
 
 static atomic_int stop_mixed;
 
+static void sample(Worker *w, int extra, double latency) {
+    size_t completed = ++w->completed[extra];
+    w->latency_sum[extra] += latency;
+    if (latency > w->latency_max[extra]) w->latency_max[extra] = latency;
+    const size_t capacity = ops * 64;
+    size_t index = completed - 1;
+    if (completed > capacity) {
+        w->sampling ^= w->sampling >> 12;
+        w->sampling ^= w->sampling << 25;
+        w->sampling ^= w->sampling >> 27;
+        index = (w->sampling * UINT64_C(2685821657736338717)) % completed;
+    }
+    if (index >= capacity) return;
+    (extra ? w->extra : w->samples)[index] = latency;
+    size_t *count = extra ? &w->extra_calls : &w->calls;
+    if (*count < capacity) ++*count;
+}
+
 static void *mixedWorker(void *arg) {
     Worker *w = arg;
     int32_t px = min_x + (int32_t)(next(&w->random) % (uint32_t)width);
@@ -551,10 +583,10 @@ static void *mixedWorker(void *arg) {
         double before = now();
         if (is_update) {
             update(w, chunk);
-            if (w->extra_calls < ops * 64) w->extra[w->extra_calls++] = now() - before;
+            sample(w, 1, now() - before);
         } else {
             load(w->store, chunk, w->output, 0);
-            if (w->calls < ops * 64) w->samples[w->calls++] = now() - before;
+            sample(w, 0, now() - before);
         }
     }
     return NULL;
@@ -566,7 +598,7 @@ static void *autosaver(void *arg) {
         usleep(250000);
         double before = now();
         flushStore(w->store);
-        w->samples[w->calls++] = now() - before;
+        sample(w, 0, now() - before);
     }
     return NULL;
 }
@@ -591,12 +623,10 @@ static void phaseMixed(Store *store) {
     double elapsed = now() - started;
     reportSamples("mixed_load", threads, 0, elapsed);
     reportSamples("mixed_update", threads, 1, elapsed);
-    double *barriers = malloc((saving->calls ? saving->calls : 1) * sizeof(double));
-    memcpy(barriers, saving->samples, saving->calls * sizeof(double));
     printf(",");
-    if (saving->calls) report("mixed_barrier", barriers, saving->calls, elapsed);
+    if (saving->calls) reportCounted("mixed_barrier", saving->samples, saving->calls, saving->completed[0],
+                                    elapsed, saving->latency_sum[0], saving->latency_max[0]);
     else printf("\"mixed_barrier\":null");
-    free(barriers);
 }
 
 static void compactAll(Store *store) {
@@ -693,7 +723,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "regions")) max_regions = (uint32_t)strtoul(value, NULL, 10);
         else return 1;
     }
-    if (threads < 1 || threads > MAX_THREADS || !ops) return 1;
+    if (threads < 1 || threads > MAX_THREADS || !ops || ops > SIZE_MAX / (64 * sizeof(double)) ||
+        !(seconds > 0 && seconds <= 3600)) return 1;
     for (int i = 0; i < 256; i++) pthread_mutex_init(&stripes[i], NULL);
     loadDataset(argv[3]);
     size_t raw = 0;

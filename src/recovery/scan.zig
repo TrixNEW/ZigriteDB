@@ -11,7 +11,6 @@ pub const Error = frame.Error || segment.Error || error{
     SegmentTooLarge,
 };
 
-/// Only the active segment may end in a torn tail.
 pub const Mode = enum { sealed, active };
 
 pub const Batch = struct {
@@ -29,9 +28,7 @@ pub const Batch = struct {
 };
 
 pub const Order = struct {
-    /// Starts at the manifest's base batch ID.
     last_batch_id: u64 = 0,
-    /// Base frames may only open a generation.
     seen_batch: bool = false,
 
     pub fn accept(self: *Order, header: frame.Header) Error!void {
@@ -173,7 +170,7 @@ pub fn FileScanner(comptime Device: type) type {
                 return self.next(scratch.*) catch |err| {
                     const limit = frame.max_bytes + frame.header_len;
                     if (err != error.BufferTooSmall or scratch.len >= limit) return err;
-                    scratch.* = try allocator.realloc(scratch.*, @min(scratch.len * 2, limit));
+                    scratch.* = try allocator.realloc(scratch.*, @min(@max(scratch.len * 2, frame.header_len), limit));
                     continue;
                 };
             }

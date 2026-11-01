@@ -26,7 +26,7 @@ pub const Header = struct {
 
     pub fn encode(self: Header) Error![encoded_len]u8 {
         try self.validate();
-        var bytes = [_]u8{0} ** encoded_len;
+        var bytes: [encoded_len]u8 = @splat(0);
         @memcpy(bytes[0..4], "ZGSG");
         std.mem.writeInt(u16, bytes[4..6], version, .little);
         std.mem.writeInt(u64, bytes[8..16], self.segment_id, .little);
@@ -73,7 +73,6 @@ pub const Header = struct {
     }
 };
 
-/// Never zero.
 pub fn newSalt(io: std.Io) u64 {
     var bytes: [8]u8 = undefined;
     io.random(&bytes);

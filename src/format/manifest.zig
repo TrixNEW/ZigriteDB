@@ -24,12 +24,10 @@ pub const Error = error{
     BufferTooSmall,
 };
 
-/// Sorted IDs; the last one is active.
 pub const Manifest = struct {
     generation: u64,
     region: Region,
     segments: []const u64,
-    /// Shared by the generation's base frames.
     base_batch_id: u64 = 0,
     salt: u64,
 

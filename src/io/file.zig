@@ -28,7 +28,6 @@ pub const File = struct {
         return self.handle.writePositional(self.io, &.{bytes}, offset);
     }
 
-    /// Each call is capped at the readahead window, so it goes in steps.
     pub fn willNeed(self: File, len: u64) void {
         if (builtin.os.tag != .linux) return;
         const step = 1024 * 1024;
@@ -63,7 +62,6 @@ pub const File = struct {
     }
 };
 
-/// Test-only fault injection.
 pub const Faults = struct {
     fail_write: bool = false,
     fail_sync: bool = false,

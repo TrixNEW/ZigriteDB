@@ -15,12 +15,15 @@ const Store = store_module.Store;
 const AppendResult = store_module.AppendResult;
 const Directory = @import("../storage/directory.zig").Directory;
 const File = @import("../io/file.zig").File;
+const files = @import("../storage/files.zig");
 
 const cache_module = @import("../cache/value.zig");
 
 pub const Options = struct {
     max_open_regions: usize = 64,
     region: store_module.Options = .{},
+    /// Configures a world-owned cache. With zero bytes, region.cache is borrowed
+    /// and must not be shared with other worlds.
     cache: cache_module.Options = .{},
 };
 
@@ -51,14 +54,13 @@ pub const World = struct {
     closed: bool = false,
     closing: bool = false,
     changed: std.Io.Condition = .init,
-    missing: [256]?Region = .{null} ** 256,
+    missing: [256]?Region = @splat(null),
     positions: std.AutoHashMapUnmanaged(Region, u32) = .empty,
     loads: usize = 0,
     hand: usize = 0,
     compactor: ?Compactor = null,
     waiters: std.atomic.Value(usize) = .init(0),
     aux_mutex: std.Io.Mutex = .init,
-    // Evictions in flight and the first one that failed, reported by the next flush.
     evictions: usize = 0,
     evict_error: ?anyerror = null,
 
@@ -84,7 +86,6 @@ pub const World = struct {
         try options.region.validate();
         var directory = try Directory.init(dir, io);
         errdefer directory.deinit();
-        // Region directories from a crash may not be durable yet.
         try directory.syncEntries();
         try checkFormat(&directory);
         const slots = try allocator.alloc(Slot, options.max_open_regions);
@@ -112,7 +113,6 @@ pub const World = struct {
         return store.write(batch);
     }
 
-    /// Durable on return.
     pub fn writeGroup(self: *World, batches: []const WriteBatch) !AppendResult {
         const size = try write_module.validateGroup(batches);
         if (size > self.options.region.batch_buffer_size) return error.BufferTooSmall;
@@ -284,7 +284,7 @@ pub const World = struct {
     fn checkFormat(directory: *Directory) !void {
         var bytes: [12]u8 = undefined;
         const io = directory.io;
-        if (directory.dir.openFile(io, format_file, .{})) |file| {
+        if (files.openRegularFile(directory.dir, io, format_file)) |file| {
             defer file.close(io);
             const device: File = .{ .handle = file, .io = io };
             if (try device.length() != bytes.len) return error.InvalidFormatFile;
@@ -302,7 +302,10 @@ pub const World = struct {
             if (entry.kind != .directory or parseRegionName(entry.name) == null) continue;
             const region_dir = directory.dir.openDir(io, entry.name, .{ .follow_symlinks = false }) catch continue;
             defer region_dir.close(io);
-            const file = region_dir.openFile(io, "MANIFEST", .{}) catch continue;
+            const file = files.openRegularFile(region_dir, io, "MANIFEST") catch |err| {
+                if (err == error.FileNotFound) continue;
+                return err;
+            };
             defer file.close(io);
             var head: [6]u8 = undefined;
             (File{ .handle = file, .io = io }).readExact(&head, 0) catch continue;
@@ -464,7 +467,6 @@ pub const World = struct {
             if (self.find(region)) |i| return self.pin(&self.slots[i]);
             if (!create and self.knownMissing(region)) return null;
             if (self.count < self.slots.len or self.hasIdle()) return self.load(region, create) catch |err| switch (err) {
-                // A reader pinned the last idle region after `hasIdle`.
                 error.NoIdleSlot => {
                     try self.waitIdle();
                     continue;
@@ -637,7 +639,6 @@ pub const World = struct {
         self.positions.getPtr(self.slots[i].region).?.* = @intCast(i);
     }
 
-    /// Second chance: recently pinned regions are skipped once.
     fn idleIndex(self: *World) ?usize {
         for (0..2 * self.count) |step| {
             const i = (self.hand + step) % self.count;
@@ -662,23 +663,27 @@ pub const World = struct {
             break :blk try self.directory.dir.openDir(self.io, name, .{ .follow_symlinks = false });
         };
         defer dir.close(self.io);
+        if (!created) if (dir.access(self.io, "PENDING", .{})) try self.directory.syncEntries() else |err| if (err != error.FileNotFound) return err;
         const opened = try self.allocator.create(Opened);
         errdefer self.allocator.destroy(opened);
         opened.* = .{ .store = undefined };
         const store = &opened.store;
         store.* = if (created)
-            try Store.create(self.allocator, self.io, dir, region, self.options.region)
+            try Store.createDeferred(self.allocator, self.io, dir, region, self.options.region, self.directory.dir)
         else
             Store.open(self.allocator, self.io, dir, self.options.region) catch |err| blk: {
-                if ((err != error.MissingManifest and err != error.NeedsRecovery) or !create) return err;
-                break :blk Store.create(self.allocator, self.io, dir, region, self.options.region) catch |create_err| {
+                if (err == error.EmptyRegion and !create) {
+                    self.allocator.destroy(opened);
+                    return null;
+                }
+                if ((err != error.MissingManifest and err != error.NeedsRecovery and err != error.EmptyRegion) or !create) return err;
+                break :blk Store.createDeferred(self.allocator, self.io, dir, region, self.options.region, self.directory.dir) catch |create_err| {
                     if (create_err == error.DirectoryNotEmpty) return err;
                     return create_err;
                 };
             };
         errdefer store.deinit();
         if (!store.region.eql(region)) return error.RegionMismatch;
-        if (created) try self.directory.syncEntries();
         return opened;
     }
 
@@ -696,11 +701,12 @@ pub const World = struct {
     }
 
     fn release(self: *World) void {
-        if (self.options.region.cache) |cache| {
+        if (self.options.cache.bytes > 0) {
+            const cache = self.options.region.cache.?;
             cache.deinit();
             self.allocator.destroy(cache);
-            self.options.region.cache = null;
         }
+        self.options.region.cache = null;
         self.table.lockUncancelable(self.io);
         defer self.table.unlock(self.io);
         self.allocator.free(self.slots);

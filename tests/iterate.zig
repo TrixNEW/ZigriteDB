@@ -21,7 +21,7 @@ test "filters match components and inclusive chunk bounds" {
     try testing.expect(filter.matches(at(3, 99, .data3d, 0)));
     try testing.expect(!filter.matches(at(4, 0, .data3d, 0)));
     try testing.expect(!filter.matches(at(0, 0, .subchunk, 0)));
-    try testing.expect((db.KeyFilter{}).matches(at(0, 0, @enumFromInt(0xff), 0)));
+    try testing.expect((db.KeyFilter{}).matches(at(0, 0, @fromBackingInt(@intCast(0xff)), 0)));
 }
 
 test "regions and keys come back sorted and survive compaction between snapshot and read" {

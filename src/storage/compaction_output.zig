@@ -45,7 +45,6 @@ pub const CompactionOutput = struct {
         return .{ .position = self.count - 1, .offset = offset };
     }
 
-    /// Creates a segment if none exist yet.
     pub fn sync(self: *CompactionOutput) !void {
         if (self.count == 0) try self.rotate();
         for (self.devices[self.synced..self.count]) |device| try device.sync();

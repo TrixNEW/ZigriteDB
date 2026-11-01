@@ -1,4 +1,4 @@
-//! zig build micro -Doptimize=ReleaseFast -- [dataset.zgds]
+//! zig build micro -Doptimize=ReleaseFast -- [dataset.zgds | reopen <empty directory> | create <empty directory>]
 const std = @import("std");
 const db = @import("zigritedb");
 
@@ -70,35 +70,35 @@ fn lz4Bench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, path:
     var raw: usize = 0;
     var t = Timer.begin(io);
     var at: usize = 0;
+    var count: usize = 0;
     for (values, 0..) |value, i| {
         offsets[i] = at;
-        if (at + value.len * 2 + 64 > compressed.len) break;
+        if (try db.lz4.bound(value.len) > compressed.len - at) break;
         at += (try encoder.compress(value.bytes, compressed[at..])).len;
         raw += value.len;
+        count += 1;
     }
-    offsets[values.len] = at;
+    offsets[count] = at;
     const compress = @as(f64, @floatFromInt(raw)) / t.seconds() / 1e6;
     t = Timer.begin(io);
-    for (values, 0..) |value, i| {
+    for (values[0..count], 0..) |value, i| {
         const stored = compressed[offsets[i]..offsets[i + 1]];
         sink +%= (try db.lz4.decompress(stored, &output, value.len)).len;
     }
     const decompress = @as(f64, @floatFromInt(raw)) / t.seconds() / 1e6;
-    try out.print(",\"lz4_subchunks\":{{\"values\":{},\"ratio\":{d:.3},\"compress_mbps\":{d:.0},\"decompress_mbps\":{d:.0}}}", .{ values.len, @as(f64, @floatFromInt(at)) / @as(f64, @floatFromInt(raw)), compress, decompress });
+    try out.print(",\"lz4_subchunks\":{{\"values\":{},\"ratio\":{d:.3},\"compress_mbps\":{d:.0},\"decompress_mbps\":{d:.0}}}", .{ count, if (raw == 0) 0 else @as(f64, @floatFromInt(at)) / @as(f64, @floatFromInt(raw)), compress, decompress });
 }
 
-/// The v1 index: packed u64 keys in a hash map of 32-byte locations.
 const OldLocation = struct { offset: u64, batch_id: u64, stored_len: u32, raw_len: u32, fingerprint: u32, segment: u16 };
 
 fn indexBench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer) !void {
-    // A full region: 1024 chunks with 24 subchunks and 8 other components each.
     const per_chunk = 32;
     const total = 1024 * per_chunk;
     var keys = try allocator.alloc(struct { slot: u10, local: u16 }, total);
     defer allocator.free(keys);
     for (0..1024) |slot| {
         for (0..per_chunk) |c| {
-            const local = if (c < 24) db.key.localKey(.subchunk, @intCast(@as(i32, @intCast(c)) - 4)) else db.key.localKey(@enumFromInt(0x31 + c - 24), 0);
+            const local = if (c < 24) db.key.localKey(.subchunk, @intCast(@as(i32, @intCast(c)) - 4)) else db.key.localKey(@fromBackingInt(@intCast(0x31 + c - 24)), 0);
             keys[slot * per_chunk + c] = .{ .slot = @intCast(slot), .local = local };
         }
     }
@@ -163,6 +163,7 @@ const CountingAllocator = struct {
     parent: std.mem.Allocator,
     held: usize = 0,
     peak: usize = 0,
+    allocations: usize = 0,
 
     fn allocator(self: *CountingAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
@@ -172,6 +173,7 @@ const CountingAllocator = struct {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         const result = self.parent.rawAlloc(len, alignment, ret) orelse return null;
         self.held += len;
+        self.allocations += 1;
         self.peak = @max(self.peak, self.held);
         return result;
     }
@@ -199,6 +201,67 @@ const CountingAllocator = struct {
     }
 };
 
+fn reopenBench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, path: []const u8) !void {
+    const dir = try std.Io.Dir.cwd().openDir(io, path, .{});
+    defer dir.close(io);
+    const region: db.Region = .{ .dimension = 0, .x = 0, .z = 0 };
+    var entries: [32]db.Entry = undefined;
+    for (&entries, 0..) |*entry, i| entry.* = .put(.{ .dimension = 0, .chunk_x = 0, .chunk_z = 0, .component = .subchunk, .subchunk_y = @intCast(i) }, "value");
+    {
+        var store = try db.Store.create(allocator, io, dir, region, .{});
+        defer store.deinit();
+        _ = try store.write(.{ .entries = &entries });
+        try store.close();
+    }
+    const rounds = 256;
+    var counting: CountingAllocator = .{ .parent = allocator };
+    var retained: usize = 0;
+    const timer = Timer.begin(io);
+    for (0..rounds) |_| {
+        var store = try db.Store.open(counting.allocator(), io, dir, .{});
+        defer store.deinit();
+        if (store.checkpointed.offset == 0 or try store.lastBatchId() != 1) return error.BadCheckpoint;
+        retained = counting.held;
+    }
+    if (counting.held != 0) return error.LeakedMemory;
+    try out.print("{{\"checkpoint\":{{\"records\":{},\"rounds\":{},\"open_us\":{d:.2},\"peak_bytes\":{},\"retained_bytes\":{},\"allocations_per_open\":{}}}}}\n", .{
+        entries.len, rounds, timer.seconds() * 1e6 / rounds, counting.peak, retained, counting.allocations / rounds,
+    });
+}
+
+fn createBench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, path: []const u8) !void {
+    const dir = try std.Io.Dir.cwd().openDir(io, path, .{});
+    defer dir.close(io);
+    var world = try db.World.open(allocator, io, dir, .{});
+    defer world.deinit();
+    var value: [4096]u8 = undefined;
+    for (&value, 0..) |*b, i| b.* = @truncate(i *% 2654435761 >> 7);
+    const regions = 64;
+    var latencies: [regions]u64 = undefined;
+    const total = Timer.begin(io);
+    for (&latencies, 0..) |*latency, r| {
+        var entries: [8]db.Entry = undefined;
+        for (&entries, 0..) |*entry, y| entry.* = .put(.{ .dimension = 0, .chunk_x = @intCast(r * 32), .chunk_z = 0, .component = .subchunk, .subchunk_y = @intCast(y) }, &value);
+        const t = Timer.begin(io);
+        _ = try world.write(.{ .entries = &entries });
+        latency.* = @intFromFloat(t.seconds() * 1e9);
+    }
+    const writes = total.seconds();
+    const flush = Timer.begin(io);
+    try world.flush();
+    const flush_ms = flush.seconds() * 1e3;
+    try world.close();
+    std.mem.sort(u64, &latencies, {}, std.sort.asc(u64));
+    try out.print("{{\"create\":{{\"regions\":{},\"first_write_p50_us\":{d:.1},\"first_write_p99_us\":{d:.1},\"first_write_max_us\":{d:.1},\"writes_ms\":{d:.2},\"flush_ms\":{d:.2}}}}}\n", .{
+        regions,
+        @as(f64, @floatFromInt(latencies[regions / 2])) / 1e3,
+        @as(f64, @floatFromInt(latencies[regions * 99 / 100])) / 1e3,
+        @as(f64, @floatFromInt(latencies[regions - 1])) / 1e3,
+        writes * 1e3,
+        flush_ms,
+    });
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -206,6 +269,16 @@ pub fn main(init: std.process.Init) !void {
     var stdout = std.Io.File.stdout().writer(io, &buffer);
     const out = &stdout.interface;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len > 1 and std.mem.eql(u8, args[1], "reopen")) {
+        if (args.len != 3) return error.InvalidArgument;
+        try reopenBench(allocator, io, out, args[2]);
+        return out.flush();
+    }
+    if (args.len > 1 and std.mem.eql(u8, args[1], "create")) {
+        if (args.len != 3) return error.InvalidArgument;
+        try createBench(allocator, io, out, args[2]);
+        return out.flush();
+    }
     try out.writeAll("{");
     try crcBench(io, out);
     try indexBench(allocator, io, out);

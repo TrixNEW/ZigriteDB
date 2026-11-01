@@ -138,6 +138,32 @@ test "file scanning matches memory scanning at every cut and window size" {
     try testing.expectError(error.SegmentTooLarge, db.recovery.FileScanner(db.storage.File).init(file, header, .active, .{}, 64));
 }
 
+test "growing file scans make progress from an empty buffer" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var bytes: [256]u8 = undefined;
+    var ends: [1]usize = undefined;
+    const end = try segmentWith(&bytes, &.{.{ .kind = .batch, .id = 1 }}, &ends);
+    const handle = try tmp.dir.createFile(io, "segment", .{ .read = true });
+    defer handle.close(io);
+    const file: db.storage.File = .{ .handle = handle, .io = io };
+    try file.writeAll(bytes[0..end], 0);
+    var scanner = try db.recovery.FileScanner(db.storage.File).init(file, header, .sealed, .{}, 1024);
+    var scratch: []u8 = &.{};
+    defer testing.allocator.free(scratch);
+    try testing.expectEqual(@as(u64, 1), (try scanner.nextGrowing(testing.allocator, &scratch)).?.header.batch_id);
+    try testing.expectEqual(null, try scanner.nextGrowing(testing.allocator, &scratch));
+}
+
+test "recovery rejects invalid options before opening directories" {
+    var source = testing.tmpDir(.{});
+    defer source.cleanup();
+    var destination = testing.tmpDir(.{});
+    defer destination.cleanup();
+    try testing.expectError(error.InvalidBufferSize, db.recovery_copy.recoverTo(testing.allocator, io, source.dir, destination.dir, .{ .batch_buffer_size = 0 }));
+    try testing.expectError(error.InvalidSegmentCount, db.recovery_copy.recoverTo(testing.allocator, io, source.dir, destination.dir, .{ .max_segments = 0 }));
+}
+
 fn populate(dir: std.Io.Dir) !void {
     var store = try db.Store.create(testing.allocator, io, dir, support.region, .{
         .max_segment_size = try support.segmentFor(&.{batch(1, &.{put(0, "saved")})}),

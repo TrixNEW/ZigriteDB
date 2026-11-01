@@ -6,7 +6,7 @@ const io = testing.io;
 const leveldb = db.leveldb;
 
 fn chunkKey(x: i32, z: i32, dim: i32, tag: u8, y: ?i8, out: *[16]u8) []const u8 {
-    return db.bedrock.levelKey(.{ .dimension = dim, .chunk_x = x, .chunk_z = z, .component = @enumFromInt(tag), .subchunk_y = y orelse 0 }, out);
+    return db.bedrock.levelKey(.{ .dimension = dim, .chunk_x = x, .chunk_z = z, .component = @fromBackingInt(@intCast(tag)), .subchunk_y = y orelse 0 }, out);
 }
 
 const Expected = std.StringArrayHashMapUnmanaged([]const u8);
@@ -39,6 +39,9 @@ fn buildWorld(arena: std.mem.Allocator, parent: std.Io.Dir, expected: *Expected)
     try keys.append(arena, "actorprefix" ++ [_]u8{ 0, 0, 0, 1, 0, 0, 0, 7 });
     try keys.append(arena, &[_]u8{ 7, 0, 0, 0, 11, 0, 0, 0 } ++ "PMMPDataVersion");
     try keys.append(arena, &[_]u8{ 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0x2c });
+    for ([_]u8{ 0x2c, 0x2f, 0x80 }) |tag| {
+        try keys.append(arena, try arena.dupe(u8, chunkKey(7, 11, db.aux.dimension, tag, if (tag == 0x2f) -4 else null, &buffer)));
+    }
     std.mem.sort([]const u8, keys.items, {}, struct {
         fn lessThan(_: void, a: []const u8, b: []const u8) bool {
             return std.mem.order(u8, a, b) == .lt;
@@ -112,7 +115,7 @@ test "import and export keep every key, value and world file" {
 
     const imported = try db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "zigrite");
     try testing.expectEqual(@as(u64, expected.count()), imported.chunk_records + imported.aux_records);
-    try testing.expectEqual(@as(u64, 11), imported.aux_records);
+    try testing.expectEqual(@as(u64, 14), imported.aux_records);
     try testing.expectError(error.PathAlreadyExists, db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "zigrite"));
     {
         const dir = try tmp.dir.openDir(io, "zigrite", .{});
@@ -195,4 +198,26 @@ test "a torn log tail keeps the records before it" {
         try testing.expectEqualStrings("first", (try reader.next(testing.allocator)).?);
         try testing.expectEqual(null, try reader.next(testing.allocator));
     }
+}
+
+test "LevelDB tables keep user-key prefix order across files" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const value = try testing.allocator.alloc(u8, 2 * 1024 * 1024);
+    defer testing.allocator.free(value);
+    @memset(value, 'x');
+    var writer = try leveldb.Writer.init(testing.allocator, io, tmp.dir, .none);
+    defer writer.deinit();
+    try writer.add("a", value);
+    try writer.add("a\x00", "last");
+    try writer.finish();
+    var reader = try leveldb.Reader.open(testing.allocator, io, tmp.dir);
+    defer reader.deinit();
+    const first = (try reader.next()).?;
+    try testing.expectEqualStrings("a", first[0]);
+    try testing.expectEqualSlices(u8, value, first[1]);
+    const second = (try reader.next()).?;
+    try testing.expectEqualStrings("a\x00", second[0]);
+    try testing.expectEqualStrings("last", second[1]);
+    try testing.expectEqual(null, try reader.next());
 }
