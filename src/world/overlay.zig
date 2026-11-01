@@ -5,7 +5,6 @@ const Key = @import("../format/key.zig").Key;
 const world_module = @import("world.zig");
 const World = world_module.World;
 
-/// Copy-on-write view that checks overlay values before the base.
 pub const OverlayWorld = struct {
     allocator: std.mem.Allocator,
     io: std.Io,

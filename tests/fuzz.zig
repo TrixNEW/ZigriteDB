@@ -49,7 +49,6 @@ fn check(_: void, smith: *std.testing.Smith) !void {
     inline for (.{ .active, .sealed }) |mode| {
         var scanner = try db.recovery.Scanner.init(segment[0 .. db.segment.encoded_len + length], header, mode, .{});
         while (scanner.next() catch null) |batch| {
-            // Anything the scanner accepts must also index cleanly.
             var index = try db.index.Index.init(std.testing.allocator, header.region, 1, 1 << 16);
             defer index.deinit();
             try index.apply(batch, 0);

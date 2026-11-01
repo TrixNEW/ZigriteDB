@@ -14,7 +14,6 @@ pub const Staged = struct {
     dir: std.Io.Dir,
     published: bool = false,
 
-    /// Removes leftovers of an interrupted run.
     pub fn begin(io: std.Io, parent: std.Io.Dir, destination: []const u8) !Staged {
         if (parent.statFile(io, destination, .{ .follow_symlinks = false })) |_| {
             return error.PathAlreadyExists;
@@ -35,7 +34,6 @@ pub const Staged = struct {
     pub fn publish(self: *Staged) !void {
         try syncTree(self.io, self.dir);
         try self.parent.rename(self.name(), self.parent, self.destination, self.io);
-        // The caller's handle may be path-only.
         const parent = try self.parent.openDir(self.io, ".", .{ .iterate = true });
         defer parent.close(self.io);
         try (File{ .handle = .{ .handle = parent.handle, .flags = .{ .nonblocking = false } }, .io = self.io }).sync();

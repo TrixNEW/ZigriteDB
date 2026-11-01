@@ -160,7 +160,6 @@ test "checkpoints from older generations and other options are ignored" {
     try testing.expectEqual(@as(u64, 2), store.generation.index.generation);
     try store.close();
 
-    // INDEX without fingerprints can't serve skip_unchanged.
     var stats: db.Stats = .{};
     var skipping = try db.Store.open(testing.allocator, io, tmp.dir, .{ .skip_unchanged = true, .stats = &stats });
     defer skipping.deinit();

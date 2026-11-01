@@ -1,4 +1,3 @@
-//! One-time conversion of format 1 worlds.
 const std = @import("std");
 
 const crc = @import("../format/crc.zig");
@@ -35,7 +34,6 @@ pub fn component(old: u8) !Component {
     };
 }
 
-/// The source is only read; the destination appears once complete.
 pub fn migrate(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, source: []const u8, destination: []const u8) !Result {
     const input = try parent.openDir(io, source, .{ .iterate = true, .follow_symlinks = false });
     defer input.close(io);
@@ -107,7 +105,6 @@ fn migrateRegion(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, worl
             result.records += batch.entries.len;
         }
         if (reader.offset != bytes.len) {
-            // Only the active segment may end in a torn batch.
             if (i != count - 1) return error.IncompleteBatch;
             result.omitted_tail_bytes += bytes.len - reader.offset;
         }
@@ -124,7 +121,6 @@ fn checkSegment(bytes: []const u8, generation: u64, id: u64, region: Region) !vo
     if (!same) return error.IdentityMismatch;
 }
 
-/// Stops at a torn or damaged tail.
 const Reader = struct {
     bytes: []const u8,
     offset: usize,

@@ -70,11 +70,8 @@ pub const Encoder = struct {
     }
 };
 
-/// Slower and about 15% smaller than `Encoder`, for compaction. Hash chains with lazy
-/// matching, in the same block format, so reads don't change.
 pub const DenseEncoder = struct {
     head: [1 << dense_hash_bits]u32 = undefined,
-    // Previous position with the same hash, indexed by position mod 64 KiB.
     chain: [1 << 16]u32 = undefined,
     // Entries below base are from earlier inputs.
     base: u32 = 0,
@@ -104,7 +101,6 @@ pub const DenseEncoder = struct {
                     pos += 1;
                     continue;
                 }
-                // Lazy: a longer match one byte on is worth a literal.
                 while (pos + 1 <= last) {
                     while (inserted < pos + 1) : (inserted += 1) self.insert(input, base, inserted);
                     const next = self.longest(input, base, pos + 1, limit);
@@ -145,7 +141,6 @@ pub const DenseEncoder = struct {
         self.head[h] = base + @as(u32, @intCast(pos));
     }
 
-    /// Matches end before `limit`, keeping the last five bytes literal.
     fn longest(self: *DenseEncoder, input: []const u8, base: u32, pos: usize, limit: usize) Match {
         var best: Match = .{};
         var candidate = self.head[hash(input, pos)];

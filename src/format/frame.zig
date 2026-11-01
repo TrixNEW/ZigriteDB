@@ -10,7 +10,6 @@ pub const max_bytes = 64 * 1024 * 1024;
 
 pub const Kind = enum(u8) {
     batch = 1,
-    /// Compaction output; all base frames share one ID.
     base = 2,
 };
 
@@ -99,7 +98,6 @@ fn VisitError(comptime Visit: type) type {
     return if (result == .error_union) result.error_union.error_set else error{};
 }
 
-/// The header is written last, so the batch ID can be picked under the lock.
 pub const Builder = struct {
     buffer: []u8,
     len: usize = header_len,

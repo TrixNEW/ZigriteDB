@@ -73,7 +73,6 @@ pub const Header = struct {
     }
 };
 
-/// Never zero.
 pub fn newSalt(io: std.Io) u64 {
     var bytes: [8]u8 = undefined;
     io.random(&bytes);

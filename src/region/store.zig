@@ -36,15 +36,12 @@ pub const Options = struct {
     max_keys: u32 = 65536,
     max_segments: usize = 64,
     max_segment_size: u64 = 256 * 1024 * 1024,
-    /// Largest uncompressed frame.
     batch_buffer_size: usize = 1024 * 1024,
     durability: Durability = .buffered,
-    /// 0 disables compression.
     compression_threshold: u32 = 256,
     stats: ?*Stats = null,
     cache: ?*Cache = null,
     skip_unchanged: bool = false,
-    // Ask for compaction once live data drops below this share of a store this big.
     compact_min_bytes: u64 = 16 * 1024 * 1024,
     compact_live_percent: u8 = 50,
 
@@ -190,7 +187,6 @@ pub const Store = struct {
     segment_id: u64,
     offset: u64,
     synced_offset: u64,
-    // Bumped when the active segment changes.
     epoch: u64 = 0,
     failed: bool = false,
     closed: bool = false,
@@ -218,7 +214,6 @@ pub const Store = struct {
     pool_mutex: std.Io.Mutex = .init,
     pool: std.ArrayListUnmanaged(*Buffer) = .empty,
 
-    // What INDEX covers, so close only rewrites it after changes.
     checkpointed: Cover = .{},
 
     // A deferred region's world directory, until its first sync publishes it. Guarded by directory_mutex.
@@ -230,15 +225,12 @@ pub const Store = struct {
     const max_pooled_len = 1024 * 1024;
     const pending_name = "PENDING";
 
-    /// Durable on return.
     pub fn create(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, region: Region, options: Options) !Store {
         return init(allocator, io, dir, region, options, null);
     }
 
-    /// Syncs nothing. The first flush, sync write, rotation, compaction or close syncs `parent`,
-    /// which is borrowed and must outlive the store, then publishes the region. Until then the
-    /// directory holds PENDING, and open rebuilds the manifest from segment 1 after a crash.
-    /// Whoever opens a region holding PENDING must sync its parent first.
+    /// Syncs nothing until the first sync, which also syncs `parent` (borrowed) and publishes the
+    /// region. Whoever opens a region still holding PENDING must sync its parent first.
     pub fn createDeferred(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, region: Region, options: Options, parent: std.Io.Dir) !Store {
         return init(allocator, io, dir, region, options, parent);
     }
@@ -251,7 +243,6 @@ pub const Store = struct {
         var iterator = directory.dir.iterate();
         if (try iterator.next(io) != null) return error.DirectoryNotEmpty;
         const deferred = parent != null;
-        // Left in place on failure, since open discards PENDING with a missing or bad segment.
         if (deferred) (try directory.dir.createFile(io, pending_name, .{ .exclusive = true })).close(io);
 
         const salt = segment.newSalt(io);
@@ -299,7 +290,6 @@ pub const Store = struct {
             .base_batch_id = 0,
             .segment_id = 1,
             .offset = segment.encoded_len,
-            // Keeps a deferred region dirty until its header is synced.
             .synced_offset = if (deferred) 0 else segment.encoded_len,
             .generation = generation,
             .pool = pool,
@@ -326,7 +316,6 @@ pub const Store = struct {
         self.unpublished.store(false, .release);
     }
 
-    /// Removing PENDING rides on the directory sync that makes MANIFEST durable.
     fn publishFirst(directory: *Directory, bytes: []const u8) !void {
         try directory.writeTemporary(bytes);
         try directory.syncTemporary();
@@ -341,7 +330,6 @@ pub const Store = struct {
         const io = directory.io;
         directory.dir.access(io, pending_name, .{}) catch |err| {
             if (err != error.FileNotFound) return err;
-            // Only the mkdir survived a crash.
             var iterator = directory.dir.iterate();
             if (try iterator.next(io) == null) return error.EmptyRegion;
             return;
@@ -354,7 +342,6 @@ pub const Store = struct {
         } else |err| if (err != error.FileNotFound) return err;
         directory.dir.deleteFile(io, "MANIFEST.tmp") catch |err| if (err != error.FileNotFound) return err;
         const header = firstHeader(directory) catch |err| switch (err) {
-            // Nothing was synced, so nothing was acknowledged as durable.
             error.MissingSegment, error.Truncated, error.InvalidMagic, error.ChecksumMismatch => {
                 files.removeSegment(directory.dir, io, 1, 1) catch |remove_err| if (remove_err != error.FileNotFound) return remove_err;
                 try directory.dir.deleteFile(io, pending_name);
@@ -376,12 +363,10 @@ pub const Store = struct {
         try file.readExact(&bytes, 0);
         const header = try segment.Header.decode(&bytes);
         if (header.generation != 1 or header.segment_id != 1) return error.IdentityMismatch;
-        // A process crash can leave the data only in the page cache.
         try file.sync();
         return header;
     }
 
-    /// Callers set `index` afterwards.
     fn newGeneration(allocator: std.mem.Allocator, io: std.Io, capacity: usize) !*Generation {
         const devices = try allocator.alloc(File, capacity);
         errdefer allocator.free(devices);
@@ -494,13 +479,11 @@ pub const Store = struct {
             break :blk try replay(allocator, &generation.index, generation.devices[0..generation.count], metadata, options, &scratch, start.segments - 1, start.offset);
         };
         if (try active.length() != end) return error.FileChanged;
-        // An exact INDEX means the last close synced everything.
         const clean = if (covered) |c| c.segments == generation.count and c.offset == end else false;
         if (!clean) {
             try directory.syncEntries();
             try active.sync();
         }
-        // Nothing was read, so prefetch like a replay would.
         if (covered != null) {
             var budget: u64 = prefetch_limit;
             var i = generation.count;
@@ -537,7 +520,6 @@ pub const Store = struct {
         offset: u64 = 0,
     };
 
-    /// Any doubt leaves the index empty for a full replay.
     fn loadCheckpoint(allocator: std.mem.Allocator, io: std.Io, directory: *Directory, index: *Index, devices: []const File, metadata: manifest.Manifest, options: Options) !?Cover {
         const cover = readCheckpoint(allocator, io, directory, index, devices, metadata, options) catch |err| switch (err) {
             error.OutOfMemory => return err,
@@ -618,7 +600,6 @@ pub const Store = struct {
         return .{ .generation = header.generation, .segments = header.segments, .offset = header.offset };
     }
 
-    /// Failure only costs a slower open.
     fn writeCheckpoint(self: *Store) void {
         const generation = self.generation;
         const cover: Cover = .{ .generation = generation.index.generation, .segments = generation.count, .offset = self.offset };
@@ -647,7 +628,6 @@ pub const Store = struct {
         const handle = try self.directory.dir.createFile(self.io, checkpoint.name ++ ".tmp", .{ .truncate = true });
         defer handle.close(self.io);
         const file: File = .{ .handle = handle, .io = self.io };
-        // Keeps close free of allocations.
         var buffer: [checkpoint.block_len]u8 = undefined;
         var block: [checkpoint.block_header_len + checkpoint.block_len + checkpoint.block_len / 255 + 16]u8 = undefined;
         var writer: Spill = .{ .file = file, .buffer = &buffer, .block = &block, .offset = checkpoint.header_len };
@@ -726,18 +706,15 @@ pub const Store = struct {
         return end;
     }
 
-    /// Durable on return only with `.sync`.
     pub fn write(self: *Store, batch: WriteBatch) !AppendResult {
         return self.commit(&.{batch}, self.options.durability == .sync);
     }
 
-    /// Durable on return whatever the durability.
     pub fn writeGroup(self: *Store, batches: []const WriteBatch) !AppendResult {
         return self.commit(batches, true);
     }
 
     fn commit(self: *Store, batches: []const WriteBatch, durable: bool) !AppendResult {
-        // Callers must not race close.
         if (self.closed) return error.Closed;
         const size = try write_module.validateGroup(batches);
         if (size > self.options.batch_buffer_size) return error.BufferTooSmall;
@@ -836,7 +813,6 @@ pub const Store = struct {
         var skip: std.StaticBitSet(frame.max_records) = .empty;
         var offset: usize = frame.header_len;
         var skipped: u64 = 0;
-        // Decide what to keep before moving any records.
         for (0..builder.count) |i| {
             const header = record.Header.read(builder.buffer[offset..][0..record.header_len]) catch unreachable;
             const len = record.overhead + header.stored_len;
@@ -866,7 +842,6 @@ pub const Store = struct {
         if (self.options.stats) |s| _ = s.unchanged_write_skips.fetchAdd(skipped, .monotonic);
     }
 
-    /// Repeated keys are kept so the last one wins.
     fn repeated(_: *Store, builder: *const frame.Builder, header: record.Header) bool {
         var seen: usize = 0;
         var offset: usize = frame.header_len;
@@ -920,7 +895,6 @@ pub const Store = struct {
         if (stale or crowded) self.compaction_hint.store(true, .monotonic);
     }
 
-    /// True once each time the store goes stale.
     pub fn wantsCompaction(self: *Store) bool {
         return self.compaction_hint.swap(false, .monotonic);
     }
@@ -1005,7 +979,6 @@ pub const Store = struct {
         return self.appended_ticket;
     }
 
-    /// One waiter syncs for everyone appended before it started.
     fn waitDurable(self: *Store, ticket: u64) !void {
         lock.lockUncancelable(&self.commit_mutex, self.io);
         defer self.commit_mutex.unlock(self.io);
@@ -1026,7 +999,6 @@ pub const Store = struct {
         }
     }
 
-    /// Appends continue during the fsync.
     fn syncAppended(self: *Store) !void {
         const generation, const device, const epoch, const offset = blk: {
             try lock.lock(&self.writer, self.io);
@@ -1210,7 +1182,6 @@ pub const Store = struct {
         value: []const u8 = &.{},
     };
 
-    // Kept small: ReleaseSafe fills undefined stack arrays.
     const max_gap = 4096;
     const max_span = 256 * 1024;
 
@@ -1319,8 +1290,6 @@ pub const Store = struct {
         }
     }
 
-    /// Values are packed into `buffer` in key order.
-    /// BufferTooSmall fills `result` for a retry.
     pub fn getChunk(self: *Store, chunk_x: i32, chunk_z: i32, buffer: []u8, records: []ChunkRecord, result: *ChunkResult) !void {
         const probe: Key = .{ .dimension = self.region.dimension, .chunk_x = chunk_x, .chunk_z = chunk_z, .component = .version };
         if (!probe.region().eql(self.region)) return error.RegionMismatch;
@@ -1417,9 +1386,7 @@ pub const Store = struct {
         return location.raw_len;
     }
 
-    /// Writers only wait for the final tail copy, its fsync and the manifest swap.
     pub fn compact(self: *Store) !CompactionResult {
-        // Compaction replaces the manifest, so the first one has to exist.
         if (self.unpublished.load(.acquire)) try self.flush();
         try lock.lock(&self.compact_mutex, self.io);
         defer self.compact_mutex.unlock(self.io);
@@ -1532,7 +1499,6 @@ pub const Store = struct {
         };
         if (self.options.stats) |s| {
             _ = s.compactions.fetchAdd(1, .monotonic);
-            // One per new segment plus the manifest file and two directory syncs.
             _ = s.fsync_count.fetchAdd(output_count + 3, .monotonic);
             _ = s.compaction_input_bytes.fetchAdd(source_bytes, .monotonic);
             _ = s.compaction_output_bytes.fetchAdd(output_bytes, .monotonic);
@@ -1566,7 +1532,6 @@ pub const Store = struct {
         defer self.writer.unlock(self.io);
         if (self.closed) return error.Closed;
         if (self.failed) return error.WriterFailed;
-        // Only appends change the index, under the writer lock.
         const generation = self.generation;
         try live.ensureTotalCapacity(self.allocator, generation.index.count);
         const Collect = struct {
@@ -1610,7 +1575,6 @@ pub const Store = struct {
         }
     };
 
-    /// A smaller encoding of a verified base record, or null to copy it as is.
     fn recompress(self: *Store, dense: *Dense, old: []const u8) !?[]const u8 {
         const header = record.Header.read(old[0..record.header_len]) catch unreachable;
         if (header.raw_len < self.options.compression_threshold) return null;
@@ -1619,11 +1583,9 @@ pub const Store = struct {
         try Dense.reserve(self.allocator, &dense.raw, raw_len);
         try Dense.reserve(self.allocator, &dense.check, raw_len);
         try Dense.reserve(self.allocator, &dense.out, record.overhead + bound);
-        // A bad stream is left for reads to report, as before.
         const raw = decodeInto(.{ .header = header, .value = old[record.header_len..][0..header.stored_len], .checksum = 0, .len = old.len }, dense.raw) catch return null;
         const encoded = try dense.encoder.compress(raw, dense.out[record.header_len..][0..bound]);
         if (encoded.len >= raw_len or record.overhead + encoded.len >= old.len) return null;
-        // Only keep an encoding that reads back exactly.
         const back = lz4.decompress(encoded, dense.check, raw_len) catch return null;
         if (!std.mem.eql(u8, back, raw)) return null;
         var fresh = header;
@@ -1658,7 +1620,6 @@ pub const Store = struct {
             const window = live[first..last];
             var builder = frame.Builder.init(staging.*);
 
-            // Read in file order, then place each record in chunk order.
             reads.clearRetainingCapacity();
             for (0..window.len) |i| try reads.append(self.allocator, @intCast(i));
             std.mem.sort(u32, reads.items, window, liveLessThan);
@@ -1715,7 +1676,6 @@ pub const Store = struct {
         offset: u64,
     };
 
-    /// `locked` means the writer lock is held.
     fn copyTail(self: *Store, old: *Generation, tail: *Tail, output: *CompactionOutput, index: *Index, scratch: *[]u8, locked: bool) !u64 {
         const end_position, const end_offset = if (locked) .{ old.count - 1, self.offset } else blk: {
             try lock.lock(&self.writer, self.io);

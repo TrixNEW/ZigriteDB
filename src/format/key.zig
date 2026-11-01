@@ -1,6 +1,5 @@
 const std = @import("std");
 
-/// Bedrock chunk record tags; unknown tags are stored as-is.
 pub const Component = enum(u8) {
     data3d = 0x2b,
     version = 0x2c,
@@ -26,7 +25,6 @@ pub const Component = enum(u8) {
     blending_data = 0x40,
     actor_digest_version = 0x41,
     legacy_version = 0x76,
-    /// Bedrock's "digp" record, stored with its chunk.
     actor_digest = 0x80,
     _,
 };
@@ -84,7 +82,6 @@ pub const Key = struct {
 
     pub const Error = error{InvalidSubchunkY};
 
-    /// Only subchunks have a Y.
     pub fn validate(self: Key) Error!void {
         const ok = if (self.component == .subchunk)
             self.subchunk_y >= std.math.minInt(i8) and self.subchunk_y <= std.math.maxInt(i8)
@@ -105,7 +102,6 @@ pub const Key = struct {
         return @intCast((self.chunk_z & 31) * 32 + (self.chunk_x & 31));
     }
 
-    /// Component, then signed Y.
     pub fn local(self: Key) u16 {
         return localKey(self.component, @intCast(self.subchunk_y));
     }

@@ -53,7 +53,6 @@ test "compressed records survive reopen and compaction, and damaged streams fail
     _ = try reopened.compact();
     try testing.expectEqualSlices(u8, &raw, (try reopened.get(support.key(0), &output)).?);
 
-    // Break the LZ4 stream but keep the record checksum valid.
     const file = try support.openFile(tmp.dir, "0000000000000002-0000000000000001.segment");
     defer file.handle.close(io);
     const start = db.segment.encoded_len + db.frame.header_len;

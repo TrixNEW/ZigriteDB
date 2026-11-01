@@ -10,7 +10,6 @@ pub const max_group_batches = 64;
 
 pub const Entry = struct {
     key: Key,
-    /// Null deletes the key.
     value: ?[]const u8,
 
     pub fn put(key: Key, value: []const u8) Entry {

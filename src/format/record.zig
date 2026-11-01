@@ -1,7 +1,6 @@
 const std = @import("std");
 const crc = @import("crc.zig");
 
-// A 12-byte header, the value, then CRC-32C of both.
 pub const header_len = 12;
 pub const overhead = header_len + 4;
 pub const max_value_len = 16 * 1024 * 1024;

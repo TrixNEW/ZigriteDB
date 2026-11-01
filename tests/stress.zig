@@ -174,7 +174,6 @@ fn readHotMany(hot: *Hot) void {
 }
 
 fn compactHot(hot: *Hot) void {
-    // Compact every few writes so the writer does not starve.
     var last: usize = 0;
     while (!hot.done.load(.acquire)) {
         const progress = hot.progress.load(.acquire);

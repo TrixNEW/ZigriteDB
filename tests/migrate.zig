@@ -5,7 +5,6 @@ const io = testing.io;
 
 const crc = db.crc;
 
-/// Minimal format 1 writer.
 const V1 = struct {
     bytes: std.ArrayListUnmanaged(u8) = .empty,
     batch_start: usize = 0,

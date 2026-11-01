@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// CRC-32C, using the CPU's instruction when it has one.
 pub const Implementation = enum { hardware, software };
 
 const native = switch (builtin.cpu.arch) {
@@ -12,7 +11,6 @@ const native = switch (builtin.cpu.arch) {
 
 const Update = *const fn (u32, []const u8) u32;
 
-// Picks the implementation on first use.
 var selected: Update = &resolve;
 
 pub fn hash(bytes: []const u8) u32 {

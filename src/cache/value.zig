@@ -12,17 +12,14 @@ pub const Options = struct {
 
 pub const entry_overhead = 64;
 
-/// Memory charged for caching a value of `len` bytes.
 pub fn cost(len: usize) usize {
     return sizeClass(len) + entry_overhead;
 }
 
-// Power-of-two buffers let an evicted value's buffer be reused by the next one.
 fn sizeClass(len: usize) usize {
     return std.math.ceilPowerOfTwo(usize, @max(len, 16)) catch len;
 }
 
-// Low bits pick the shard, high bits index it.
 fn hashKey(key: Key) u64 {
     const words = [3]u64{
         @as(u64, @as(u32, @bitCast(key.chunk_x))) | @as(u64, @as(u32, @bitCast(key.chunk_z))) << 32,
@@ -75,7 +72,6 @@ pub const Cache = struct {
 
     const Shard = struct {
         mutex: std.Io.Mutex = .init,
-        // Array hash maps delete without tombstones, which constant evictions would pile up.
         slots: std.ArrayHashMapUnmanaged(Key, Slot, Context, false) = .empty,
         hand: usize = 0,
         used: usize = 0,
@@ -105,7 +101,6 @@ pub const Cache = struct {
             return self.counts[@intCast((hash >> 16) % counts_len)];
         }
 
-        /// The slot the clock would evict next, clearing reference bits on the way.
         fn victim(self: *Shard) usize {
             const slots = self.slots.values();
             while (true) {

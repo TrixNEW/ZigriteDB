@@ -28,7 +28,6 @@ pub const Result = struct {
     output_bytes: u64 = 0,
 };
 
-/// Drops a torn active tail; the source is never modified.
 pub fn recoverTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, destination: std.Io.Dir, options: Options) !Result {
     try (@import("../region/store.zig").Options{
         .max_segments = options.max_segments,

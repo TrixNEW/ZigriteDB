@@ -23,7 +23,6 @@ fn chunkTag(tag: u8) bool {
     return (tag >= 0x2b and tag <= 0x41) or tag == 0x76;
 }
 
-/// Exact Bedrock layout only, so mapping back is lossless.
 pub fn parseKey(bytes: []const u8) ?Key {
     if ((bytes.len == 12 or bytes.len == 16) and std.mem.eql(u8, bytes[0..4], "digp")) {
         const dim: i32 = if (bytes.len == 16) std.mem.readInt(i32, bytes[12..16], .little) else 0;
@@ -113,7 +112,6 @@ pub fn import(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, sour
     return result;
 }
 
-/// Imports are written once, so pay for the denser compaction encoding up front.
 fn compactAll(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !void {
     var world = try World.open(allocator, io, dir, .{});
     defer world.deinit();
@@ -223,7 +221,6 @@ pub fn exportWorld(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir,
                     result.chunk_records += 1;
                     break :blk (try world.get(key, value.items)).?;
                 },
-                // Aux keys point into their bucket, still held by the arena.
                 .aux => blk: {
                     result.aux_records += 1;
                     break :blk auxValue(item.key);

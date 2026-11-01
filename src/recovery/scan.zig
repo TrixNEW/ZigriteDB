@@ -11,7 +11,6 @@ pub const Error = frame.Error || segment.Error || error{
     SegmentTooLarge,
 };
 
-/// Only the active segment may end in a torn tail.
 pub const Mode = enum { sealed, active };
 
 pub const Batch = struct {
@@ -29,9 +28,7 @@ pub const Batch = struct {
 };
 
 pub const Order = struct {
-    /// Starts at the manifest's base batch ID.
     last_batch_id: u64 = 0,
-    /// Base frames may only open a generation.
     seen_batch: bool = false,
 
     pub fn accept(self: *Order, header: frame.Header) Error!void {

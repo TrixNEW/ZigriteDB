@@ -8,7 +8,6 @@ pub fn key(x: i32) db.Key {
     return .{ .dimension = 0, .chunk_x = x, .chunk_z = 0, .component = .version };
 }
 
-/// A put, or a delete when `value` is null.
 pub fn put(x: i32, value: ?[]const u8) db.Entry {
     return .{ .key = key(x), .value = value };
 }

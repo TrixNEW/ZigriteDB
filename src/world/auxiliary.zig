@@ -1,5 +1,3 @@
-//! Byte keys for everything that isn't chunk data. Keys hash into buckets stored as
-//! records in a reserved dimension.
 const std = @import("std");
 
 const lock = @import("../lock.zig");
@@ -16,7 +14,6 @@ pub fn isAux(region: Region) bool {
     return region.dimension == dimension;
 }
 
-// 16 regions of 1024 slots x 64 components, under the default key limit.
 fn bucket(key: []const u8) Key {
     const h = std.hash.Wyhash.hash(0x617578, key);
     const slot: i32 = @intCast((h >> 4) & 1023);
@@ -73,7 +70,6 @@ fn readBucket(world: *World, allocator: std.mem.Allocator, key: Key) !?[]u8 {
     }
 }
 
-/// Chunk-shaped keys are chunk records.
 pub fn get(world: *World, allocator: std.mem.Allocator, key: []const u8) !?[]u8 {
     if (key.len > record.max_value_len) return error.BatchTooLarge;
     if (parseKey(key)) |chunk| return readBucket(world, allocator, chunk);
@@ -86,7 +82,6 @@ pub fn get(world: *World, allocator: std.mem.Allocator, key: []const u8) !?[]u8 
     return null;
 }
 
-/// Null deletes the key.
 pub fn put(world: *World, allocator: std.mem.Allocator, key: []const u8, value: ?[]const u8) !void {
     if (key.len > record.max_value_len) return error.BatchTooLarge;
     if (value) |v| if (v.len > record.max_value_len) return error.BatchTooLarge;

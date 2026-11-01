@@ -176,7 +176,6 @@ pub const Handle = struct {
     threaded: std.Io.Threaded,
     world: db.World,
     maintenance: Maintenance.Queue(db.World, compactRegion),
-    // Stale regions found by writes; dropped on close.
     compaction: Maintenance.WorkQueue(db.World, db.Region, 16, false, compactStale),
     prefetch: Maintenance.WorkQueue(db.World, db.Key, 256, false, warmKey),
     stats: db.Stats = .{},
@@ -269,8 +268,6 @@ fn entries(operations: []const Operation, buffer: []db.Entry) ![]db.Entry {
     return buffer[0..operations.len];
 }
 
-// These wrappers only declare scratch arrays, which ReleaseSafe would otherwise fill on every call.
-
 pub export fn zg_write(optional: ?*Handle, id: u64, operations: ?[*]const Operation, count: usize) Status {
     @setRuntimeSafety(false);
     var stack: [inline_entries]db.Entry = undefined;
@@ -334,7 +331,6 @@ pub const ReadResult = extern struct {
 };
 
 const max_c_batch = db.World.max_read_batch;
-// Kept small: ReleaseSafe fills undefined stack arrays.
 const read_chunk = 32;
 
 pub export fn zg_get_many(optional: ?*Handle, requests: ?[*]const ReadRequest, results: ?[*]ReadResult, count: usize) Status {

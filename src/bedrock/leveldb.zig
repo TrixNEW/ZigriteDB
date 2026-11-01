@@ -52,7 +52,6 @@ fn putSlice(list: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, byt
     try list.appendSlice(allocator, bytes);
 }
 
-/// A torn record ends the log, like LevelDB.
 pub const LogReader = struct {
     bytes: []const u8,
     at: usize = 0,
@@ -358,7 +357,6 @@ pub const Reader = struct {
         var log: LogReader = .{ .bytes = manifest_bytes };
         while (try log.next(scratch)) |edit| try version.apply(scratch, edit);
 
-        // Unflushed writes live in logs from the manifest's log number on.
         var logs: std.ArrayListUnmanaged(u64) = .empty;
         var iterator = dir.iterate();
         while (try iterator.next(io)) |item| {
@@ -376,7 +374,6 @@ pub const Reader = struct {
         }
         std.mem.sort(Memo, memos.items, {}, Memo.lessThan);
 
-        // Level 0 tables may overlap; deeper levels chain.
         var levels: [7]std.ArrayListUnmanaged(FileMeta) = @splat(.empty);
         for (version.files.values()) |meta| {
             if (meta.level >= levels.len) return error.Corrupt;
@@ -723,7 +720,6 @@ test "a block that inflates past the limit is refused" {
 }
 
 test "a block truncated inside its dynamic header is refused" {
-    // Zig 0.16 overflowed on this input instead of reporting EndOfStream.
     const truncated = [_]u8{ 0x15, 0xd5, 0x07, 0x3b, 0x16, 0x0c, 0x03, 0x86, 0x61, 0x2b, 0xa3, 0xec, 0xec, 0x15, 0x95, 0x6c, 0x92, 0x4d, 0x19, 0x95, 0x4a, 0xb6, 0x22, 0x23, 0xc9 };
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(std.testing.allocator);

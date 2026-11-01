@@ -89,11 +89,9 @@ fn lz4Bench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, path:
     try out.print(",\"lz4_subchunks\":{{\"values\":{},\"ratio\":{d:.3},\"compress_mbps\":{d:.0},\"decompress_mbps\":{d:.0}}}", .{ count, if (raw == 0) 0 else @as(f64, @floatFromInt(at)) / @as(f64, @floatFromInt(raw)), compress, decompress });
 }
 
-/// The v1 index: packed u64 keys in a hash map of 32-byte locations.
 const OldLocation = struct { offset: u64, batch_id: u64, stored_len: u32, raw_len: u32, fingerprint: u32, segment: u16 };
 
 fn indexBench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer) !void {
-    // A full region: 1024 chunks with 24 subchunks and 8 other components each.
     const per_chunk = 32;
     const total = 1024 * per_chunk;
     var keys = try allocator.alloc(struct { slot: u10, local: u16 }, total);
@@ -231,7 +229,6 @@ fn reopenBench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, pa
     });
 }
 
-/// First buffered write into each of 64 new regions, then the flush that makes them durable.
 fn createBench(allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, path: []const u8) !void {
     const dir = try std.Io.Dir.cwd().openDir(io, path, .{});
     defer dir.close(io);

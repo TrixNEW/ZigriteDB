@@ -6,7 +6,6 @@ pub fn Queue(comptime Context: type, comptime run: fn (*Context, Region) anyerro
     return WorkQueue(Context, Region, 16, true, run);
 }
 
-/// Bounded background queue with optional draining on close.
 pub fn WorkQueue(
     comptime Context: type,
     comptime Item: type,

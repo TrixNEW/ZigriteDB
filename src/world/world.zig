@@ -61,7 +61,6 @@ pub const World = struct {
     compactor: ?Compactor = null,
     waiters: std.atomic.Value(usize) = .init(0),
     aux_mutex: std.Io.Mutex = .init,
-    // Evictions in flight and the first one that failed, reported by the next flush.
     evictions: usize = 0,
     evict_error: ?anyerror = null,
 
@@ -87,7 +86,6 @@ pub const World = struct {
         try options.region.validate();
         var directory = try Directory.init(dir, io);
         errdefer directory.deinit();
-        // Region directories from a crash may not be durable yet.
         try directory.syncEntries();
         try checkFormat(&directory);
         const slots = try allocator.alloc(Slot, options.max_open_regions);
@@ -115,7 +113,6 @@ pub const World = struct {
         return store.write(batch);
     }
 
-    /// Durable on return.
     pub fn writeGroup(self: *World, batches: []const WriteBatch) !AppendResult {
         const size = try write_module.validateGroup(batches);
         if (size > self.options.region.batch_buffer_size) return error.BufferTooSmall;
@@ -470,7 +467,6 @@ pub const World = struct {
             if (self.find(region)) |i| return self.pin(&self.slots[i]);
             if (!create and self.knownMissing(region)) return null;
             if (self.count < self.slots.len or self.hasIdle()) return self.load(region, create) catch |err| switch (err) {
-                // A reader pinned the last idle region after `hasIdle`.
                 error.NoIdleSlot => {
                     try self.waitIdle();
                     continue;
@@ -643,7 +639,6 @@ pub const World = struct {
         self.positions.getPtr(self.slots[i].region).?.* = @intCast(i);
     }
 
-    /// Second chance: recently pinned regions are skipped once.
     fn idleIndex(self: *World) ?usize {
         for (0..2 * self.count) |step| {
             const i = (self.hand + step) % self.count;
@@ -668,13 +663,11 @@ pub const World = struct {
             break :blk try self.directory.dir.openDir(self.io, name, .{ .follow_symlinks = false });
         };
         defer dir.close(self.io);
-        // A creation that never finished may still need its directory entry made durable.
         if (!created) if (dir.access(self.io, "PENDING", .{})) try self.directory.syncEntries() else |err| if (err != error.FileNotFound) return err;
         const opened = try self.allocator.create(Opened);
         errdefer self.allocator.destroy(opened);
         opened.* = .{ .store = undefined };
         const store = &opened.store;
-        // New regions cost no fsyncs until their first sync.
         store.* = if (created)
             try Store.createDeferred(self.allocator, self.io, dir, region, self.options.region, self.directory.dir)
         else

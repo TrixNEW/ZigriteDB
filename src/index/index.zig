@@ -17,7 +17,6 @@ pub const Location = struct {
     offset: u32,
     stored_len: u32,
     raw_len: u32,
-    /// Only kept for skip_unchanged.
     fingerprint: u32,
     segment: u8,
     compression: record.Compression,
@@ -31,7 +30,6 @@ pub fn fingerprint(compression: record.Compression, stored: []const u8) u32 {
     return @truncate(std.hash.Wyhash.hash(@backingInt(compression), stored));
 }
 
-/// One chunk's sorted components; keys and locations share one allocation.
 const Chunk = struct {
     data: ?[*]align(@alignOf(Location)) u8 = null,
     len: u16 = 0,
@@ -172,7 +170,6 @@ pub const Index = struct {
         return c.locations()[i];
     }
 
-    /// The count returned may exceed `out.len`.
     pub fn chunkEntries(self: *const Index, slot: u10, out: []Entry) usize {
         const c = self.chunks[slot];
         for (c.keys()[0..@min(c.len, out.len)], c.locations()[0..@min(c.len, out.len)], out[0..@min(c.len, out.len)]) |local, location, *entry| {
@@ -267,7 +264,6 @@ pub const Index = struct {
                 self.live_bytes -= old.recordLen();
                 self.count -= 1;
             }
-            // Later changes in this chunk still need the reserved storage.
             if (c.len == 0 and (i + 1 == prepared.changes.len or prepared.changes[i + 1].slot != change.slot)) c.free(self.allocator);
         }
         self.total_bytes += prepared.bytes;
@@ -278,7 +274,6 @@ pub const Index = struct {
         self.publish(try self.prepare(&.{batch}, segment));
     }
 
-    /// Keys must be strictly increasing.
     pub fn loadChunk(self: *Index, slot: u10, keys: []const u16, locations: []const Location) !void {
         if (keys.len == 0) return;
         const c = &self.chunks[slot];

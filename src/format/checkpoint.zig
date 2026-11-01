@@ -10,7 +10,6 @@ pub const name = "INDEX";
 pub const header_len = 64;
 pub const version = 2;
 pub const entry_len = 24;
-/// The body is stored as blocks of up to this many raw bytes, each LZ4 only when that's smaller.
 pub const block_len = 16 * 1024;
 pub const block_header_len = 8;
 
@@ -60,7 +59,6 @@ pub const Header = struct {
         };
     }
 
-    /// The body once its blocks are expanded.
     pub fn bodyLen(self: Header) usize {
         return @as(usize, self.segments) * 8 + 1024 * 2 + @as(usize, self.entries) * self.entryLen();
     }
@@ -70,13 +68,10 @@ pub const Header = struct {
     }
 };
 
-/// The most a body of `body_len` bytes can take on disk, header and checksum included.
 pub fn maxFileLen(body_len: usize) usize {
-    // Blocks end early rather than split an entry, losing up to an entry's length each.
     return header_len + body_len + (body_len / (block_len - 28) + 2) * block_header_len + 4;
 }
 
-/// Expands stored blocks into `output`, which they must fill exactly.
 pub fn inflate(blocks: []const u8, output: []u8) !void {
     var at: usize = 0;
     var written: usize = 0;
