@@ -199,3 +199,15 @@ test "migration rejects overflowing manifest counts" {
         try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "new", .{}));
     }
 }
+
+test "a world something else holds open is not migrated" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    _ = try buildV1(tmp.dir);
+    const old = try tmp.dir.openDir(io, "old", .{});
+    defer old.close(io);
+    var holder = try db.directory.Directory.init(old, io);
+    defer holder.deinit();
+    try testing.expectError(error.DirectoryBusy, db.migrate.migrate(testing.allocator, io, tmp.dir, "old", "new"));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "new", .{}));
+}

@@ -14,6 +14,7 @@ const frame = @import("../format/frame.zig");
 const record = @import("../format/record.zig");
 const index = @import("../index/index.zig");
 const files = @import("../storage/files.zig");
+const Directory = @import("../storage/directory.zig").Directory;
 
 pub const Result = struct {
     regions: usize = 0,
@@ -37,6 +38,9 @@ pub fn component(old: u8) !Component {
 pub fn migrate(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, source: []const u8, destination: []const u8) !Result {
     const input = try parent.openDir(io, source, .{ .iterate = true, .follow_symlinks = false });
     defer input.close(io);
+    // keeps anything else from opening the old world while it is copied
+    var source_lock = try Directory.init(input, io);
+    defer source_lock.deinit();
     var staged = try stage.Staged.begin(io, parent, destination);
     defer staged.deinit();
 
