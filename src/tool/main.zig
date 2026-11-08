@@ -4,11 +4,12 @@ const db = @import("zigritedb");
 const usage =
     \\usage: zigrite <command> ...
     \\
-    \\  import <bedrock world> <new world>     convert a Bedrock LevelDB world
-    \\  export <world> <new bedrock world>     write a standalone Bedrock LevelDB world
+    \\  import <bedrock world> <new world>     convert a Bedrock LevelDB world, then check the copy
+    \\  export <world> <new bedrock world>     write a standalone Bedrock LevelDB world, then check it
     \\  compare <bedrock db> <bedrock db>      check two LevelDB directories hold the same keys
     \\  migrate <format-1 world> <new world>   convert a world written before format 2
     \\  verify <world>                         check every frame of every region
+    \\  verify <world> <bedrock world>         check both hold the same records and world files
     \\  compact <world>                        compact every region
     \\
 ;
@@ -33,13 +34,25 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
     if (std.mem.eql(u8, command, "import") and args.len == 4) {
-        const result = try db.bedrock.import(allocator, io, cwd, args[2], args[3]);
-        try out.print("imported {} chunk records and {} other records, {} bytes\n", .{ result.chunk_records, result.aux_records, result.bytes });
+        var problem: db.stage.Problem = .{};
+        const result = db.bedrock.import(allocator, io, cwd, args[2], args[3], &problem) catch |err| return failed(out, err, &problem);
+        try out.print("imported and checked {} chunk records, {} other records and {} world files, {} bytes\n", .{ result.chunk_records, result.aux_records, result.files, result.bytes });
         return 0;
     }
     if (std.mem.eql(u8, command, "export") and args.len == 4) {
-        const result = try db.bedrock.exportWorld(allocator, io, cwd, args[2], args[3], .zlib_raw);
-        try out.print("exported {} chunk records and {} other records, {} bytes\n", .{ result.chunk_records, result.aux_records, result.bytes });
+        var problem: db.stage.Problem = .{};
+        const result = db.bedrock.exportWorld(allocator, io, cwd, args[2], args[3], .zlib_raw, &problem) catch |err| return failed(out, err, &problem);
+        try out.print("exported and checked {} chunk records, {} other records and {} world files, {} bytes\n", .{ result.chunk_records, result.aux_records, result.files, result.bytes });
+        return 0;
+    }
+    if (std.mem.eql(u8, command, "verify") and args.len == 4) {
+        var problem: db.stage.Problem = .{};
+        const zigrite = try cwd.openDir(io, args[2], .{ .iterate = true, .follow_symlinks = false });
+        defer zigrite.close(io);
+        const bedrock = try cwd.openDir(io, args[3], .{ .iterate = true });
+        defer bedrock.close(io);
+        const result = db.bedrock.verify(allocator, io, bedrock, zigrite, &problem) catch |err| return failed(out, err, &problem);
+        try out.print("{} chunk records, {} other records and {} world files match\n", .{ result.chunk_records, result.aux_records, result.files });
         return 0;
     }
     if (std.mem.eql(u8, command, "compare") and args.len == 4) return compare(allocator, io, cwd, args[2], args[3], out);
@@ -98,29 +111,14 @@ fn fail(out: *std.Io.Writer, message: []const u8) !u8 {
 fn verify(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []const u8, out: *std.Io.Writer) !u8 {
     const dir = try cwd.openDir(io, path, .{ .iterate = true, .follow_symlinks = false });
     defer dir.close(io);
-    const scratch = try allocator.alloc(u8, 64 * 1024 * 1024 + 1024 * 1024);
-    defer allocator.free(scratch);
-    var orphans: [64]db.inspection.Orphan = undefined;
-    var regions: usize = 0;
-    var batches: u64 = 0;
-    var problems: usize = 0;
-    var iterator = dir.iterate();
-    while (try iterator.next(io)) |entry| {
-        if (entry.kind != .directory or db.World.parseRegionName(entry.name) == null) continue;
-        regions += 1;
-        const region_dir = try dir.openDir(io, entry.name, .{ .iterate = true, .follow_symlinks = false });
-        defer region_dir.close(io);
-        const report = db.inspection.inspect(allocator, io, region_dir, .{}, scratch, &orphans) catch |err| {
-            try out.print("{s}: {t}\n", .{ entry.name, err });
-            problems += 1;
-            continue;
-        };
-        batches += report.committed_batches;
-        if (report.has_tail or report.temporary_manifest or report.orphans.len != 0) {
-            try out.print("{s}: tail={} unfinished publication={} orphans={}\n", .{ entry.name, report.has_tail, report.temporary_manifest, report.orphans.len });
-            problems += 1;
-        }
-    }
-    try out.print("{} regions, {} committed batches, {} with problems\n", .{ regions, batches, problems });
-    return if (problems == 0) 0 else 1;
+    var problem: db.stage.Problem = .{};
+    const report = db.inspection.inspectWorld(allocator, io, dir, &problem) catch |err| return failed(out, err, &problem);
+    if (problem.len != 0) try out.print("{s}\n", .{problem.text()});
+    try out.print("{} regions, {} committed batches, {} with problems\n", .{ report.regions, report.batches, report.problems });
+    return if (report.problems == 0) 0 else 1;
+}
+
+fn failed(out: *std.Io.Writer, err: anyerror, problem: *const db.stage.Problem) !u8 {
+    if (problem.len != 0) try out.print("failed: {s} ({t})\n", .{ problem.text(), err }) else try out.print("failed: {t}\n", .{err});
+    return 1;
 }

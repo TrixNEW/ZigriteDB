@@ -7,6 +7,8 @@ const Store = @import("../region/store.zig").Store;
 const Directory = @import("../storage/directory.zig").Directory;
 const files = @import("../storage/files.zig");
 const scan = @import("scan.zig");
+const World = @import("../world/world.zig").World;
+const Problem = @import("../tool/stage.zig").Problem;
 
 const Scanner = scan.FileScanner(File);
 
@@ -107,4 +109,41 @@ fn parseName(name: []const u8) ?Orphan {
     const id = std.fmt.parseInt(u64, name[17..33], 16) catch return null;
     if (generation == 0 or id == 0) return null;
     return .{ .generation = generation, .id = id };
+}
+
+pub const WorldReport = struct {
+    regions: usize = 0,
+    batches: u64 = 0,
+    problems: usize = 0,
+};
+
+/// Checks every frame of every region of a world nothing else has open. `problem` names the first bad region.
+pub fn inspectWorld(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, problem: ?*Problem) !WorldReport {
+    var world_lock = Directory.init(dir, io) catch |err| {
+        if (err == error.DirectoryBusy) Problem.set(problem, "the ZigriteDB world is open in another program", .{});
+        return err;
+    };
+    defer world_lock.deinit();
+    const scratch = try allocator.alloc(u8, 64 * 1024 * 1024 + 1024 * 1024);
+    defer allocator.free(scratch);
+    var orphans: [64]Orphan = undefined;
+    var report: WorldReport = .{};
+    var iterator = dir.iterate();
+    while (try iterator.next(io)) |entry| {
+        if (entry.kind != .directory or World.parseRegionName(entry.name) == null) continue;
+        report.regions += 1;
+        const region_dir = try dir.openDir(io, entry.name, .{ .iterate = true, .follow_symlinks = false });
+        defer region_dir.close(io);
+        const region = inspect(allocator, io, region_dir, .{}, scratch, &orphans) catch |err| {
+            Problem.set(problem, "region {s}: {t}", .{ entry.name, err });
+            report.problems += 1;
+            continue;
+        };
+        report.batches += region.committed_batches;
+        if (region.has_tail or region.temporary_manifest or region.orphans.len != 0) {
+            Problem.set(problem, "region {s}: torn tail {}, unfinished publication {}, orphaned segments {}", .{ entry.name, region.has_tail, region.temporary_manifest, region.orphans.len });
+            report.problems += 1;
+        }
+    }
+    return report;
 }

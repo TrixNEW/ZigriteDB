@@ -113,10 +113,10 @@ test "import and export keep every key, value and world file" {
         try expectReads(source_db, &expected);
     }
 
-    const imported = try db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "zigrite");
+    const imported = try db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "zigrite", null);
     try testing.expectEqual(@as(u64, expected.count()), imported.chunk_records + imported.aux_records);
     try testing.expectEqual(@as(u64, 14), imported.aux_records);
-    try testing.expectError(error.PathAlreadyExists, db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "zigrite"));
+    try testing.expectError(error.PathAlreadyExists, db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "zigrite", null));
     {
         const dir = try tmp.dir.openDir(io, "zigrite", .{});
         defer dir.close(io);
@@ -141,7 +141,7 @@ test "import and export keep every key, value and world file" {
         try world.close();
     }
 
-    _ = try db.bedrock.exportWorld(testing.allocator, io, tmp.dir, "zigrite", "back", .zlib_raw);
+    _ = try db.bedrock.exportWorld(testing.allocator, io, tmp.dir, "zigrite", "back", .zlib_raw, null);
     const back_db = try tmp.dir.openDir(io, "back/db", .{ .iterate = true });
     defer back_db.close(io);
     try expectReads(back_db, &expected);
@@ -158,9 +158,9 @@ test "uncompressed and zlib exports read back the same" {
     defer arena_state.deinit();
     var expected: Expected = .empty;
     try buildWorld(arena_state.allocator(), tmp.dir, &expected);
-    _ = try db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "zigrite");
+    _ = try db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "zigrite", null);
     inline for (.{ .none, .zlib }, .{ "plain", "zlib" }) |compression, name| {
-        _ = try db.bedrock.exportWorld(testing.allocator, io, tmp.dir, "zigrite", name, compression);
+        _ = try db.bedrock.exportWorld(testing.allocator, io, tmp.dir, "zigrite", name, compression, null);
         const dir = try tmp.dir.openDir(io, name ++ "/db", .{ .iterate = true });
         defer dir.close(io);
         try expectReads(dir, &expected);
@@ -177,7 +177,7 @@ test "damaged tables fail the import and leave nothing behind" {
     const table = try tmp.dir.openFile(io, "bedrock/db/000003.ldb", .{ .mode = .read_write });
     defer table.close(io);
     try table.writePositionalAll(io, "XXXX", 100);
-    try testing.expectError(error.ChecksumMismatch, db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "zigrite"));
+    try testing.expectError(error.ChecksumMismatch, db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "zigrite", null));
     try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "zigrite", .{}));
     try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "zigrite" ++ db.stage.suffix, .{}));
 }
@@ -220,4 +220,118 @@ test "LevelDB tables keep user-key prefix order across files" {
     try testing.expectEqualStrings("a\x00", second[0]);
     try testing.expectEqualStrings("last", second[1]);
     try testing.expectEqual(null, try reader.next());
+}
+
+fn expectMismatch(dir: std.Io.Dir, contains: []const u8) !void {
+    const zigrite = try dir.openDir(io, "zigrite", .{ .iterate = true });
+    defer zigrite.close(io);
+    const bedrock = try dir.openDir(io, "bedrock", .{ .iterate = true });
+    defer bedrock.close(io);
+    var problem: db.stage.Problem = .{};
+    try testing.expectError(error.VerificationFailed, db.bedrock.verify(testing.allocator, io, bedrock, zigrite, &problem));
+    if (std.mem.indexOf(u8, problem.text(), contains) == null) {
+        std.debug.print("unexpected problem: {s}\n", .{problem.text()});
+        return error.TestUnexpectedResult;
+    }
+}
+
+fn changeWorld(dir: std.Io.Dir, entry: db.Entry) !void {
+    const zigrite = try dir.openDir(io, "zigrite", .{});
+    defer zigrite.close(io);
+    var world = try db.World.open(testing.allocator, io, zigrite, .{});
+    defer world.deinit();
+    _ = try world.write(.{ .entries = &.{entry} });
+    try world.close();
+}
+
+test "verification catches changed, missing and extra records and files" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var expected: Expected = .empty;
+    try buildWorld(arena_state.allocator(), tmp.dir, &expected);
+    _ = try db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "zigrite", null);
+    {
+        const zigrite = try tmp.dir.openDir(io, "zigrite", .{ .iterate = true });
+        defer zigrite.close(io);
+        const bedrock = try tmp.dir.openDir(io, "bedrock", .{ .iterate = true });
+        defer bedrock.close(io);
+        const result = try db.bedrock.verify(testing.allocator, io, bedrock, zigrite, null);
+        try testing.expectEqual(@as(u64, expected.count()), result.chunk_records + result.aux_records);
+        try testing.expectEqual(@as(u64, 3), result.files);
+    }
+
+    const key: db.Key = .{ .dimension = 1, .chunk_x = 31, .chunk_z = 5, .component = .version };
+    var buffer: [16]u8 = undefined;
+    const original = expected.get(db.bedrock.levelKey(key, &buffer)).?;
+    try changeWorld(tmp.dir, .{ .key = key, .value = "changed" });
+    try expectMismatch(tmp.dir, "differs");
+    try changeWorld(tmp.dir, .{ .key = key, .value = null });
+    try expectMismatch(tmp.dir, "missing");
+    try changeWorld(tmp.dir, .{ .key = key, .value = original });
+    try changeWorld(tmp.dir, .{ .key = .{ .dimension = 5, .chunk_x = 1, .chunk_z = 1, .component = .version }, .value = "extra" });
+    try expectMismatch(tmp.dir, "ZigriteDB holds");
+    try changeWorld(tmp.dir, .{ .key = .{ .dimension = 5, .chunk_x = 1, .chunk_z = 1, .component = .version }, .value = null });
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "zigrite/bedrock/level.dat", .data = "level dat" });
+    try expectMismatch(tmp.dir, "level.dat differs");
+    try tmp.dir.writeFile(io, .{ .sub_path = "zigrite/bedrock/level.dat", .data = "level data" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "zigrite/bedrock/extra.txt", .data = "" });
+    try expectMismatch(tmp.dir, "lacks");
+    try tmp.dir.deleteFile(io, "zigrite/bedrock/extra.txt");
+    try tmp.dir.deleteFile(io, "zigrite/bedrock/levelname.txt");
+    try expectMismatch(tmp.dir, "levelname.txt is missing");
+}
+
+test "a LevelDB database open elsewhere is not converted" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var expected: Expected = .empty;
+    try buildWorld(arena_state.allocator(), tmp.dir, &expected);
+    // LevelDB itself takes a process lock, and open file description locks conflict with those as well
+    const lock = try tmp.dir.createFile(io, "bedrock/db/LOCK", .{ .truncate = false, .read = true });
+    defer lock.close(io);
+    const linux = std.os.linux;
+    var range = std.mem.zeroes(linux.Flock);
+    range.type = linux.F.WRLCK;
+    try testing.expectEqual(@as(usize, 0), linux.fcntl(lock.handle, linux.F.OFD_SETLK, @intFromPtr(&range)));
+
+    var problem: db.stage.Problem = .{};
+    try testing.expectError(error.DirectoryBusy, db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "zigrite", &problem));
+    try testing.expectEqualStrings("the LevelDB database is open in another program", problem.text());
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "zigrite", .{}));
+}
+
+test "conversions publish into nested destinations and replace stale partial output" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var expected: Expected = .empty;
+    try buildWorld(arena_state.allocator(), tmp.dir, &expected);
+    try tmp.dir.createDirPath(io, "out/zigrite" ++ db.stage.suffix ++ "/junk");
+    _ = try db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "out/zigrite/", null);
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "out/zigrite" ++ db.stage.suffix, .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "out/zigrite/junk", .{}));
+    _ = try db.bedrock.exportWorld(testing.allocator, io, tmp.dir, "out/zigrite", "out/back", .zlib_raw, null);
+    const back_db = try tmp.dir.openDir(io, "out/back/db", .{ .iterate = true });
+    defer back_db.close(io);
+    try expectReads(back_db, &expected);
+    try testing.expectError(error.InvalidArgument, db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "out/..", null));
+}
+
+test "symlinked world files are refused" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var expected: Expected = .empty;
+    try buildWorld(arena_state.allocator(), tmp.dir, &expected);
+    try tmp.dir.symLink(io, "/etc", "bedrock/outside", .{ .is_directory = true });
+    var problem: db.stage.Problem = .{};
+    try testing.expectError(error.UnsupportedFileType, db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "zigrite", &problem));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "zigrite", .{}));
 }
