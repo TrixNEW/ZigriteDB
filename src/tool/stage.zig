@@ -52,6 +52,7 @@ pub const Staged = struct {
         self.temporary_len = temporary.len;
         parent.deleteTree(io, temporary) catch |err| if (err != error.FileNotFound) return err;
         try parent.createDir(io, temporary, .default_dir);
+        errdefer parent.deleteTree(io, temporary) catch {};
         self.dir = try parent.openDir(io, temporary, .{ .iterate = true, .follow_symlinks = false });
         return self;
     }
