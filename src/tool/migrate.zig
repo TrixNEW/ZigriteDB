@@ -48,14 +48,21 @@ pub fn migrate(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, sou
         while (try iterator.next(io)) |entry| {
             if (World.parseRegionName(entry.name) != null and entry.kind != .directory) return error.NotDir;
             if (entry.kind == .directory) {
-                if (World.parseRegionName(entry.name) == null) continue;
-                const dir = try input.openDir(io, entry.name, .{ .follow_symlinks = false });
+                const dir = try input.openDir(io, entry.name, .{ .iterate = true, .follow_symlinks = false });
                 defer dir.close(io);
+                if (World.parseRegionName(entry.name) == null) {
+                    // Quark keeps level.dat and the other Bedrock files in here
+                    try staged.dir.createDir(io, entry.name, .default_dir);
+                    const copy = try staged.dir.openDir(io, entry.name, .{});
+                    defer copy.close(io);
+                    _ = try stage.copyTree(io, dir, copy, &.{});
+                    continue;
+                }
                 try migrateRegion(allocator, io, dir, &world, &result);
                 result.regions += 1;
-            } else if (entry.kind == .file and !std.mem.eql(u8, entry.name, world_module.format_file)) {
-                try input.copyFile(entry.name, staged.dir, entry.name, io, .{});
-            }
+            } else if (entry.kind == .file) {
+                if (!std.mem.eql(u8, entry.name, world_module.format_file)) try input.copyFile(entry.name, staged.dir, entry.name, io, .{});
+            } else return error.UnsupportedFileType;
         }
         try world.close();
     }

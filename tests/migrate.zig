@@ -96,6 +96,8 @@ fn buildV1(parent: std.Io.Dir) ![1024]u8 {
     const world = try parent.openDir(io, "old", .{});
     defer world.close(io);
     try world.writeFile(io, .{ .sub_path = "level.dat", .data = "level" });
+    try world.createDirPath(io, "bedrock/behavior_packs");
+    try world.writeFile(io, .{ .sub_path = "bedrock/level.dat", .data = "bedrock level" });
     try world.createDir(io, "00000000-00000000-00000000.region", .default_dir);
     const region = try world.openDir(io, "00000000-00000000-00000000.region", .{});
     defer region.close(io);
@@ -146,6 +148,8 @@ test "a format 1 world migrates committed batches, maps components, and keeps ot
     defer dir.close(io);
     var level: [16]u8 = undefined;
     try testing.expectEqualStrings("level", try dir.readFile(io, "level.dat", &level));
+    try testing.expectEqualStrings("bedrock level", try dir.readFile(io, "bedrock/level.dat", &level));
+    _ = try dir.statFile(io, "bedrock/behavior_packs", .{});
     var world = try db.World.open(testing.allocator, io, dir, .{});
     defer world.deinit();
     var output: [1024]u8 = undefined;
