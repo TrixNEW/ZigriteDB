@@ -32,6 +32,7 @@ pub const Status = enum(c_int) {
     no_space,
     read_only,
     needs_migration,
+    mismatch,
 };
 
 pub export fn zg_status_message(code: c_int) [*:0]const u8 {
@@ -54,6 +55,7 @@ pub export fn zg_status_message(code: c_int) [*:0]const u8 {
         .no_space => "Disk full or quota exceeded",
         .read_only => "Read-only filesystem",
         .needs_migration => "World uses an older format; run zigrite migrate",
+        .mismatch => "The worlds hold different data",
     };
 }
 
@@ -662,11 +664,121 @@ fn status(err: anyerror) Status {
         error.CleanupPending => .cleanup_pending,
         error.NeedsRecovery, error.MissingManifest => .needs_recovery,
         error.NeedsMigration => .needs_migration,
+        error.VerificationFailed => .mismatch,
+        error.PathAlreadyExists, error.NameTooLong, error.NotDir, error.IsDir => .invalid_argument,
+        error.UnsupportedComparator, error.UnsupportedFileType => .unsupported,
         error.BatchOrder => .batch_order,
         error.BatchTooLarge, error.IndexFull, error.TooManySegments, error.SegmentFull, error.GenerationExhausted, error.SegmentIdExhausted, error.TooManyKeys => .limit,
         error.InvalidArgument, error.InvalidSubchunkY, error.RegionMismatch, error.InvalidBufferSize, error.InvalidRegionLimit, error.InvalidSegmentSize, error.EmptyBatch => .invalid_argument,
-        error.InvalidMagic, error.ChecksumMismatch, error.InvalidCompressedData, error.TruncatedHeader, error.TruncatedRecord, error.TruncatedFrame, error.TruncatedManifest, error.InvalidLength, error.InvalidFrame, error.BatchMismatch, error.IdentityMismatch, error.IncompleteBatch, error.InvalidGeneration, error.InvalidRegion, error.InvalidSegmentCount, error.InvalidSegmentId, error.InvalidSegmentOrder, error.InvalidActiveSegment, error.IndexMismatch, error.MissingSegment, error.InvalidFormatFile, error.InvalidAuxBucket, error.ManifestTooLarge, error.SegmentTooLarge, error.UnexpectedEndOfFile => .corruption,
+        error.InvalidMagic, error.ChecksumMismatch, error.InvalidCompressedData, error.TruncatedHeader, error.TruncatedRecord, error.TruncatedFrame, error.TruncatedManifest, error.InvalidLength, error.InvalidFrame, error.BatchMismatch, error.IdentityMismatch, error.IncompleteBatch, error.InvalidGeneration, error.InvalidRegion, error.InvalidSegmentCount, error.InvalidSegmentId, error.InvalidSegmentOrder, error.InvalidActiveSegment, error.IndexMismatch, error.MissingSegment, error.InvalidFormatFile, error.InvalidAuxBucket, error.ManifestTooLarge, error.SegmentTooLarge, error.UnexpectedEndOfFile, error.Corrupt, error.KeyOrder, error.FileChanged, error.UnknownComponent => .corruption,
         error.UnsupportedVersion, error.UnsupportedCompression, error.InvalidFlags => .unsupported,
         else => .io_error,
     };
+}
+
+pub const Report = extern struct {
+    chunk_records: u64 = 0,
+    other_records: u64 = 0,
+    bytes: u64 = 0,
+    files: u64 = 0,
+    regions: u64 = 0,
+    problems: u64 = 0,
+    message: [256]u8 = @splat(0),
+
+    fn fail(self: *Report, err: anyerror, problem: *const db.stage.Problem) Status {
+        const text = if (problem.len != 0) problem.text() else @errorName(err);
+        const len = @min(text.len, self.message.len - 1);
+        @memcpy(self.message[0..len], text[0..len]);
+        self.message[len] = 0;
+        return status(err);
+    }
+};
+
+comptime {
+    std.debug.assert(@sizeOf(Report) == 304);
+}
+
+const Conversion = enum { import, @"export", verify };
+
+fn convert(kind: Conversion, first: ?[*]const u8, first_len: usize, second: ?[*]const u8, second_len: usize, out: ?*Report) Status {
+    const report = out orelse return .invalid_argument;
+    report.* = .{};
+    var problem: db.stage.Problem = .{};
+    const result = runConversion(kind, first, first_len, second, second_len, &problem) catch |err| return report.fail(err, &problem);
+    report.chunk_records = result.chunk_records;
+    report.other_records = result.aux_records;
+    report.bytes = result.bytes;
+    report.files = result.files;
+    return .ok;
+}
+
+fn runConversion(kind: Conversion, first: ?[*]const u8, first_len: usize, second: ?[*]const u8, second_len: usize, problem: *db.stage.Problem) !db.bedrock.Result {
+    const a = try pathSlice(first, first_len);
+    const b = try pathSlice(second, second_len);
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cwd = std.Io.Dir.cwd();
+    switch (kind) {
+        .import => return db.bedrock.import(allocator, io, cwd, a, b, problem),
+        .@"export" => return db.bedrock.exportWorld(allocator, io, cwd, a, b, .zlib_raw, problem),
+        .verify => {
+            const zigrite = try cwd.openDir(io, a, .{ .iterate = true, .follow_symlinks = false });
+            defer zigrite.close(io);
+            const bedrock = try cwd.openDir(io, b, .{ .iterate = true, .follow_symlinks = false });
+            defer bedrock.close(io);
+            return db.bedrock.verify(allocator, io, bedrock, zigrite, problem);
+        },
+    }
+}
+
+pub export fn zg_import(source: ?[*]const u8, source_len: usize, destination: ?[*]const u8, destination_len: usize, out: ?*Report) Status {
+    return convert(.import, source, source_len, destination, destination_len, out);
+}
+
+pub export fn zg_export(source: ?[*]const u8, source_len: usize, destination: ?[*]const u8, destination_len: usize, out: ?*Report) Status {
+    return convert(.@"export", source, source_len, destination, destination_len, out);
+}
+
+pub export fn zg_verify_bedrock(world: ?[*]const u8, world_len: usize, bedrock: ?[*]const u8, bedrock_len: usize, out: ?*Report) Status {
+    return convert(.verify, world, world_len, bedrock, bedrock_len, out);
+}
+
+pub export fn zg_verify(path: ?[*]const u8, length: usize, out: ?*Report) Status {
+    const report = out orelse return .invalid_argument;
+    report.* = .{};
+    var problem: db.stage.Problem = .{};
+    const result = inspectWorld(path, length, &problem) catch |err| return report.fail(err, &problem);
+    report.regions = result.regions;
+    report.problems = result.problems;
+    if (result.problems == 0) return .ok;
+    return report.fail(error.Corrupt, &problem);
+}
+
+fn inspectWorld(path: ?[*]const u8, length: usize, problem: *db.stage.Problem) !db.inspection.WorldReport {
+    const name = try pathSlice(path, length);
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const dir = try std.Io.Dir.cwd().openDir(io, name, .{ .iterate = true, .follow_symlinks = false });
+    defer dir.close(io);
+    return db.inspection.inspectWorld(allocator, io, dir, problem);
+}
+
+pub export fn zg_migrate(source: ?[*]const u8, source_len: usize, destination: ?[*]const u8, destination_len: usize, out: ?*Report) Status {
+    const report = out orelse return .invalid_argument;
+    report.* = .{};
+    const no_problem: db.stage.Problem = .{};
+    const result = migrateWorld(source, source_len, destination, destination_len) catch |err| return report.fail(err, &no_problem);
+    report.regions = result.regions;
+    report.chunk_records = result.records;
+    return .ok;
+}
+
+fn migrateWorld(source: ?[*]const u8, source_len: usize, destination: ?[*]const u8, destination_len: usize) !db.migrate.Result {
+    const a = try pathSlice(source, source_len);
+    const b = try pathSlice(destination, destination_len);
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    return db.migrate.migrate(allocator, threaded.io(), std.Io.Dir.cwd(), a, b);
 }

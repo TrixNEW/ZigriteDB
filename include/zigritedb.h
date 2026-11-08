@@ -21,7 +21,7 @@ enum zg_status {
     ZG_OK, ZG_NOT_FOUND, ZG_INVALID_ARGUMENT, ZG_BUFFER_TOO_SMALL,
     ZG_OUT_OF_MEMORY, ZG_UNSUPPORTED, ZG_CORRUPTION, ZG_IO_ERROR,
     ZG_NEEDS_RECOVERY, ZG_BUSY, ZG_BATCH_ORDER, ZG_LIMIT, ZG_CLEANUP_PENDING, ZG_PERMISSION_DENIED,
-    ZG_NO_SPACE, ZG_READ_ONLY, ZG_NEEDS_MIGRATION
+    ZG_NO_SPACE, ZG_READ_ONLY, ZG_NEEDS_MIGRATION, ZG_MISMATCH
 };
 enum zg_operation_kind { ZG_PUT, ZG_DELETE };
 enum zg_durability { ZG_SYNC, ZG_BUFFERED };
@@ -92,6 +92,12 @@ typedef struct {
     uint64_t cache_hits, cache_misses, cache_evictions;
     uint64_t unchanged_write_skips;
 } zg_stats;
+/* Counts from a conversion or check. message says what failed, NUL-terminated, and is empty on success. */
+typedef struct {
+    uint64_t chunk_records, other_records, bytes, files;
+    uint64_t regions, problems;
+    char message[256];
+} zg_report;
 
 /* Static message; do not free. */
 const char *zg_status_message(int status);
@@ -136,6 +142,18 @@ int zg_list_keys(zg_handle *handle, int32_t dimension, int32_t region_x, int32_t
                  zg_key *out, size_t capacity, size_t *count);
 int zg_maintenance_wait(zg_handle *handle);
 int zg_recover_region(const uint8_t *source, size_t source_len, const uint8_t *destination, size_t destination_len, const zg_options *options);
+/* Conversions build the destination next to it under a temporary name and only publish it once every record and
+   world file has been compared with the source, so a failed or interrupted run never leaves a usable-looking world.
+   The destination must not exist. The LevelDB side is locked like LevelDB does, so a game or server using it
+   makes the call fail with ZG_BUSY. Linux only, like the store. */
+int zg_import(const uint8_t *bedrock_world, size_t bedrock_len, const uint8_t *destination, size_t destination_len, zg_report *out);
+int zg_export(const uint8_t *world, size_t world_len, const uint8_t *destination, size_t destination_len, zg_report *out);
+/* ZG_MISMATCH when the two hold different records or world files. */
+int zg_verify_bedrock(const uint8_t *world, size_t world_len, const uint8_t *bedrock_world, size_t bedrock_len, zg_report *out);
+/* Checks every frame of every region of a closed world. ZG_CORRUPTION when a region has problems. */
+int zg_verify(const uint8_t *world, size_t world_len, zg_report *out);
+/* Rewrites a format 1 world as a new format 2 world. */
+int zg_migrate(const uint8_t *source, size_t source_len, const uint8_t *destination, size_t destination_len, zg_report *out);
 int zg_stats_get(zg_handle *handle, zg_stats *out);
 int zg_stats_reset(zg_handle *handle);
 #ifdef __cplusplus

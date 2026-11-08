@@ -8,6 +8,7 @@
 #include <string.h>
 
 _Static_assert(ZG_ABI_VERSION == 3u, "ABI 3 added compaction thresholds and Bedrock component tags");
+_Static_assert(sizeof(zg_report) == 304, "zg_report layout changed");
 _Static_assert(sizeof(zg_options) == 72, "zg_options layout changed; bump ZG_ABI_VERSION");
 _Static_assert(offsetof(zg_options, max_open_regions) == 8, "region limit layout changed");
 
@@ -17,6 +18,12 @@ int main(int argc, char **argv) {
     assert(strcmp(zg_status_message(-1), "Unknown status") == 0);
     assert(zg_abi_version() == ZG_ABI_VERSION);
     assert(zg_platform_supported() == 1);
+    zg_report report;
+    assert(zg_import((const uint8_t *)"/nonexistent-zigrite", 20, (const uint8_t *)"/tmp/zg-never", 13, &report) == ZG_NOT_FOUND);
+    assert(strcmp(report.message, "FileNotFound") == 0);
+    assert(zg_import(NULL, 0, NULL, 0, &report) == ZG_INVALID_ARGUMENT);
+    assert(zg_verify((const uint8_t *)"/nonexistent-zigrite", 20, NULL) == ZG_INVALID_ARGUMENT);
+    assert(strcmp(zg_status_message(ZG_MISMATCH), "The worlds hold different data") == 0);
     assert(strcmp(zg_status_message(ZG_PERMISSION_DENIED), "Permission denied") == 0);
     zg_key key;
     assert(zg_key_init(&key, 1, -32, 64, ZG_SUBCHUNK, -4) == ZG_OK);

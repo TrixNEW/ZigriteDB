@@ -54,14 +54,24 @@ zigrite export <world> <new bedrock world>   # ZigriteDB -> standalone LevelDB w
 zigrite compare <bedrock db> <bedrock db>    # check two LevelDB dbs hold the same keys
 zigrite migrate <old world> <new world>      # format 1 -> format 2
 zigrite verify <world>                       # check every frame
+zigrite verify <world> <bedrock world>       # check both hold the same records and files
 zigrite compact <world>                      # compact every region
 ```
 
 Import never modifies the source, and every command that creates a world builds it
 under a temporary name and only renames it into place once it is complete and
-synced. A round trip reproduces every LevelDB key and value exactly; `level.dat`
-and the other world files are carried along. Exported worlds open in Bedrock and
-PMMP without ZigriteDB.
+synced. Import and export then read the source again and compare every record and
+world file byte for byte with the result before publishing it, so a world that
+appears was checked. A round trip reproduces every LevelDB key and value exactly;
+`level.dat` and the other world files are carried along, and unknown keys are kept
+as they are. Exported worlds open in Bedrock and PMMP without ZigriteDB.
+
+Conversions hold LevelDB's own lock on `db/LOCK`, so a world a game or server has
+open is refused rather than read half-written. Symlinks inside a world are refused
+too. A damaged LevelDB table or log fails the import instead of skipping records.
+Export holds every key in memory to sort it, about 60 bytes per record. The same
+conversions are in the C API as `zg_import`, `zg_export`, `zg_verify_bedrock`,
+`zg_verify` and `zg_migrate`.
 
 ## Zig API
 
