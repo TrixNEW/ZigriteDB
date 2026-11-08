@@ -30,7 +30,7 @@ def main():
                                 stderr=subprocess.PIPE if checker else None, text=True)
         if checker:
             print(result.stderr, end="", file=sys.stderr)
-            descriptors = re.search(r"FILE DESCRIPTORS: (\d+) open \((\d+) std\)", result.stderr)
+            descriptors = re.search(r"FILE DESCRIPTORS: (\d+) open \((\d+) (?:std|inherited)\)", result.stderr)
             assert descriptors and descriptors[1] == descriptors[2], (binary, "open non-standard descriptors")
         assert result.returncode == expected, (binary, arguments, result.returncode)
 
