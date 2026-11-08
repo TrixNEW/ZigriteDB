@@ -542,7 +542,7 @@ pub const World = struct {
 
     fn busy(self: *World, region: Region) bool {
         if (self.loads == 0) return false;
-        for (self.slots[0..self.count]) |slot| {
+        for (self.slots[0..self.count]) |*slot| {
             if (!slot.loading) continue;
             if (std.meta.eql(slot.region, region)) return true;
             if (slot.evicting) |evicting| if (std.meta.eql(evicting, region)) return true;
