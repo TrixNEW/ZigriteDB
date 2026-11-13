@@ -124,6 +124,10 @@ pub fn inspectWorld(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, p
         return err;
     };
     defer world_lock.deinit();
+    dir.access(io, @import("../world/world.zig").format_file, .{}) catch |err| {
+        if (err == error.FileNotFound) Problem.set(problem, "not a ZigriteDB world: ZIGRITE is missing", .{});
+        return err;
+    };
     const scratch = try allocator.alloc(u8, 64 * 1024 * 1024 + 1024 * 1024);
     defer allocator.free(scratch);
     var orphans: [64]Orphan = undefined;

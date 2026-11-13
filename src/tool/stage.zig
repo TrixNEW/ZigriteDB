@@ -35,7 +35,9 @@ pub const Staged = struct {
     dir: std.Io.Dir,
     published: bool = false,
 
-    pub fn begin(io: std.Io, base: std.Io.Dir, destination: []const u8) !Staged {
+    /// `source` is what the run reads, which must not hold the destination or sit in a leftover partial directory:
+    /// the first would copy the staging directory into itself, the second would be deleted with it.
+    pub fn begin(io: std.Io, base: std.Io.Dir, destination: []const u8, source: std.Io.Dir) !Staged {
         const trimmed = std.mem.trimEnd(u8, destination, "/");
         const leaf = std.fs.path.basename(trimmed);
         if (leaf.len == 0 or std.mem.eql(u8, leaf, ".") or std.mem.eql(u8, leaf, "..")) return error.InvalidArgument;
@@ -44,12 +46,17 @@ pub const Staged = struct {
         if (parent.statFile(io, leaf, .{ .follow_symlinks = false })) |_| {
             return error.PathAlreadyExists;
         } else |err| if (err != error.FileNotFound) return err;
+        if (try within(io, parent, source)) return error.InvalidArgument;
 
         var self: Staged = .{ .io = io, .parent = parent, .name_buffer = undefined, .name_len = leaf.len, .temporary = undefined, .temporary_len = 0, .dir = undefined };
         if (leaf.len > self.name_buffer.len) return error.NameTooLong;
         @memcpy(self.name_buffer[0..leaf.len], leaf);
         const temporary = try std.fmt.bufPrint(&self.temporary, "{s}{s}", .{ leaf, suffix });
         self.temporary_len = temporary.len;
+        if (parent.openDir(io, temporary, .{ .follow_symlinks = false })) |stale| {
+            defer stale.close(io);
+            if (try within(io, source, stale)) return error.InvalidArgument;
+        } else |err| if (err != error.FileNotFound and err != error.NotDir) return err;
         parent.deleteTree(io, temporary) catch |err| if (err != error.FileNotFound) return err;
         try parent.createDir(io, temporary, .default_dir);
         errdefer parent.deleteTree(io, temporary) catch {};
@@ -79,6 +86,24 @@ pub const Staged = struct {
         self.parent.close(self.io);
     }
 };
+
+/// Whether `dir` is `ancestor` or lies under it.
+// ponytail: compares inode numbers only, so a namesake on another filesystem is refused as well.
+fn within(io: std.Io, dir: std.Io.Dir, ancestor: std.Io.Dir) !bool {
+    const target = (try ancestor.stat(io)).inode;
+    var current = try dir.openDir(io, ".", .{});
+    defer current.close(io);
+    for (0..4096) |_| {
+        const inode = (try current.stat(io)).inode;
+        if (inode == target) return true;
+        const up = try current.openDir(io, "..", .{});
+        current.close(io);
+        current = up;
+        // The root is its own parent.
+        if ((try current.stat(io)).inode == inode) return false;
+    }
+    return error.NameTooLong;
+}
 
 pub fn syncDir(io: std.Io, dir: std.Io.Dir) !void {
     try (File{ .handle = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } }, .io = io }).sync();

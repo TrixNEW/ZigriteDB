@@ -41,7 +41,7 @@ pub fn migrate(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, sou
     // keeps anything else from opening the old world while it is copied
     var source_lock = try Directory.init(input, io);
     defer source_lock.deinit();
-    var staged = try stage.Staged.begin(io, parent, destination);
+    var staged = try stage.Staged.begin(io, parent, destination, input);
     defer staged.deinit();
 
     var result: Result = .{};
@@ -116,10 +116,22 @@ fn migrateRegion(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, worl
             result.records += batch.entries.len;
         }
         if (reader.offset != bytes.len) {
-            if (i != count - 1) return error.IncompleteBatch;
+            // Only a batch a crash cut short may be left out, and such a batch has no commit record after it.
+            if (i != count - 1 or commitAfter(bytes[reader.offset..])) return error.IncompleteBatch;
             result.omitted_tail_bytes += bytes.len - reader.offset;
         }
     }
+}
+
+fn commitAfter(bytes: []const u8) bool {
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, bytes, at, "ZGRC")) |found| : (at = found + 1) {
+        if (bytes.len - found < commit_len) return false;
+        const commit = bytes[found..][0..commit_len];
+        if (commit[4] == 1 and commit[5] == 3 and std.mem.readInt(u32, commit[28..32], .little) == crc.hash(commit[0..28]) and
+            std.mem.readInt(u32, commit[76..80], .little) == crc.hash(commit[0..76])) return true;
+    }
+    return false;
 }
 
 fn checkSegment(bytes: []const u8, generation: u64, id: u64, region: Region) !void {

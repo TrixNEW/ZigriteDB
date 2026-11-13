@@ -127,6 +127,29 @@ fn buildV1(parent: std.Io.Dir) ![1024]u8 {
     return raw;
 }
 
+test "a format 1 batch damaged in front of a committed one fails the migration" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "old/00000000-00000000-00000000.region");
+    const region = try tmp.dir.openDir(io, "old/00000000-00000000-00000000.region", .{});
+    defer region.close(io);
+    var v1: V1 = .{};
+    defer v1.deinit();
+    try v1.segment(1);
+    try v1.put(1, 0, 5, 0, "first", null);
+    try v1.commit(1);
+    const value = v1.bytes.items.len + 32 + 17;
+    try v1.put(2, 1, 5, 0, "second", null);
+    try v1.commit(2);
+    try v1.put(3, 2, 5, 0, "third", null);
+    try v1.commit(3);
+    v1.bytes.items[value] ^= 1;
+    try v1.save(region, 1);
+    try writeManifest(region, &.{1});
+    try testing.expectError(error.IncompleteBatch, db.migrate.migrate(testing.allocator, io, tmp.dir, "old", "new"));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "new", .{}));
+}
+
 test "a format 1 world migrates committed batches, maps components, and keeps other files" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

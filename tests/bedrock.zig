@@ -200,6 +200,37 @@ test "a torn log tail keeps the records before it" {
     }
 }
 
+test "a zeroed log header with records after it is damage, not padding" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const handle = try tmp.dir.createFile(io, "log", .{ .read = true });
+    defer handle.close(io);
+    var log: leveldb.LogWriter = .{ .file = .{ .handle = handle, .io = io } };
+    try log.add("first");
+    try log.add("second record");
+    try log.add("third");
+    const bytes = try tmp.dir.readFileAlloc(io, "log", testing.allocator, .unlimited);
+    defer testing.allocator.free(bytes);
+
+    // Preallocated space after the last record ends the log.
+    const padded = try testing.allocator.alloc(u8, bytes.len + 64);
+    defer testing.allocator.free(padded);
+    @memset(padded, 0);
+    @memcpy(padded[0..bytes.len], bytes);
+    var whole: leveldb.LogReader = .{ .bytes = padded };
+    defer whole.deinit(testing.allocator);
+    for ([_][]const u8{ "first", "second record", "third" }) |record| try testing.expectEqualStrings(record, (try whole.next(testing.allocator)).?);
+    try testing.expectEqual(null, try whole.next(testing.allocator));
+
+    // The second record's header wiped: the third must not be read as if nothing were missing.
+    const second = 7 + "first".len;
+    @memset(padded[second..][0..7], 0);
+    var damaged: leveldb.LogReader = .{ .bytes = padded[0..bytes.len] };
+    defer damaged.deinit(testing.allocator);
+    try testing.expectEqualStrings("first", (try damaged.next(testing.allocator)).?);
+    try testing.expectError(error.Corrupt, damaged.next(testing.allocator));
+}
+
 test "LevelDB tables keep user-key prefix order across files" {
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -321,6 +352,45 @@ test "conversions publish into nested destinations and replace stale partial out
     defer back_db.close(io);
     try expectReads(back_db, &expected);
     try testing.expectError(error.InvalidArgument, db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "out/..", null));
+}
+
+test "a conversion never builds inside its source or deletes a source named like a leftover" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var expected: Expected = .empty;
+    try buildWorld(arena_state.allocator(), tmp.dir, &expected);
+    try testing.expectError(error.InvalidArgument, db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "bedrock/new", null));
+    try testing.expectError(error.InvalidArgument, db.bedrock.import(testing.allocator, io, tmp.dir, "bedrock", "bedrock/behavior_packs/new", null));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "bedrock/new" ++ db.stage.suffix, .{}));
+
+    // The source sits where the staging directory for "world" would go.
+    try tmp.dir.rename("bedrock", tmp.dir, "world" ++ db.stage.suffix, io);
+    try testing.expectError(error.InvalidArgument, db.bedrock.import(testing.allocator, io, tmp.dir, "world" ++ db.stage.suffix, "world", null));
+    const kept = try tmp.dir.openDir(io, "world" ++ db.stage.suffix ++ "/db", .{ .iterate = true });
+    defer kept.close(io);
+    try expectReads(kept, &expected);
+}
+
+test "export and verification refuse a directory that is not a world instead of making it one" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var expected: Expected = .empty;
+    try buildWorld(arena_state.allocator(), tmp.dir, &expected);
+    var problem: db.stage.Problem = .{};
+    try testing.expectError(error.FileNotFound, db.bedrock.exportWorld(testing.allocator, io, tmp.dir, "bedrock", "out", .zlib_raw, &problem));
+    try testing.expect(std.mem.indexOf(u8, problem.text(), "not a ZigriteDB world") != null);
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "bedrock/ZIGRITE", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "out", .{}));
+
+    const bedrock = try tmp.dir.openDir(io, "bedrock", .{ .iterate = true });
+    defer bedrock.close(io);
+    try testing.expectError(error.FileNotFound, db.inspection.inspectWorld(testing.allocator, io, bedrock, null));
+    try testing.expectError(error.FileNotFound, db.bedrock.verify(testing.allocator, io, bedrock, bedrock, null));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "bedrock/ZIGRITE", .{}));
 }
 
 test "symlinked world files are refused" {

@@ -7,6 +7,7 @@ const Key = key_format.Key;
 const Entry = @import("../batch/write.zig").Entry;
 const frame = @import("../format/frame.zig");
 const World = @import("../world/world.zig").World;
+const format_file = @import("../world/world.zig").format_file;
 const aux = @import("../world/auxiliary.zig");
 const stage = @import("../tool/stage.zig");
 const supported = @import("../storage/directory.zig").supported;
@@ -138,7 +139,7 @@ pub fn import(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, sour
     defer world_dir.close(io);
     const database = try LevelDatabase.open(io, world_dir, problem);
     defer database.close(io);
-    var staged = try stage.Staged.begin(io, parent, destination);
+    var staged = try stage.Staged.begin(io, parent, destination, world_dir);
     defer staged.deinit();
 
     var result: Result = .{};
@@ -238,13 +239,21 @@ const Exported = struct {
     }
 };
 
+/// Opening a world creates its format file, so anything that only reads one checks it is there first.
+pub fn requireWorld(io: std.Io, dir: std.Io.Dir, problem: ?*Problem) !void {
+    dir.access(io, format_file, .{}) catch |err| {
+        if (err == error.FileNotFound) Problem.set(problem, "not a ZigriteDB world: {s} is missing", .{format_file});
+        return err;
+    };
+}
+
 /// Writes a ZigriteDB world out as a standalone Bedrock LevelDB world and checks it against the source before
 /// publishing it.
 pub fn exportWorld(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, source: []const u8, destination: []const u8, compression: leveldb.Compression, problem: ?*Problem) !Result {
     if (!supported) return error.UnsupportedPlatform;
     const source_dir = try parent.openDir(io, source, .{ .iterate = true });
     defer source_dir.close(io);
-    var staged = try stage.Staged.begin(io, parent, destination);
+    var staged = try stage.Staged.begin(io, parent, destination, source_dir);
     defer staged.deinit();
 
     var result: Result = .{};
@@ -256,6 +265,7 @@ pub fn exportWorld(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir,
         };
     } else |err| if (err != error.FileNotFound) return err;
 
+    try requireWorld(io, source_dir, problem);
     {
         var world = World.open(allocator, io, source_dir, .{ .max_open_regions = 1024 }) catch |err| {
             if (err == error.DirectoryBusy) Problem.set(problem, "the ZigriteDB world is open in another program", .{});
@@ -275,7 +285,7 @@ pub fn exportWorld(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir,
             defer allocator.free(found);
             if (aux.isAux(region)) {
                 for (found) |bucket| {
-                    const bytes = (try world.get(bucket, try buffer(&world, keys, bucket))) orelse continue;
+                    const bytes = (try world.get(bucket, try buffer(&world, keys, bucket))) orelse return error.FileChanged;
                     var entries: aux.Entries = .{ .bytes = bytes };
                     while (try entries.next()) |entry| try list.append(keys, .{ .key = entry[0], .source = .{ .aux = bucket } });
                 }
@@ -343,6 +353,7 @@ pub fn verify(allocator: std.mem.Allocator, io: std.Io, level_world: std.Io.Dir,
 
 fn verifyOpen(allocator: std.mem.Allocator, io: std.Io, level_world: std.Io.Dir, db_dir: std.Io.Dir, zigrite_world: std.Io.Dir, problem: ?*Problem) !Result {
     var result: Result = .{};
+    try requireWorld(io, zigrite_world, problem);
     {
         var world = World.open(allocator, io, zigrite_world, .{ .max_open_regions = 1024 }) catch |err| {
             if (err == error.DirectoryBusy) Problem.set(problem, "the ZigriteDB world is open in another program", .{});
@@ -380,7 +391,7 @@ fn verifyOpen(allocator: std.mem.Allocator, io: std.Io, level_world: std.Io.Dir,
                 continue;
             }
             for (found) |bucket| {
-                const bytes = (try readSized(&world, allocator, bucket, &value)) orelse continue;
+                const bytes = (try readSized(&world, allocator, bucket, &value)) orelse return error.FileChanged;
                 var entries: aux.Entries = .{ .bytes = bytes };
                 while (try entries.next()) |_| aux_records += 1;
             }
