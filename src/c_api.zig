@@ -416,7 +416,7 @@ fn getChunk(
     total.* = 0;
     bytes_needed.* = 0;
     const handle = optional orelse return .invalid_argument;
-    if ((buffer == null and capacity != 0) or (records == null and record_capacity != 0)) return .invalid_argument;
+    if ((buffer == null and capacity != 0) or (records == null and record_capacity != 0) or dimension == db.aux.dimension) return .invalid_argument;
     const record_count = @min(record_capacity, std.math.maxInt(u16) + 1);
     const output: []u8 = if (buffer) |ptr| ptr[0..capacity] else &.{};
     var result: db.ChunkResult = undefined;
@@ -587,7 +587,7 @@ pub export fn zg_list_keys(optional: ?*Handle, dimension: i32, x: i32, z: i32, c
     const total = count orelse return .invalid_argument;
     total.* = 0;
     const handle = optional orelse return .invalid_argument;
-    if (capacity != 0 and out == null) return .invalid_argument;
+    if ((capacity != 0 and out == null) or dimension == db.aux.dimension) return .invalid_argument;
     const filter: db.KeyFilter = if (component == std.math.maxInt(u32))
         .{}
     else if (component <= std.math.maxInt(u8))
