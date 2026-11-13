@@ -337,6 +337,59 @@ test "garbage and zero-filled tails are cut off on open" {
     }
 }
 
+test "an intact frame the batch order turns down is left for recovery, not cut off" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var first: db.store.AppendResult = undefined;
+    {
+        var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{});
+        defer store.deinit();
+        first = try store.write(batch(1, &.{put(0, "first")}));
+        _ = try store.write(batch(2, &.{put(1, "second")}));
+        try store.flush();
+    }
+    const file = try support.openFile(tmp.dir, segment_name);
+    defer file.handle.close(io);
+    var copy: [256]u8 = undefined;
+    const frame_bytes = copy[0..@intCast(first.end - first.start)];
+    try file.readExact(frame_bytes, first.start);
+    const length = try file.length();
+    try file.writeAll(frame_bytes, length);
+    try testing.expectError(error.NeedsRecovery, db.Store.open(testing.allocator, io, tmp.dir, .{}));
+    try testing.expectEqual(length + frame_bytes.len, try file.length());
+}
+
+fn writeOnes(store: *db.Store, failure: *?anyerror) void {
+    _ = store.write(batch(0, &.{ put(0, "one"), put(1, "one") })) catch |err| {
+        failure.* = err;
+    };
+}
+
+test "records judged unchanged are written after all when another batch lands first" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{ .skip_unchanged = true });
+    defer store.deinit();
+    _ = try store.write(batch(0, &.{ put(0, "one"), put(1, "zero") }));
+
+    var faults: db.storage.Faults = .{ .armed = .init(true) };
+    support.inject(&faults);
+    defer support.clearFaults();
+    defer faults.released.store(true, .release);
+    // This batch finds its first record unchanged and stops while reading it back.
+    var failure: ?anyerror = null;
+    const writer = try std.Thread.spawn(.{}, writeOnes, .{ &store, &failure });
+    faults.waitPaused();
+    _ = try store.write(batch(0, &.{ put(0, "two"), put(1, "two") }));
+    faults.released.store(true, .release);
+    writer.join();
+    try testing.expectEqual(null, failure);
+    // The paused batch went second, so both its records are the last word, never one of each.
+    var output: [16]u8 = undefined;
+    try testing.expectEqualStrings("one", (try store.get(key(0), &output)).?);
+    try testing.expectEqualStrings("one", (try store.get(key(1), &output)).?);
+}
+
 test "damage in front of intact frames is left for explicit recovery" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

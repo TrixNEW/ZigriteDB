@@ -781,20 +781,36 @@ pub const Store = struct {
         defer self.allocator.free(heap);
         if (hashing and records > buffer.fingerprints.len) heap = try self.allocator.alloc(u32, records);
         const fingerprints: []u32 = if (!hashing) &.{} else if (heap.len != 0) heap else buffer.fingerprints[0..records];
-        if (hashing) {
-            var at: usize = 0;
-            for (batches) |batch| {
-                for (batch.entries) |entry| {
-                    fingerprints[at] = if (entry.value) |value| index_module.fingerprint(value) else 0;
-                    at += 1;
-                }
-            }
-        }
+        if (hashing) hashValues(batches, fingerprints);
 
         // ponytail: groups keep every frame until filtering tracks earlier changes.
         var skip: std.StaticBitSet(frame.max_records) = .empty;
-        if (hashing and batches.len == 1) try self.markUnchanged(batches[0].entries, fingerprints, &skip, buffer);
+        var judged: ?u64 = if (hashing and batches.len == 1) try self.markUnchanged(batches[0].entries, fingerprints, &skip, buffer) else null;
+        while (true) {
+            return self.build(batches, buffer, fingerprints, &skip, durable, judged) catch |err| {
+                if (err != error.RegionChanged) return err;
+                // Another write landed after the records were judged, so leaving any out could split this batch.
+                skip = .empty;
+                judged = null;
+                hashValues(batches, fingerprints);
+                continue;
+            };
+        }
+    }
 
+    fn hashValues(batches: []const WriteBatch, fingerprints: []u32) void {
+        var at: usize = 0;
+        for (batches) |batch| {
+            for (batch.entries) |entry| {
+                fingerprints[at] = if (entry.value) |value| index_module.fingerprint(value) else 0;
+                at += 1;
+            }
+        }
+    }
+
+    /// Encodes the records `skip` leaves and appends them. Fingerprints are compacted to the kept records.
+    fn build(self: *Store, batches: []const WriteBatch, buffer: *Buffer, fingerprints: []u32, skip: *const std.StaticBitSet(frame.max_records), durable: bool, judged: ?u64) !AppendResult {
+        const hashing = self.options.skip_unchanged;
         var bound: usize = 0;
         var record_index: usize = 0;
         for (batches) |batch| {
@@ -825,15 +841,17 @@ pub const Store = struct {
             ids[i] = batch.id;
             used += builder.len;
         }
-        return self.append(buffer.bytes[0..used], builders[0..batches.len], ids[0..batches.len], buffer.batches[0..batches.len], durable, if (hashing) fingerprints[0..kept] else null);
+        return self.append(buffer.bytes[0..used], builders[0..batches.len], ids[0..batches.len], buffer.batches[0..batches.len], durable, if (hashing) fingerprints[0..kept] else null, judged);
     }
 
-    fn append(self: *Store, input: []u8, builders: []frame.Builder, ids: []const u64, batches: []scan.Batch, durable: bool, fingerprints: ?[]const u32) !AppendResult {
+    /// `judged` is the last batch ID seen before records were left out as unchanged, or null if none were.
+    fn append(self: *Store, input: []u8, builders: []frame.Builder, ids: []const u64, batches: []scan.Batch, durable: bool, fingerprints: ?[]const u32, judged: ?u64) !AppendResult {
         const result: AppendResult, const ticket: ?u64 = blk: {
             try lock.lock(&self.writer, self.io);
             defer self.writer.unlock(self.io);
             if (self.closed) return error.Closed;
             if (self.failed) return error.WriterFailed;
+            if (judged) |id| if (self.generation.index.lastBatchId() != id) return error.RegionChanged;
 
             // Every record already held its value. A durable write still waits for what is there.
             if (builders[0].count == 0) break :blk .{
@@ -891,7 +909,15 @@ pub const Store = struct {
 
     /// Marks the records whose stored value already equals the new one, before anything is compressed for them.
     /// Values are compared, not encodings, so compaction recompressing a record doesn't hide a repeated write.
-    fn markUnchanged(self: *Store, entries: []const write_module.Entry, fingerprints: []const u32, skip: *std.StaticBitSet(frame.max_records), scratch: *Buffer) !void {
+    /// Returns the last batch ID from before the records were judged when any is marked. The verdicts only hold while
+    /// that stays the region's last batch, which `append` checks under the writer lock.
+    fn markUnchanged(self: *Store, entries: []const write_module.Entry, fingerprints: []const u32, skip: *std.StaticBitSet(frame.max_records), scratch: *Buffer) !?u64 {
+        const judged = blk: {
+            try self.table.lockShared(self.io);
+            defer self.table.unlockShared(self.io);
+            if (self.closing) return error.Closed;
+            break :blk self.generation.index.lastBatchId();
+        };
         var skipped: u64 = 0;
         var start: usize = 0;
         while (start < entries.len) : (start += inline_records) {
@@ -905,6 +931,7 @@ pub const Store = struct {
         if (skipped != 0) if (self.options.stats) |s| {
             _ = s.unchanged_write_skips.fetchAdd(skipped, .monotonic);
         };
+        return if (skip.count() != 0) judged else null;
     }
 
     fn markWindow(self: *Store, entries: []const write_module.Entry, start: usize, end: usize, fingerprints: []const u32, skip: *std.StaticBitSet(frame.max_records), scratch: *Buffer) !u64 {
