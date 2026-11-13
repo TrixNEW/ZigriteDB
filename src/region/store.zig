@@ -221,6 +221,9 @@ pub const Store = struct {
     unpublished: std.atomic.Value(bool) = .init(false),
 
     const pool_limit = 8;
+    /// Replay and compaction start with this much and grow for a frame that needs more, so a large
+    /// batch_buffer_size only raises the size of a write.
+    pub const scan_buffer_size = 1024 * 1024;
     const prefetch_limit = 64 * 1024 * 1024;
     const max_pooled_len = 1024 * 1024;
     const pending_name = "PENDING";
@@ -474,7 +477,7 @@ pub const Store = struct {
         const start: Cover = covered orelse .{ .generation = metadata.generation, .segments = 1, .offset = segment.encoded_len };
         const active = generation.devices[generation.count - 1];
         const end = if (start.segments == generation.count and start.offset == try active.length()) start.offset else blk: {
-            var scratch = try allocator.alloc(u8, options.batch_buffer_size);
+            var scratch = try allocator.alloc(u8, @min(options.batch_buffer_size, scan_buffer_size));
             defer allocator.free(scratch);
             break :blk try replay(allocator, &generation.index, generation.devices[0..generation.count], metadata, options, &scratch, start.segments - 1, start.offset);
         };
@@ -1451,9 +1454,9 @@ pub const Store = struct {
         var published = false;
         defer if (!published) output.discard();
 
-        var scratch = try self.allocator.alloc(u8, self.options.batch_buffer_size);
+        var scratch = try self.allocator.alloc(u8, @min(self.options.batch_buffer_size, scan_buffer_size));
         defer self.allocator.free(scratch);
-        var staging = try self.allocator.alloc(u8, self.options.batch_buffer_size);
+        var staging = try self.allocator.alloc(u8, scratch.len);
         defer self.allocator.free(staging);
         var source_bytes: u64 = 0;
         const dense: ?*Dense = if (self.options.compression_threshold == 0) null else try self.allocator.create(Dense);

@@ -51,7 +51,7 @@ pub fn recoverTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, d
     const metadata, const bytes = try Store.readManifest(allocator, io, input.dir, ids);
     defer allocator.free(bytes);
     if (metadata.segments.len > options.max_segments) return error.InvalidSegmentCount;
-    var scratch = try allocator.alloc(u8, options.batch_buffer_size);
+    var scratch = try allocator.alloc(u8, @min(options.batch_buffer_size, Store.scan_buffer_size));
     defer allocator.free(scratch);
 
     var result: Result = .{ .segment_count = metadata.segments.len };
