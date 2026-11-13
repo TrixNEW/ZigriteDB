@@ -56,19 +56,23 @@ zigrite migrate <old world> <new world>      # format 1 -> format 2
 zigrite verify <world>                       # check every frame
 zigrite verify <world> <bedrock world>       # check both hold the same records and files
 zigrite compact <world>                      # compact every region
+zigrite recover <region> <empty directory>   # copy every readable frame of a damaged region
 ```
 
 Import never modifies the source, and every command that creates a world builds it
 under a temporary name and only renames it into place once it is complete and
 synced. Import and export then read the source again and compare every record and
 world file byte for byte with the result before publishing it, so a world that
-appears was checked. A round trip reproduces every LevelDB key and value exactly;
+appears was checked. A destination inside the source is refused, and so is a source
+that sits where the temporary directory would go, since that directory is cleared first.
+Export and verification need the world's `ZIGRITE` file and never create it. A round trip reproduces every LevelDB key and value exactly;
 `level.dat` and the other world files are carried along, and unknown keys are kept
 as they are. Exported worlds open in Bedrock and PMMP without ZigriteDB.
 
 Conversions hold LevelDB's own lock on `db/LOCK`, so a world a game or server has
 open is refused rather than read half-written. Symlinks inside a world are refused
-too. A damaged LevelDB table or log fails the import instead of skipping records.
+too. A damaged LevelDB table or log fails the import instead of skipping records, and
+a format 1 world with damage in front of a committed batch fails its migration.
 Export holds every key in memory to sort it, about 60 bytes per record. The same
 conversions are in the C API as `zg_import`, `zg_export`, `zg_verify_bedrock`,
 `zg_verify` and `zg_migrate`.
@@ -127,8 +131,10 @@ of one region and returns once they are durable. Writes are buffered by default:
 `deinit` only frees memory. Raw Bedrock keys go through `db.aux.get`/`db.aux.put`. See
 [World](src/world/world.zig) for the rest.
 
-Concurrent calls require separate output buffers and a thread-safe allocator and
-I/O implementation. Finish all calls before `close` or `deinit`.
+The allocator and I/O implementation must be thread-safe even for a single caller,
+since a world closes evicted regions on a worker thread. Concurrent calls need separate
+output buffers. Finish all calls before `close` or `deinit`, and keep the world at one
+address once it is in use.
 
 Compaction runs when you call `compact`, or set `World.compactor` to schedule it
 yourself. The C API schedules it automatically.
@@ -167,9 +173,16 @@ region cache without changing the ABI 3 struct layout.
 Concurrent writers to a region share one fsync. A failed fsync or manifest update
 stops that region's writer instead of guessing what reached the disk. A failed write
 is cut back off the file, and if the disk was full the region carries on once there's
-space again. A region evicted from the open-region cache is synced on the way out,
-and if that fails the next `flush` reports it. A torn tail after a crash is detected
-on open, and `zg_recover_region` copies every verified frame into a new directory.
+space again. A region evicted from the open-region cache with unsynced writes is
+synced by a worker thread, so whoever needed its slot doesn't wait for the fsync;
+`flush` waits for it, and reports it if it failed.
+
+After a crash, a region whose last write was cut short opens without it: open truncates
+the unreadable tail once it has checked that no intact frame follows and that no
+checkpoint of a clean close covers those bytes. Anything else is lost committed data, so
+the region refuses to open (`ZG_NEEDS_RECOVERY`) and is left untouched;
+`zigrite recover` or `zg_recover_region` then copies every frame that still verifies
+into a new directory.
 
 Atomicity is per batch, and so per region. A crash during `flush` can leave some
 regions saved and others not. A world-wide log would close that gap but writes every
@@ -203,8 +216,8 @@ comparison and raw data are in [tests/bench/results](tests/bench/results/README.
 ## Limitations
 
 - Linux only for storage. Other targets build but can't open worlds.
-- Benchmarks so far are from WSL2, not native Linux or a PMMP server (ZigriteDB has
-  no PHP binding yet).
+- Benchmarks so far are from WSL2, not native Linux, and drive the C API directly rather
+  than a server through [ext-zigritedb](https://github.com/Bedrock-Phanatics/ext-zigritedb).
 - A region holds at most 255 segments of up to 4 GiB each.
 - Files are bigger than LevelDB's, since LZ4 trades ratio for speed.
 - Saves are atomic per region, not across regions (see Durability).
