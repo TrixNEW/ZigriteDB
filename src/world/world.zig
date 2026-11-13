@@ -707,6 +707,11 @@ pub const World = struct {
             self.allocator.destroy(cache);
         }
         self.options.region.cache = null;
+        if (self.options.region.pool) |pool| {
+            pool.deinit(self.allocator);
+            self.allocator.destroy(pool);
+        }
+        self.options.region.pool = null;
         self.table.lockUncancelable(self.io);
         defer self.table.unlock(self.io);
         self.allocator.free(self.slots);

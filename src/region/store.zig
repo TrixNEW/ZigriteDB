@@ -41,6 +41,8 @@ pub const Options = struct {
     compression_threshold: u32 = 256,
     stats: ?*Stats = null,
     cache: ?*Cache = null,
+    /// Scratch buffers to share with other stores, as a world does; null gives the store its own.
+    pool: ?*Pool = null,
     skip_unchanged: bool = false,
     compact_min_bytes: u64 = 16 * 1024 * 1024,
     compact_live_percent: u8 = 50,
@@ -174,6 +176,44 @@ const Buffer = struct {
     fingerprints: [64]u32 = undefined,
 };
 
+/// Idle scratch buffers. A world shares one pool across its regions, so open regions that aren't
+/// being read or written hold none.
+pub const Pool = struct {
+    mutex: std.Io.Mutex = .init,
+    buffers: [limit]*Buffer = undefined,
+    len: usize = 0,
+
+    const limit = 8;
+    const max_buffer_len = 1024 * 1024;
+
+    fn take(self: *Pool, io: std.Io) ?*Buffer {
+        lock.lockUncancelable(&self.mutex, io);
+        defer self.mutex.unlock(io);
+        if (self.len == 0) return null;
+        self.len -= 1;
+        return self.buffers[self.len];
+    }
+
+    /// False when the buffer is too big to keep or the pool is full.
+    fn give(self: *Pool, io: std.Io, buffer: *Buffer) bool {
+        if (buffer.bytes.len > max_buffer_len) return false;
+        lock.lockUncancelable(&self.mutex, io);
+        defer self.mutex.unlock(io);
+        if (self.len == limit) return false;
+        self.buffers[self.len] = buffer;
+        self.len += 1;
+        return true;
+    }
+
+    pub fn deinit(self: *Pool, allocator: std.mem.Allocator) void {
+        for (self.buffers[0..self.len]) |buffer| {
+            allocator.free(buffer.bytes);
+            allocator.destroy(buffer);
+        }
+        self.len = 0;
+    }
+};
+
 pub const Store = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -212,8 +252,7 @@ pub const Store = struct {
     directory_mutex: std.Io.Mutex = .init,
     compaction_hint: std.atomic.Value(bool) = .init(false),
 
-    pool_mutex: std.Io.Mutex = .init,
-    pool: std.ArrayListUnmanaged(*Buffer) = .empty,
+    own_pool: Pool = .{},
 
     checkpointed: Cover = .{},
 
@@ -221,12 +260,10 @@ pub const Store = struct {
     parent: ?std.Io.Dir = null,
     unpublished: std.atomic.Value(bool) = .init(false),
 
-    const pool_limit = 8;
     /// Replay and compaction start with this much and grow for a frame that needs more, so a large
     /// batch_buffer_size only raises the size of a write.
     pub const scan_buffer_size = 1024 * 1024;
     const prefetch_limit = 64 * 1024 * 1024;
-    const max_pooled_len = 1024 * 1024;
     const pending_name = "PENDING";
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, region: Region, options: Options) !Store {
@@ -276,8 +313,6 @@ pub const Store = struct {
         generation.count = 1;
         errdefer generation.destroy();
 
-        var pool: std.ArrayListUnmanaged(*Buffer) = try .initCapacity(allocator, pool_limit);
-        errdefer pool.deinit(allocator);
         if (!deferred) {
             var buffer: [manifest.header_len + 12]u8 = undefined;
             var publisher: publication.Publisher(*Directory) = .{ .backend = &directory };
@@ -296,7 +331,6 @@ pub const Store = struct {
             .offset = segment.encoded_len,
             .synced_offset = if (deferred) 0 else segment.encoded_len,
             .generation = generation,
-            .pool = pool,
             .parent = parent,
             .unpublished = .init(deferred),
         };
@@ -499,8 +533,6 @@ pub const Store = struct {
                 budget -= len;
             }
         }
-        var pool: std.ArrayListUnmanaged(*Buffer) = try .initCapacity(allocator, pool_limit);
-        errdefer pool.deinit(allocator);
 
         return .{
             .allocator = allocator,
@@ -514,7 +546,6 @@ pub const Store = struct {
             .offset = end,
             .synced_offset = end,
             .generation = generation,
-            .pool = pool,
             .checkpointed = covered orelse .{},
         };
     }
@@ -1157,12 +1188,12 @@ pub const Store = struct {
         while (generation.readers.load(.seq_cst) != 0) self.idle.waitUncancelable(self.io, &self.idle_mutex);
     }
 
+    fn pool(self: *Store) *Pool {
+        return self.options.pool orelse &self.own_pool;
+    }
+
     fn borrow(self: *Store, len: usize) !*Buffer {
-        const buffer = blk: {
-            lock.lockUncancelable(&self.pool_mutex, self.io);
-            defer self.pool_mutex.unlock(self.io);
-            break :blk self.pool.pop();
-        } orelse create: {
+        const buffer = self.pool().take(self.io) orelse create: {
             const fresh = try self.allocator.create(Buffer);
             fresh.* = .{};
             break :create fresh;
@@ -1183,11 +1214,7 @@ pub const Store = struct {
     }
 
     fn giveBack(self: *Store, buffer: *Buffer) void {
-        if (buffer.bytes.len <= max_pooled_len) {
-            lock.lockUncancelable(&self.pool_mutex, self.io);
-            defer self.pool_mutex.unlock(self.io);
-            if (self.pool.items.len < pool_limit) return self.pool.appendAssumeCapacity(buffer);
-        }
+        if (self.pool().give(self.io, buffer)) return;
         self.allocator.free(buffer.bytes);
         self.allocator.destroy(buffer);
     }
@@ -1837,11 +1864,7 @@ pub const Store = struct {
         }
         self.waitReaders(self.generation);
         self.generation.destroy();
-        for (self.pool.items) |buffer| {
-            self.allocator.free(buffer.bytes);
-            self.allocator.destroy(buffer);
-        }
-        self.pool.deinit(self.allocator);
+        self.own_pool.deinit(self.allocator);
         self.directory.deinit();
     }
 };
