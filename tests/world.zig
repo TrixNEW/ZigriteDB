@@ -423,13 +423,57 @@ test "flush waits for a region that is still syncing on its way out" {
     try world.close();
 }
 
+fn readEvicted(world: *db.World, done: *std.atomic.Value(bool), result: *?anyerror) void {
+    defer done.store(true, .release);
+    var output: [16]u8 = undefined;
+    const value = world.get(key(0), &output) catch |err| {
+        result.* = err;
+        return;
+    };
+    if (value == null or !std.mem.eql(u8, value.?, "saved")) result.* = error.TestUnexpectedResult;
+}
+
+test "evicting a region with unsynced writes doesn't make the caller wait for its fsync" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = try db.World.open(testing.allocator, io, tmp.dir, .{ .max_open_regions = 1 });
+    defer world.deinit();
+    _ = try world.write(batch(1, &.{put(0, "saved")}));
+
+    var faults: db.storage.Faults = .{ .pause_sync = true, .armed = .init(true) };
+    db.storage.faults = &faults;
+    defer db.storage.faults = null;
+    defer faults.released.store(true, .release);
+    // The first region leaves to make room and parks in its fsync. This write returns anyway.
+    _ = try world.write(batch(1, &.{put(32, "other")}));
+    faults.waitPaused();
+    var output: [16]u8 = undefined;
+    try testing.expectEqualStrings("other", (try world.get(key(32), &output)).?);
+
+    // The region can't be reopened until it has let go of its directory.
+    var done: std.atomic.Value(bool) = .init(false);
+    var result: ?anyerror = null;
+    const reader = try std.Thread.spawn(.{}, readEvicted, .{ &world, &done, &result });
+    while (world.waiters.load(.seq_cst) == 0 and !done.load(.acquire)) std.Thread.yield() catch {};
+    const early = done.load(.acquire);
+    faults.released.store(true, .release);
+    reader.join();
+    try testing.expect(!early);
+    try testing.expectEqual(null, result);
+    try world.flush();
+    try world.close();
+}
+
 fn worldWithAllocator(allocator: std.mem.Allocator) !void {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var world = try db.World.open(allocator, io, tmp.dir, .{ .max_open_regions = 1, .region = .{ .batch_buffer_size = 256 } });
     defer world.deinit();
+    // A synced region closes on this thread when it is evicted, which the failing allocator needs: it isn't thread-safe.
     _ = try world.write(batch(1, &.{put(0, "a")}));
+    try world.flush();
     _ = try world.write(batch(1, &.{put(32, "b")}));
+    try world.flush();
     var output: [128]u8 = undefined;
     try testing.expectEqualStrings("a", (try world.get(key(0), &output)).?);
     try world.close();

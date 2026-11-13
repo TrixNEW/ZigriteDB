@@ -18,6 +18,7 @@ const File = @import("../io/file.zig").File;
 const files = @import("../storage/files.zig");
 
 const cache_module = @import("../cache/value.zig");
+const maintenance = @import("maintenance.zig");
 
 pub const Options = struct {
     max_open_regions: usize = 64,
@@ -63,6 +64,13 @@ pub const World = struct {
     aux_mutex: std.Io.Mutex = .init,
     evictions: usize = 0,
     evict_error: ?anyerror = null,
+    // Evicted regions with unsynced writes close on this worker, so whoever needed the slot doesn't wait for the fsync.
+    closer: Closer,
+    // Regions the worker hasn't finished closing. They still hold their directory lock.
+    closing_regions: [closer_capacity]?Region = @splat(null),
+
+    const closer_capacity = 8;
+    const Closer = maintenance.WorkQueue(World, *Opened, closer_capacity, true, closeEvicted);
 
     const Opened = struct {
         store: Store,
@@ -81,6 +89,8 @@ pub const World = struct {
         }
     };
 
+    /// `allocator` must be thread-safe: evicted regions with unsynced writes are closed on a worker thread.
+    /// The world must stay at one address once it is in use.
     pub fn open(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: Options) !World {
         if (options.max_open_regions == 0 or options.max_open_regions > 1024) return error.InvalidRegionLimit;
         try options.region.validate();
@@ -91,9 +101,13 @@ pub const World = struct {
         const slots = try allocator.alloc(Slot, options.max_open_regions);
         errdefer allocator.free(slots);
 
-        var result: World = .{ .allocator = allocator, .io = io, .directory = directory, .options = options, .slots = slots };
+        var result: World = .{ .allocator = allocator, .io = io, .directory = directory, .options = options, .slots = slots, .closer = .{ .io = io, .context = undefined } };
         try result.positions.ensureTotalCapacity(allocator, @intCast(options.max_open_regions));
         errdefer result.positions.deinit(allocator);
+        const pool = try allocator.create(store_module.Pool);
+        errdefer allocator.destroy(pool);
+        pool.* = .{};
+        result.options.region.pool = pool;
         if (options.cache.bytes > 0) {
             const cache = try allocator.create(cache_module.Cache);
             errdefer allocator.destroy(cache);
@@ -427,6 +441,7 @@ pub const World = struct {
         if (self.closed) return;
         self.startClosing();
         while (self.inUse()) self.waitUnused();
+        self.stopCloser();
         var failure = self.evict_error;
         var stores: [1024]*Store = undefined;
         for (self.slots[0..self.count], stores[0..self.count]) |*slot, *store| store.* = &slot.opened.store;
@@ -447,6 +462,7 @@ pub const World = struct {
         if (self.closed) return;
         self.startClosing();
         while (self.inUse()) self.waitUnused();
+        self.stopCloser();
         for (self.slots[0..self.count]) |slot| {
             slot.opened.store.deinit();
             self.allocator.destroy(slot.opened);
@@ -541,6 +557,9 @@ pub const World = struct {
     }
 
     fn busy(self: *World, region: Region) bool {
+        if (self.evictions != 0) for (self.closing_regions) |closing| {
+            if (closing) |found| if (found.eql(region)) return true;
+        };
         if (self.loads == 0) return false;
         for (self.slots[0..self.count]) |*slot| {
             if (!slot.loading) continue;
@@ -594,20 +613,23 @@ pub const World = struct {
             self.count += 1;
         }
         self.loads += 1;
-        if (victim != null) self.evictions += 1;
+        var queued = false;
+        if (victim) |opened| {
+            self.evictions += 1;
+            // Closing a synced region is cheap enough to do here, and handing it over would cost more.
+            if (opened.store.dirty()) for (&self.closing_regions) |*closing| {
+                if (closing.* != null) continue;
+                closing.* = evicting;
+                // The world has settled at its final address by now; only this path starts the worker.
+                if (self.closer.thread == null) self.closer.context = self;
+                if (self.closer.submit(opened)) |_| queued = true else |_| closing.* = null;
+                break;
+            };
+        }
 
         self.mutex.unlock(self.io);
-        if (victim) |opened| {
-            const closed = opened.store.close();
-            self.allocator.destroy(opened);
-            lock.lockUncancelable(&self.mutex, self.io);
-            closed catch |err| if (self.evict_error == null) {
-                self.evict_error = err;
-            };
-            self.evictions -= 1;
-            self.changed.broadcast(self.io);
-            self.mutex.unlock(self.io);
-        }
+        // A full queue closes the region here, which holds back whoever evicts faster than the disk syncs.
+        if (victim) |opened| if (!queued) closeEvicted(self, opened) catch {};
         const result = self.openRegion(region, create);
         lock.lockUncancelable(&self.mutex, self.io);
         defer self.changed.broadcast(self.io);
@@ -631,6 +653,31 @@ pub const World = struct {
         return &opened.store;
     }
 
+    /// Close failures are kept for the next flush, which is when the region's writes were due to be durable.
+    fn closeEvicted(self: *World, opened: *Opened) anyerror!void {
+        const region = opened.store.region;
+        const closed = opened.store.close();
+        self.allocator.destroy(opened);
+        lock.lockUncancelable(&self.mutex, self.io);
+        defer self.mutex.unlock(self.io);
+        closed catch |err| if (self.evict_error == null) {
+            self.evict_error = err;
+        };
+        for (&self.closing_regions) |*closing| {
+            if (closing.*) |found| if (found.eql(region)) {
+                closing.* = null;
+            };
+        }
+        self.evictions -= 1;
+        self.changed.broadcast(self.io);
+    }
+
+    /// With `mutex` held and nothing using the world. The worker only takes `mutex` while an eviction is counted.
+    fn stopCloser(self: *World) void {
+        while (self.evictions != 0) self.waitUncancelable();
+        self.closer.close() catch {};
+    }
+
     fn removeAt(self: *World, i: usize) void {
         _ = self.positions.remove(self.slots[i].region);
         self.count -= 1;
@@ -640,15 +687,22 @@ pub const World = struct {
     }
 
     fn idleIndex(self: *World) ?usize {
+        var unsynced: ?usize = null;
         for (0..2 * self.count) |step| {
             const i = (self.hand + step) % self.count;
             const slot = &self.slots[i];
             if (!slot.idle()) continue;
             if (slot.referenced.swap(false, .monotonic)) continue;
+            // Closing a region with unsynced writes costs an fsync, so one without goes first.
+            if (slot.opened.store.dirty()) {
+                if (unsynced == null) unsynced = i;
+                continue;
+            }
             self.hand = i + 1;
             return i;
         }
-        return null;
+        if (unsynced) |i| self.hand = i + 1;
+        return unsynced;
     }
 
     fn openRegion(self: *World, region: Region, create: bool) !?*Opened {
