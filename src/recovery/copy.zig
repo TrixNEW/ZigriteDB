@@ -88,7 +88,7 @@ pub fn recoverTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, d
                 result.committed_batches += 1;
             }
             if (!scanner.has_tail) break;
-            const next = try scanner.intactAfter(allocator, &scratch) orelse scanner.length;
+            const next = try scanner.intactFrom(scanner.offset + 1, allocator, &scratch) orelse scanner.length;
             result.omitted_bytes += next - scanner.offset;
             if (next == scanner.length) break;
             scanner.skipTo(next);

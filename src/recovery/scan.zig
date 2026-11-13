@@ -176,12 +176,12 @@ pub fn FileScanner(comptime Device: type) type {
             }
         }
 
-        /// Looks past unreadable bytes for the next frame that still verifies, whatever its batch ID.
-        /// A cut write leaves none; damage inside committed data usually does.
-        pub fn intactAfter(self: *Self, allocator: std.mem.Allocator, scratch: *[]u8) !?u64 {
+        /// Looks from `start` on for a frame that still verifies, whatever its batch ID. A cut write leaves none;
+        /// damage inside committed data usually does, and so does an intact frame the batch order turned down.
+        pub fn intactFrom(self: *Self, start: u64, allocator: std.mem.Allocator, scratch: *[]u8) !?u64 {
             const window = try allocator.alloc(u8, 64 * 1024);
             defer allocator.free(window);
-            var at = self.offset + 1;
+            var at = start;
             while (self.length - @min(at, self.length) >= frame.header_len) {
                 const len: usize = @intCast(@min(window.len, self.length - at));
                 try self.device.readExact(window[0..len], at);
@@ -189,21 +189,21 @@ pub fn FileScanner(comptime Device: type) type {
                     const head = window[i..][0..frame.header_len];
                     if (head[7] != 0 or head[6] == 0 or head[6] > 2) continue;
                     const header = frame.Header.read(head, self.header.salt) catch continue;
-                    const start = at + i;
+                    const found = at + i;
                     const size = header.len();
-                    if (size > self.length - start) continue;
+                    if (size > self.length - found) continue;
                     if (scratch.len < size) scratch.* = try allocator.realloc(scratch.*, size);
-                    try self.device.readExact(scratch.*[0..size], start);
+                    try self.device.readExact(scratch.*[0..size], found);
                     self.window = &.{};
                     _ = frame.verify(scratch.*[0..size], self.header.salt, {}, noop) catch continue;
-                    return start;
+                    return found;
                 }
                 at += len - (frame.header_len - 1);
             }
             return null;
         }
 
-        /// Resumes at a frame `intactAfter` found.
+        /// Resumes at a frame `intactFrom` found.
         pub fn skipTo(self: *Self, offset: u64) void {
             self.offset = offset;
             self.finished = false;

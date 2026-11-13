@@ -744,7 +744,7 @@ pub const Store = struct {
                 // Damage inside bytes a clean close had synced, or in front of intact frames, takes committed
                 // data with it. Only explicit recovery may drop that.
                 if (at + 1 == synced.segments and scanner.offset < synced.offset) return error.NeedsRecovery;
-                if (try scanner.intactAfter(allocator, scratch) != null) return error.NeedsRecovery;
+                if (try scanner.intactFrom(scanner.offset, allocator, scratch) != null) return error.NeedsRecovery;
                 // Otherwise it is a write a crash cut short, which was never durable.
                 try device.handle.setLength(device.io, scanner.offset);
                 try device.sync();
