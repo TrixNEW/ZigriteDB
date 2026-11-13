@@ -1509,11 +1509,15 @@ pub const Store = struct {
         try output.sync();
 
         var tail: Tail = .{ .position = snapshot.position, .offset = snapshot.offset };
+        var caught_up: u64 = 0;
         for (0..4) |_| {
             const copied = try self.copyTail(old, &tail, &output, &index, &scratch, false);
-            source_bytes += copied;
+            caught_up += copied;
             if (copied <= catch_up_bytes) break;
         }
+        source_bytes += caught_up;
+        // Writers wait for the sync under their lock, so leave it only the last few frames.
+        if (caught_up != 0) try output.sync();
 
         const old_count, const output_count = blk: {
             try lock.lock(&self.writer, self.io);
