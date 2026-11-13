@@ -150,10 +150,16 @@ writer's state durable.
 
 ## Recovery
 
-Open replays committed frames. Anything unreadable at the end of the active segment —
-a cut, zeros or garbage — is treated as a torn tail and requires explicit recovery into
-an empty directory (`zg_recover_region`), which copies every verified frame and leaves
-the source untouched. Damage in a sealed segment is corruption. A leftover `MANIFEST.tmp`
+Open replays committed frames. When the active segment ends in something unreadable — a
+cut, zeros or garbage — open looks through the rest of the file for a frame that still
+verifies. If there is none, the bytes are a write a crash cut short: they were never
+durable, so open truncates them, syncs and carries on. If an intact frame follows the
+damage, or a checkpoint of this generation shows a clean close had already synced past
+it, committed data would be lost, so the region refuses to open (`NeedsRecovery`) and
+is left untouched for explicit recovery into an empty directory (`zg_recover_region`,
+`zigrite recover`). That copies every frame that still verifies, from every segment, and
+skips what doesn't; changes in the skipped frames are lost, so older values of those keys
+can return. Damage in a sealed segment is corruption. A leftover `MANIFEST.tmp`
 (a publication whose rename never happened), segments of the next generation (an
 unfinished compaction), segments of older generations (cleanup that never ran) and
 segments newer than the manifest's active one (an unfinished rotation) are deleted on

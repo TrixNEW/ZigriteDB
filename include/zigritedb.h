@@ -141,6 +141,9 @@ int zg_list_regions(zg_handle *handle, zg_region *out, size_t capacity, size_t *
 int zg_list_keys(zg_handle *handle, int32_t dimension, int32_t region_x, int32_t region_z, uint32_t component,
                  zg_key *out, size_t capacity, size_t *count);
 int zg_maintenance_wait(zg_handle *handle);
+/* For a region that reports ZG_NEEDS_RECOVERY: damage with intact frames after it. A write a crash cut short
+   needs none of this; opening the region drops it. Copies every frame that still verifies into an empty
+   directory and leaves the source untouched. Changes in the unreadable frames are lost. */
 int zg_recover_region(const uint8_t *source, size_t source_len, const uint8_t *destination, size_t destination_len, const zg_options *options);
 /* Conversions build the destination next to it under a temporary name and only publish it once every record and
    world file has been compared with the source, so a failed or interrupted run never leaves a usable-looking world.

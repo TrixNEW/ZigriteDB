@@ -265,9 +265,10 @@ static void failures(const char *root, zg_options options) {
     FILE *torn = fopen(segment, "ab");
     assert(torn != NULL && fwrite("torn", 1, 4, torn) == 4 && fclose(torn) == 0);
     check(zg_open((const uint8_t *)source, strlen(source), &options, &handle));
-    assert(zg_get(handle, &put.key, output, sizeof(output), &required) == ZG_NEEDS_RECOVERY);
-    assert(zg_write(handle, 2, &put, 1) == ZG_NEEDS_RECOVERY);
+    check(zg_get(handle, &put.key, output, sizeof(output), &required));
+    assert(required == 7 && memcmp(output, "durable", 7) == 0);
     check(zg_close(handle));
+    assert(stat(segment, &after_failure) == 0 && after_failure.st_size == info.st_size);
     FILE *file = fopen(segment, "rb");
     assert(file != NULL);
     assert(fseek(file, 0, SEEK_END) == 0);

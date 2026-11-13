@@ -198,7 +198,7 @@ test "recovery copies committed frames and leaves the source intact" {
     try testing.expectEqual(@as(usize, 2), result.segment_count);
     try testing.expectEqual(@as(u64, 2), result.committed_batches);
     try testing.expectEqual(@as(u64, 2), result.last_batch_id);
-    try testing.expectEqual(@as(u64, 2), result.omitted_tail_bytes);
+    try testing.expectEqual(@as(u64, 2), result.omitted_bytes);
     try testing.expectEqual(length + 2, try file.length());
     _ = try source.dir.statFile(io, "MANIFEST.tmp", .{});
     try testing.expectError(error.FileNotFound, destination.dir.statFile(io, "MANIFEST.tmp", .{}));
@@ -214,7 +214,7 @@ test "recovery copies committed frames and leaves the source intact" {
     try testing.expectEqualStrings("new", (try reopened.get(key(1), &value)).?);
 }
 
-test "recovery never publishes corrupt sealed data or replaces a destination" {
+test "recovery leaves out corrupt sealed frames and never replaces a destination" {
     var source = testing.tmpDir(.{});
     defer source.cleanup();
     var destination = testing.tmpDir(.{ .iterate = true });
@@ -228,9 +228,15 @@ test "recovery never publishes corrupt sealed data or replaces a destination" {
     const sealed = try support.openFile(source.dir, support.segment_name);
     defer sealed.handle.close(io);
     try sealed.writeAll("X", db.segment.encoded_len + db.frame.header_len + db.record.header_len);
-    try testing.expectError(error.ChecksumMismatch, db.recovery_copy.recoverTo(testing.allocator, io, source.dir, destination.dir, .{}));
-    var iterator = destination.dir.iterate();
-    try testing.expectEqual(null, try iterator.next(io));
+    const sealed_length = try sealed.length();
+    const result = try db.recovery_copy.recoverTo(testing.allocator, io, source.dir, destination.dir, .{});
+    try testing.expectEqual(@as(u64, 1), result.committed_batches);
+    try testing.expectEqual(sealed_length - db.segment.encoded_len, result.omitted_bytes);
+    try testing.expectEqual(@as(u64, 2), result.last_batch_id);
+    var recovered = try db.Store.open(testing.allocator, io, destination.dir, .{});
+    defer recovered.deinit();
+    var value: [128]u8 = undefined;
+    try testing.expectEqual(null, try recovered.get(key(0), &value));
 }
 
 test "inspection reports tails and publication leftovers without changing anything" {
@@ -264,7 +270,6 @@ test "inspection reports tails and publication leftovers without changing anythi
     try testing.expectEqual(@as(usize, 1), report.orphans.len);
     try testing.expectEqual(@as(u64, 2), report.orphans[0].generation);
     try testing.expectEqual(clean.active_offset + 2, try file.length());
-    try testing.expectError(error.NeedsRecovery, db.Store.open(testing.allocator, io, tmp.dir, .{}));
     try file.writeAll("bad!", 0);
     try testing.expectError(error.InvalidMagic, db.inspection.inspect(testing.allocator, io, tmp.dir, .{}, &scratch, &orphans));
 }

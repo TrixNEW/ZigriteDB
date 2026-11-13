@@ -23,11 +23,14 @@ pub const Result = struct {
     segment_count: usize,
     committed_batches: u64 = 0,
     last_batch_id: u64 = 0,
-    omitted_tail_bytes: u64 = 0,
+    /// Bytes no frame could be verified from: a cut tail, or damage between intact frames.
+    omitted_bytes: u64 = 0,
     source_bytes: u64 = 0,
     output_bytes: u64 = 0,
 };
 
+/// Copies every frame that still verifies into an empty directory and leaves the source untouched.
+/// Frames lost to damage take their changes with them, so older values of those keys may return.
 pub fn recoverTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, destination: std.Io.Dir, options: Options) !Result {
     try (@import("../region/store.zig").Options{
         .max_segments = options.max_segments,
@@ -61,7 +64,7 @@ pub fn recoverTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, d
     errdefer if (!publishing) {
         for (metadata.segments[0..created]) |id| files.removeSegment(output.dir, io, metadata.generation, id) catch {};
     };
-    for (metadata.segments, 0..) |id, position| {
+    for (metadata.segments) |id| {
         const original = try files.openSegment(input.dir, io, metadata.generation, id, false);
         defer original.close(io);
         var scanner = try Scanner.init(.{ .handle = original, .io = io }, .{
@@ -69,7 +72,7 @@ pub fn recoverTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, d
             .segment_id = id,
             .region = metadata.region,
             .salt = metadata.salt,
-        }, if (position == metadata.segments.len - 1) .active else .sealed, order, options.max_segment_size);
+        }, .active, order, options.max_segment_size);
         result.source_bytes += scanner.length;
 
         const copy = try files.createSegment(output.dir, io, metadata.generation, id);
@@ -78,15 +81,21 @@ pub fn recoverTo(allocator: std.mem.Allocator, io: std.Io, source: std.Io.Dir, d
         const target: File = .{ .handle = copy, .io = io };
         try target.writeAll(&(try scanner.header.encode()), 0);
         var offset: u64 = segment.encoded_len;
-        while (try scanner.nextGrowing(allocator, &scratch)) |batch| {
-            try target.writeAll(batch.bytes, offset);
-            offset += batch.bytes.len;
-            result.committed_batches += 1;
+        while (true) {
+            while (try scanner.nextGrowing(allocator, &scratch)) |batch| {
+                try target.writeAll(batch.bytes, offset);
+                offset += batch.bytes.len;
+                result.committed_batches += 1;
+            }
+            if (!scanner.has_tail) break;
+            const next = try scanner.intactAfter(allocator, &scratch) orelse scanner.length;
+            result.omitted_bytes += next - scanner.offset;
+            if (next == scanner.length) break;
+            scanner.skipTo(next);
         }
         try target.sync();
         order = scanner.order;
         result.output_bytes += offset;
-        result.omitted_tail_bytes = scanner.length - scanner.offset;
     }
     result.last_batch_id = order.last_batch_id;
 

@@ -11,6 +11,7 @@ const usage =
     \\  verify <world>                         check every frame of every region
     \\  verify <world> <bedrock world>         check both hold the same records and world files
     \\  compact <world>                        compact every region
+    \\  recover <region> <empty directory>     copy every readable frame of a damaged region
     \\
 ;
 
@@ -53,6 +54,15 @@ pub fn main(init: std.process.Init) !u8 {
         defer bedrock.close(io);
         const result = db.bedrock.verify(allocator, io, bedrock, zigrite, &problem) catch |err| return failed(out, err, &problem);
         try out.print("{} chunk records, {} other records and {} world files match\n", .{ result.chunk_records, result.aux_records, result.files });
+        return 0;
+    }
+    if (std.mem.eql(u8, command, "recover") and args.len == 4) {
+        const source = try cwd.openDir(io, args[2], .{ .follow_symlinks = false });
+        defer source.close(io);
+        const destination = try cwd.openDir(io, args[3], .{ .follow_symlinks = false });
+        defer destination.close(io);
+        const result = try db.recovery_copy.recoverTo(allocator, io, source, destination, .{});
+        try out.print("recovered {} batches from {} segments; left out {} unreadable bytes\n", .{ result.committed_batches, result.segment_count, result.omitted_bytes });
         return 0;
     }
     if (std.mem.eql(u8, command, "compare") and args.len == 4) return compare(allocator, io, cwd, args[2], args[3], out);

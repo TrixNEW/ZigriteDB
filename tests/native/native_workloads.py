@@ -79,14 +79,16 @@ def check(library, path):
 def check_damaged_files(library):
     api = API(library)
     segment = "0000000000000001-0000000000000001.segment"
-    cases = (("MANIFEST", "missing", 8), (segment, "missing", 6),
-             (segment, "truncated", 8), (segment, "corrupt", 8), ("MANIFEST", "corrupt", 6))
-    for name, damage, expected_status in cases:
+    # A clean close leaves INDEX, which proves the segment was synced that far; a cut below it is lost data.
+    cases = (("MANIFEST", "missing", 8, False), (segment, "missing", 6, False),
+             (segment, "truncated", 8, True), ("MANIFEST", "corrupt", 6, False))
+    for name, damage, expected_status, checkpoint in cases:
         with tempfile.TemporaryDirectory(prefix="zigritedb-damaged-") as path:
             handle = api.open(path)
             assert api.write(handle, 1, [b"saved"]) == 0
             assert api.lib.zg_close(handle) == 0
-            (Path(path) / "00000000-00000000-00000000.region" / "INDEX").unlink()
+            if not checkpoint:
+                (Path(path) / "00000000-00000000-00000000.region" / "INDEX").unlink()
             source = Path(path) / "00000000-00000000-00000000.region" / name
             if damage == "missing":
                 saved = source.with_suffix(".saved")
@@ -107,7 +109,35 @@ def check_damaged_files(library):
                 assert source.read_bytes() == original
             finally:
                 assert api.lib.zg_close(handle) == 0
-    print("Missing, truncated and corrupt files fail safely without overwriting data")
+    # Without INDEX, an unreadable last frame with nothing after it is a write a crash cut short: open drops it.
+    for damage in ("truncated", "corrupt"):
+        with tempfile.TemporaryDirectory(prefix="zigritedb-torn-") as path:
+            handle = api.open(path)
+            assert api.write(handle, 1, [b"saved"]) == 0
+            assert api.lib.zg_flush(handle) == 0
+            assert api.write(handle, 2, [b"unsynced"]) == 0
+            assert api.lib.zg_close(handle) == 0
+            region = Path(path) / "00000000-00000000-00000000.region"
+            (region / "INDEX").unlink()
+            data = bytearray((region / segment).read_bytes())
+            if damage == "truncated":
+                data.pop()
+            else:
+                data[-1] ^= 1
+            (region / segment).write_bytes(data)
+            handle = api.open(path)
+            try:
+                assert api.read(handle, 0) == (0, b"saved"), damage
+                assert api.write(handle, 2, [b"replacement"]) == 0
+                assert api.read(handle, 0) == (0, b"replacement")
+            finally:
+                assert api.lib.zg_close(handle) == 0
+            handle = api.open(path)
+            try:
+                assert api.read(handle, 0) == (0, b"replacement")
+            finally:
+                assert api.lib.zg_close(handle) == 0
+    print("Missing and corrupt files fail safely without overwriting data; torn tails are dropped")
 
 
 def check_lifecycle(library, path):

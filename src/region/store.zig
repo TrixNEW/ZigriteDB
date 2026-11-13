@@ -473,13 +473,14 @@ pub const Store = struct {
             }, if (active) .active else .sealed, .{}, options.max_segment_size);
         }
 
-        const covered = try loadCheckpoint(allocator, io, &directory, &generation.index, generation.devices[0..generation.count], metadata, options);
+        var synced: Cover = .{};
+        const covered = try loadCheckpoint(allocator, io, &directory, &generation.index, generation.devices[0..generation.count], metadata, options, &synced);
         const start: Cover = covered orelse .{ .generation = metadata.generation, .segments = 1, .offset = segment.encoded_len };
         const active = generation.devices[generation.count - 1];
         const end = if (start.segments == generation.count and start.offset == try active.length()) start.offset else blk: {
             var scratch = try allocator.alloc(u8, @min(options.batch_buffer_size, scan_buffer_size));
             defer allocator.free(scratch);
-            break :blk try replay(allocator, &generation.index, generation.devices[0..generation.count], metadata, options, &scratch, start.segments - 1, start.offset);
+            break :blk try replay(allocator, &generation.index, generation.devices[0..generation.count], metadata, options, &scratch, start.segments - 1, start.offset, synced);
         };
         if (try active.length() != end) return error.FileChanged;
         const clean = if (covered) |c| c.segments == generation.count and c.offset == end else false;
@@ -523,8 +524,10 @@ pub const Store = struct {
         offset: u64 = 0,
     };
 
-    fn loadCheckpoint(allocator: std.mem.Allocator, io: std.Io, directory: *Directory, index: *Index, devices: []const File, metadata: manifest.Manifest, options: Options) !?Cover {
-        const cover = readCheckpoint(allocator, io, directory, index, devices, metadata, options) catch |err| switch (err) {
+    /// `synced` is set from any checkpoint of this generation, usable or not: a clean close wrote it only
+    /// after syncing that far, so those bytes were durable once.
+    fn loadCheckpoint(allocator: std.mem.Allocator, io: std.Io, directory: *Directory, index: *Index, devices: []const File, metadata: manifest.Manifest, options: Options, synced: *Cover) !?Cover {
+        const cover = readCheckpoint(allocator, io, directory, index, devices, metadata, options, synced) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => null,
         };
@@ -540,7 +543,7 @@ pub const Store = struct {
         return cover;
     }
 
-    fn readCheckpoint(allocator: std.mem.Allocator, io: std.Io, directory: *Directory, index: *Index, devices: []const File, metadata: manifest.Manifest, options: Options) !Cover {
+    fn readCheckpoint(allocator: std.mem.Allocator, io: std.Io, directory: *Directory, index: *Index, devices: []const File, metadata: manifest.Manifest, options: Options, synced: *Cover) !Cover {
         const handle = try files.openRegularFile(directory.dir, io, checkpoint.name);
         defer handle.close(io);
         const file: File = .{ .handle = handle, .io = io };
@@ -552,10 +555,11 @@ pub const Store = struct {
         try file.readExact(bytes, 0);
 
         const header = try checkpoint.Header.read(bytes[0..checkpoint.header_len]);
-        const valid = header.generation == metadata.generation and header.salt == metadata.salt and
-            header.segments != 0 and header.segments <= metadata.segments.len and header.entries <= options.max_keys and
-            bytes.len <= checkpoint.maxFileLen(header.bodyLen());
-        if (!valid) return error.StaleCheckpoint;
+        const current = header.generation == metadata.generation and header.salt == metadata.salt and
+            header.segments != 0 and header.segments <= metadata.segments.len;
+        if (!current) return error.StaleCheckpoint;
+        synced.* = .{ .generation = header.generation, .segments = header.segments, .offset = header.offset };
+        if (header.entries > options.max_keys or bytes.len > checkpoint.maxFileLen(header.bodyLen())) return error.StaleCheckpoint;
         const blocks = bytes[checkpoint.header_len .. bytes.len - 4];
         if (std.mem.readInt(u32, bytes[bytes.len - 4 ..][0..4], .little) != crc.hash(blocks)) return error.ChecksumMismatch;
         const body = try allocator.alloc(u8, header.bodyLen());
@@ -692,7 +696,7 @@ pub const Store = struct {
         }
     };
 
-    fn replay(allocator: std.mem.Allocator, index: *Index, devices: []const File, metadata: manifest.Manifest, options: Options, scratch: *[]u8, position: usize, offset: u64) !u64 {
+    fn replay(allocator: std.mem.Allocator, index: *Index, devices: []const File, metadata: manifest.Manifest, options: Options, scratch: *[]u8, position: usize, offset: u64, synced: Cover) !u64 {
         var end: u64 = offset;
         for (devices[position..], metadata.segments[position..], position..) |device, id, at| {
             const active = at == devices.len - 1;
@@ -704,7 +708,16 @@ pub const Store = struct {
             }, if (active) .active else .sealed, index.order, options.max_segment_size);
             if (at == position) try scanner.seek(offset);
             while (try scanner.nextGrowing(allocator, scratch)) |batch| try index.apply(batch, at);
-            if (scanner.has_tail) return error.NeedsRecovery;
+            if (scanner.has_tail) {
+                // Damage inside bytes a clean close had synced, or in front of intact frames, takes committed
+                // data with it. Only explicit recovery may drop that.
+                if (at + 1 == synced.segments and scanner.offset < synced.offset) return error.NeedsRecovery;
+                if (try scanner.intactAfter(allocator, scratch) != null) return error.NeedsRecovery;
+                // Otherwise it is a write a crash cut short, which was never durable.
+                try device.handle.setLength(device.io, scanner.offset);
+                try device.sync();
+                if (options.stats) |s| _ = s.recovery_attempts.fetchAdd(1, .monotonic);
+            }
             end = scanner.offset;
         }
         return end;

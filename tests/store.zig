@@ -264,8 +264,13 @@ test "open restores data, accepts new writes, and refuses partial tails" {
     }
     const file = try support.openFile(tmp.dir, segment_name);
     defer file.handle.close(io);
-    try file.handle.setLength(io, try file.length() - 1);
-    try testing.expectError(error.NeedsRecovery, db.Store.open(testing.allocator, io, tmp.dir, .{}));
+    const whole = try file.length();
+    try file.handle.setLength(io, whole - 1);
+    var cut = try db.Store.open(testing.allocator, io, tmp.dir, .{});
+    defer cut.deinit();
+    try testing.expectEqualStrings("saved", (try cut.get(key(0), &output)).?);
+    try testing.expectEqual(@as(u64, 1), try cut.lastBatchId());
+    try testing.expect(try file.length() < whole - 1);
 }
 
 test "losing unsynced writes preserves the last flushed batch" {
@@ -297,7 +302,7 @@ test "losing unsynced writes preserves the last flushed batch" {
     }
 }
 
-test "garbage and zero-filled tails need recovery instead of failing as corruption" {
+test "garbage and zero-filled tails are cut off on open" {
     for ([_]u8{ 0, 0xa5 }) |fill| {
         var tmp = testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -308,11 +313,62 @@ test "garbage and zero-filled tails need recovery instead of failing as corrupti
             try store.close();
         }
         const file = try support.openFile(tmp.dir, segment_name);
+        defer file.handle.close(io);
+        const committed = try file.length();
         var junk: [100]u8 = @splat(fill);
-        try file.writeAll(&junk, try file.length());
-        file.handle.close(io);
-        try testing.expectError(error.NeedsRecovery, db.Store.open(testing.allocator, io, tmp.dir, .{}));
+        try file.writeAll(&junk, committed);
+
+        var value: [128]u8 = undefined;
+        var stats: db.Stats = .{};
+        {
+            var store = try db.Store.open(testing.allocator, io, tmp.dir, .{ .stats = &stats });
+            defer store.deinit();
+            try testing.expectEqual(committed, try file.length());
+            try testing.expectEqual(@as(u64, 1), stats.recovery_attempts.load(.monotonic));
+            try testing.expectEqualStrings("saved", (try store.get(key(0), &value)).?);
+            _ = try store.write(batch(2, &.{put(1, "after")}));
+            try store.close();
+        }
+        var reopened = try db.Store.open(testing.allocator, io, tmp.dir, .{ .stats = &stats });
+        defer reopened.deinit();
+        try testing.expectEqual(@as(u64, 1), stats.recovery_attempts.load(.monotonic));
+        try testing.expectEqualStrings("saved", (try reopened.get(key(0), &value)).?);
+        try testing.expectEqualStrings("after", (try reopened.get(key(1), &value)).?);
     }
+}
+
+test "damage in front of intact frames is left for explicit recovery" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var second: u64 = 0;
+    {
+        var store = try db.Store.create(testing.allocator, io, tmp.dir, region, .{});
+        defer store.deinit();
+        _ = try store.write(batch(1, &.{put(0, "first")}));
+        second = (try store.write(batch(2, &.{put(1, "second")}))).start;
+        _ = try store.write(batch(3, &.{put(2, "third")}));
+        try store.flush();
+    }
+    const file = try support.openFile(tmp.dir, segment_name);
+    defer file.handle.close(io);
+    const length = try file.length();
+    try file.writeAll("X", second + db.frame.header_len + db.record.header_len);
+    try testing.expectError(error.NeedsRecovery, db.Store.open(testing.allocator, io, tmp.dir, .{}));
+    try testing.expectEqual(length, try file.length());
+
+    var copy = testing.tmpDir(.{});
+    defer copy.cleanup();
+    const result = try db.recovery_copy.recoverTo(testing.allocator, io, tmp.dir, copy.dir, .{});
+    try testing.expectEqual(@as(u64, 2), result.committed_batches);
+    try testing.expectEqual(@as(u64, 3), result.last_batch_id);
+    try testing.expect(result.omitted_bytes != 0);
+    try testing.expectEqual(length, try file.length());
+    var recovered = try db.Store.open(testing.allocator, io, copy.dir, .{});
+    defer recovered.deinit();
+    var value: [128]u8 = undefined;
+    try testing.expectEqualStrings("first", (try recovered.get(key(0), &value)).?);
+    try testing.expectEqual(null, try recovered.get(key(1), &value));
+    try testing.expectEqualStrings("third", (try recovered.get(key(2), &value)).?);
 }
 
 test "create never replaces an existing store" {

@@ -128,7 +128,20 @@ test "a checkpoint never covers data that later disappeared" {
     const file = try support.openFile(tmp.dir, support.segment_name);
     try file.handle.setLength(io, try file.length() - 1);
     file.handle.close(io);
+    const cut = try support.segmentLength(tmp.dir);
+    // The clean close synced those bytes, so this is lost data and not a write a crash cut short.
     try testing.expectError(error.NeedsRecovery, db.Store.open(testing.allocator, io, tmp.dir, .{}));
+    try testing.expectEqual(cut, try support.segmentLength(tmp.dir));
+
+    // Without the checkpoint nothing tells it from a torn write, which open drops.
+    try tmp.dir.deleteFile(io, "INDEX");
+    var store = try db.Store.open(testing.allocator, io, tmp.dir, .{});
+    defer store.deinit();
+    try testing.expectEqual(@as(u64, 39), try store.lastBatchId());
+    var output: [64]u8 = undefined;
+    try testing.expectEqual(@as(u8, 38), (try store.get(key(18), &output)).?[0]);
+    try testing.expectEqual(@as(u8, 19), (try store.get(key(19), &output)).?[0]);
+    try testing.expect(try support.segmentLength(tmp.dir) < cut);
 }
 
 test "checkpoints from older generations and other options are ignored" {
