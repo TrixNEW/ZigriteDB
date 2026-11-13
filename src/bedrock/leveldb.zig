@@ -75,8 +75,9 @@ pub const LogReader = struct {
             const len = std.mem.readInt(u16, header[4..6], .little);
             const kind = header[6];
             if (kind == 0 and len == 0) {
-                self.at += left_in_block;
-                continue;
+                // Preallocated space stays zero to the end of the file. Zeros with records after them are damage.
+                if (started or !std.mem.allEqual(u8, self.bytes[self.at..], 0)) return error.Corrupt;
+                return null;
             }
             if (7 + @as(usize, len) > left_in_block) return error.Corrupt;
             if (self.bytes.len - self.at - 7 < len) return null;
