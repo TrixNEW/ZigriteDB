@@ -66,6 +66,7 @@ This is a functionality check; latency thresholds belong in controlled manual ru
 | walk | read chunks along a player's path, 8-chunk radius |
 | spawn | read the 17×17 chunks around spawn |
 | update | rewrite block entities and a subchunk of a random chunk |
+| resave | write every record of a random chunk again with one subchunk changed (opt-in, see 1.4) |
 | autosave | 64 dirty chunks, then a durable barrier; 16 rounds |
 | mixed | 4 player threads for 10 s, 1 in 5 operations an update, a barrier every 250 ms |
 | compaction | full compaction after the updates |
@@ -109,6 +110,77 @@ instead of one `zg_get` per record; it matches per-record reads within noise her
 - **Sync writes to many regions.** Each region needs its own fsync, so 16 threads in
   16 regions manage 563 saves/s vs LevelDB's 1,045 (see Writers).
 - **Update tail on Zhyrr:** p99 24 µs vs 46 µs.
+
+## 1.3.1 vs 1.4 (`v1.4-ab-*.jsonl`)
+
+Same machine, WSL2 and session, ReleaseSafe, builds alternating within each repetition:
+1.3.1 (`0e7cb75`), 1.4.0 and LevelDB, all driven by the 1.4 harness. Medians with the
+range across runs in brackets where it matters.
+
+### Whole-chunk saves (`v1.4-ab-resave.jsonl`, Zhyrr, 5 runs)
+
+`phases=resave skip=1 regions=256`: every record of a random chunk is written again and
+one subchunk has changed, with `skip_unchanged` on. This is what a server's chunk save
+does, where the update phase above writes only the two records that changed.
+
+| | 1.3.1 | 1.4.0 | LevelDB |
+| --- | ---: | ---: | ---: |
+| save p50 | 30.0 µs (29.3-33.8) | 14.2 µs (12.6-14.9) | 44.8 µs |
+| save p95 | 60.1 µs | 29.3 µs | 1,182 µs |
+| save p99 | 158 µs (134-331) | 101 µs (80-114) | 1,219 µs |
+| saves/s | 19,198 | 28,906 | 2,436 |
+
+Both versions skip the same 27,987 records and write the same 924,069 bytes. 1.3.1
+compressed every record and then read the stored ones back one `pread` each to compare;
+1.4 compares first, with one read per chunk, and compresses only what changed.
+
+### Thousands of regions (`v1.4-ab-regions.jsonl`, 5 runs)
+
+Zhyrr's 16,384 chunks moved to 2,048 regions, 8 per region, with
+[`spread.py`](../spread.py), then `phases=load,resave,autosave skip=1 regions=256`.
+Random access over eight times more regions than may be open is the worst case for the
+open-region limit: nearly every operation evicts a region.
+
+| | 1.3.1 | 1.4.0 | LevelDB |
+| --- | ---: | ---: | ---: |
+| import chunks/s | 575 | 789 | 748 |
+| cold load p50 | 122 µs | 103 µs | 853 µs |
+| hot load p50 | 78.7 µs | 67.2 µs | 778 µs |
+| hot load p99 | 184 µs | 144 µs | 1,793 µs |
+| save p50 | 2,424 µs | 169 µs | 38 µs |
+| save p95 | 5.2 ms | 5.7 ms | 1.2 ms |
+| save p99 | 6.0 ms | 9.3 ms | 1.2 ms |
+| saves/s | 427 | 532 | 2,779 |
+| peak RSS | 402 MiB | 360 MiB | 374 MiB |
+
+- A save that had to evict a region with unsynced writes used to wait for that region's
+  fsync. A worker now closes it, so the median save no longer pays for it. The fsyncs
+  still happen, one region at a time, so throughput stays bound by them and the tail got
+  longer: a full queue closes inline next to the worker's own fsync.
+- LevelDB wins this workload by a wide margin on writes, since all regions share its one
+  log. A server that flushes at autosave rarely evicts unsynced regions, and one whose
+  players stay within 256 regions never does.
+- Each open region held about 205 KiB of idle scratch buffers. A world now shares one
+  pool: 1,024 open regions peak at 378 MiB against 558 MiB before, with the dataset's
+  334 MB included in both (runs with `regions=64|256|1024`, not in this folder).
+
+### The 1.2 workloads (`v1.4-ab-rave-cache8.jsonl`, `v1.4-ab-zhyrr-cache8.jsonl`, 3 runs)
+
+Rave / Zhyrr. Nothing here was meant to change, and nothing did beyond run-to-run noise.
+
+| | 1.3.1 | 1.4.0 | LevelDB |
+| --- | ---: | ---: | ---: |
+| import chunks/s | 18,354 / 44,750 | 18,405 / 50,570 | 718 / 3,993 |
+| reopen + first load | 10.4 / 7.4 ms | 9.4 / 6.8 ms | 82 / 70 ms |
+| cold load p50 | 26 / 10.9 µs | 29 / 10.5 µs | 217 / 124 µs |
+| hot load p50 | 23 / 9.1 µs | 24 / 9.6 µs | 218 / 121 µs |
+| update p50 | 2.8 / 5.5 µs | 3.2 / 4.7 µs | 11.8 / 5.4 µs |
+| update p99 | 18 / 80 µs | 21 / 51 µs | 1,152 / 35 µs |
+| autosave barrier p50 | 9.1 / 14.8 ms | 9.0 / 13.6 ms | 4.7 / 5.3 ms |
+| mixed load p99 | 102 / 117 µs | 106 / 119 µs | 876 / 962 µs |
+| compaction | 750 / 1,912 ms | 793 / 1,807 ms | 3,105 / 3,636 ms |
+| size after compaction | 23.5 / 33.0 MB | 23.5 / 33.0 MB | 11.9 / 14.6 MB |
+| peak RSS | 169 / 385 MiB | 169 / 381 MiB | 175 / 384 MiB |
 
 ## 1.1 vs 1.2 (`v1.2-*`)
 
