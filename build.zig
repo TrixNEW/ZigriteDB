@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
         .name = "zigritedb_native",
         .linkage = .dynamic,
         .root_module = native_module,
-        .version = .{ .major = 3, .minor = 3, .patch = 1 },
+        .version = .{ .major = 3, .minor = 4, .patch = 0 },
     });
     b.installArtifact(native);
     b.installFile("include/zigritedb.h", "include/zigritedb.h");
