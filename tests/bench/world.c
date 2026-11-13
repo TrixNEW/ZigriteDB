@@ -41,6 +41,7 @@ static const char *phases = "import,reopen,load,walk,update,autosave,mixed,compa
 static const char *target = "region";
 static int read_chunk = 0;
 static uint32_t max_regions = 0;
+static int skip_unchanged = 0;
 
 typedef struct {
     int leveldb;
@@ -209,6 +210,7 @@ static void openStore(Store *store, const char *path, int leveldb) {
         options.buffered = !sync_mode;
         options.cache_bytes = cache_bytes;
         if (max_regions) options.max_open_regions = max_regions;
+        options.skip_unchanged = (uint32_t)skip_unchanged;
         check(zg_open((const uint8_t *)path, strlen(path), &options, &store->zig));
         return;
     }
@@ -526,6 +528,41 @@ static void phaseUpdate(Store *store, const char *name, size_t count) {
     reportIo(name, io, count);
 }
 
+// What a server's save does: every record of the chunk is written again and one subchunk has changed.
+static void phaseResave(Store *store, size_t count) {
+    initWorkers(count);
+    workers[0].store = store;
+    uint8_t *arena = malloc(max_chunk_bytes + 1);
+    uint32_t which[MAX_RECORDS];
+    uint8_t *values[MAX_RECORDS];
+    IoCounters io = ioCounters();
+    double started = now(), saving = 0;
+    for (size_t i = 0; i < count; i++) {
+        const Chunk *chunk = &chunks[next(&workers[0].random) % chunk_count];
+        uint32_t subchunks = 0, first_sub = 0;
+        for (uint32_t r = 0; r < chunk->count; r++) {
+            if (records[chunk->first + r].tag == 0x2f && subchunks++ == 0) first_sub = r;
+        }
+        uint32_t changed = subchunks ? first_sub + next(&workers[0].random) % subchunks : 0;
+        atomic_fetch_add(&versions[chunk->first + changed], 1);
+        size_t used = 0;
+        for (uint32_t r = 0; r < chunk->count; r++) {
+            which[r] = r;
+            values[r] = arena + used;
+            expected(&records[chunk->first + r], atomic_load(&versions[chunk->first + r]), values[r]);
+            used += records[chunk->first + r].len;
+        }
+        double before = now();
+        save(store, chunk, which, chunk->count, values);
+        workers[0].samples[workers[0].calls++] = now() - before;
+        saving += workers[0].samples[workers[0].calls - 1];
+    }
+    (void)started;
+    reportSamples("resave", 1, 0, saving);
+    reportIo("resave", io, count);
+    free(arena);
+}
+
 static void phaseAutosave(Store *store) {
     enum { ROUNDS = 16, DIRTY = 64 };
     initWorkers(ROUNDS * DIRTY);
@@ -701,7 +738,7 @@ static void phaseWriters(Store *store) {
 int main(int argc, char **argv) {
     if (argc < 4) {
         fprintf(stderr, "usage: world_bench EMPTY_DIR zig|leveldb DATASET [cache=MiB] [threads=N] [ops=N] [seconds=S]\n"
-                        "       [mode=buffered|sync] [phases=a,b] [target=chunk|region|regions] [verify=0|1] [regions=N]\n");
+                        "       [mode=buffered|sync] [phases=a,b] [target=chunk|region|regions] [verify=0|1] [regions=N] [skip=0|1]\n");
         return 1;
     }
     const char *path = argv[1];
@@ -721,6 +758,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "verify")) verify = atoi(value);
         else if (!strcmp(argv[i], "read")) read_chunk = !strcmp(value, "chunk");
         else if (!strcmp(argv[i], "regions")) max_regions = (uint32_t)strtoul(value, NULL, 10);
+        else if (!strcmp(argv[i], "skip")) skip_unchanged = atoi(value) != 0;
         else return 1;
     }
     if (threads < 1 || threads > MAX_THREADS || !ops || ops > SIZE_MAX / (64 * sizeof(double)) ||
@@ -768,6 +806,10 @@ int main(int argc, char **argv) {
     }
     if (has("update")) {
         phaseUpdate(&store, "update", ops);
+        flushStore(&store);
+    }
+    if (has("resave")) {
+        phaseResave(&store, ops);
         flushStore(&store);
     }
     if (has("autosave")) phaseAutosave(&store);
