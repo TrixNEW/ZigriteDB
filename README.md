@@ -3,84 +3,45 @@
 </p>
 
 <p align="center">
-  Embedded world storage built for fast chunk saves and reads.
+  Embedded Minecraft Bedrock world storage, written in Zig.
 </p>
 
-ZigriteDB is an embedded Minecraft Bedrock world storage engine written in Zig
-for [Quark](https://github.com/Bedrock-Phanatics/Quark). It imports and exports
-Bedrock LevelDB worlds byte for byte.
+ZigriteDB is a region-based storage engine for [Quark](https://github.com/Bedrock-Phanatics/Quark), with lossless import and export of Bedrock LevelDB worlds.
 
-The v1 API is frozen at C ABI 3 and disk format 2. Keep backups of worlds you care about.
+- **Fast reads:** indexed chunk lookups and whole-chunk reads.
+- **Efficient writes:** batched, append-only storage with concurrent region I/O.
+- **Reliable storage:** checksummed records, crash recovery and compaction.
 
-## How it works
-
-A world is split into 32×32 chunk regions. Each region is its own directory of
-append-only segments, written as checksummed frames, with a small manifest naming
-the live segments. A frame is one atomic batch; a record inside it is one Bedrock
-chunk record (subchunk, biomes, block entities, ...) keyed by its chunk slot, tag
-and Y.
-
-- **Writes** batch per region and share fsyncs between concurrent writers.
-  Different regions write and flush in parallel.
-- **Reads** go through a dense in-memory index per region: one lookup finds every
-  record of a chunk. `getChunk` reads a whole chunk in one call.
-- **Checksums** validate records on read and frames on replay. CRC-32C is hardware
-  accelerated when available. Data that fails verification is refused.
-- **Reopen** loads an index checkpoint written on clean close. If it's missing or
-  doesn't match, the region is replayed from its segments, which are always the
-  source of truth.
-- **Compaction** rewrites a region in the background in chunk order once enough
-  of it is stale. Reads and writes carry on meanwhile.
-- **Everything else** in a Bedrock world (players, maps, scoreboards, unknown
-  keys) is stored as raw byte keys next to the chunks.
-
-The on-disk layout is described in [docs/format.md](docs/format.md).
+**Requirements:** Zig 0.17.0 · Linux  
+**Compatibility:** C ABI 3 · Disk format 2
 
 ## Build
-
-Requires **Zig 0.17.0** and **Linux** for storage operations.
 
 ```sh
 zig build -Doptimize=ReleaseSafe
 ```
 
-This builds `libzigritedb_native` (C API), a static Zig library and the `zigrite` tool.
+Builds the native C library, static Zig library and `zigrite` CLI.
 
-## Converting worlds
+## CLI
 
 ```sh
-zigrite import <bedrock world> <new world>   # LevelDB world -> ZigriteDB
-zigrite export <world> <new bedrock world>   # ZigriteDB -> standalone LevelDB world
-zigrite compare <bedrock db> <bedrock db>    # check two LevelDB dbs hold the same keys
-zigrite migrate <old world> <new world>      # format 1 -> format 2
-zigrite verify <world>                       # check every frame
-zigrite verify <world> <bedrock world>       # check both hold the same records and files
-zigrite compact <world>                      # compact every region
-zigrite recover <region> <empty directory>   # copy every readable frame of a damaged region
+zigrite import <bedrock-world> <world>
+zigrite export <world> <bedrock-world>
+zigrite compare <bedrock-db> <bedrock-db>
+zigrite migrate <old-world> <new-world>
+zigrite verify <world> [bedrock-world]
+zigrite compact <world>
+zigrite recover <region> <empty-directory>
 ```
 
-Import never modifies the source, and every command that creates a world builds it
-under a temporary name and only renames it into place once it is complete and
-synced. Import and export then read the source again and compare every record and
-world file byte for byte with the result before publishing it, so a world that
-appears was checked. A destination inside the source is refused, and so is a source
-that sits where the temporary directory would go, since that directory is cleared first.
-Export and verification need the world's `ZIGRITE` file and never create it. A round trip reproduces every LevelDB key and value exactly;
-`level.dat` and the other world files are carried along, and unknown keys are kept
-as they are. Exported worlds open in Bedrock and PMMP without ZigriteDB.
+Import and export preserve and verify Bedrock keys, values and world files without modifying the source. Back up important worlds before migration.
 
-Conversions hold LevelDB's own lock on `db/LOCK`, so a world a game or server has
-open is refused rather than read half-written. Symlinks inside a world are refused
-too. A damaged LevelDB table or log fails the import instead of skipping records, and
-a format 1 world with damage in front of a committed batch fails its migration.
-Export holds every key in memory to sort it, about 60 bytes per record. The same
-conversions are in the C API as `zg_import`, `zg_export`, `zg_verify_bedrock`,
-`zg_verify` and `zg_migrate`.
+## API
 
-## Zig API
+### Zig
 
-Place a checkout at `vendor/zigritedb` and add this to your application's
-`build.zig`, using its existing `exe`, `target`, and `optimize`:
+Add ZigriteDB to your `build.zig`:
 
 ```zig
 exe.root_module.addImport("zigritedb", b.createModule(.{
@@ -89,8 +50,6 @@ exe.root_module.addImport("zigritedb", b.createModule(.{
     .optimize = optimize,
 }));
 ```
-
-Save and read a chunk:
 
 ```zig
 const std = @import("std");
@@ -107,7 +66,10 @@ pub fn main() !void {
     var world = try db.World.open(allocator, io, dir, .{});
     defer world.deinit();
 
-    const key: db.Key = .{ .dimension = 0, .chunk_x = 4, .chunk_z = 8, .component = .subchunk, .subchunk_y = -2 };
+    const key: db.Key = .{
+        .dimension = 0, .chunk_x = 4, .chunk_z = 8,
+        .component = .subchunk, .subchunk_y = -2,
+    };
     _ = try world.write(.{ .entries = &.{
         .put(key, "subchunk bytes"),
         .put(.{ .dimension = 0, .chunk_x = 4, .chunk_z = 8, .component = .version }, "\x28"),
@@ -117,114 +79,40 @@ pub fn main() !void {
     var records: [64]db.ChunkRecord = undefined;
     var result: db.ChunkResult = undefined;
     try world.getChunk(0, 4, 8, &buffer, &records, &result);
-    for (records[0..result.count]) |record| std.debug.print("{} {d}\n", .{ record.component, record.value.len });
-
     try world.close();
 }
 ```
 
-A batch is atomic and stays within one region. `writeGroup` commits up to 64 batches
-of one region and returns once they are durable. Writes are buffered by default:
-`flush` makes completed writes durable across regions and is the save barrier;
-`close` does the same at shutdown. Crash atomicity remains per region. Set
-`.region = .{ .durability = .sync }` to sync every write.
-`deinit` only frees memory. Raw Bedrock keys go through `db.aux.get`/`db.aux.put`. See
-[World](src/world/world.zig) for the rest.
+### C
 
-The allocator and I/O implementation must be thread-safe even for a single caller,
-since a world closes evicted regions on a worker thread. Concurrent calls need separate
-output buffers. Finish all calls before `close` or `deinit`, and keep the world at one
-address once it is in use.
+Link `libzigritedb_native` and include [`zigritedb.h`](include/zigritedb.h).
 
-Compaction runs when you call `compact`, or set `World.compactor` to schedule it
-yourself. The C API schedules it automatically.
-
-## C API
-
-Link `libzigritedb_native` and include [zigritedb.h](include/zigritedb.h). Both
-install to `zig-out/lib` and `zig-out/include`.
-
-The ABI is version 3. Compared to version 2:
-
-- Components are Bedrock record tags (`ZG_SUBCHUNK = 0x2f`, ...); any tag is accepted.
-- `zg_get_chunk` reads a whole chunk; `zg_aux_get`/`zg_aux_put`/`zg_aux_delete`
-  handle raw Bedrock keys.
-- `zg_options` gained `compact_min_bytes` and `compact_live_percent` (0 turns
-  automatic compaction off). `zg_options_init` fills in the defaults.
-- A batch ID of 0 takes the region's next ID.
-- Format 1 worlds fail to open with `ZG_NEEDS_MIGRATION`; run `zigrite migrate`.
-
-Version 2 clients must be rebuilt.
-
-Calls on one handle may run concurrently with separate caller-owned buffers.
-Wait for all calls to return before `zg_close`, which consumes the handle even on
-error. Initialize options with `zg_options_init`; `max_open_regions` bounds the
-region cache without changing the ABI 3 struct layout.
-
-## Durability
-
-| Mode | Acknowledged after |
+| Operation | API |
 | --- | --- |
-| Buffered write (default) | in memory; durable after the next `flush` or `close` |
-| Sync write | fsync |
-| `writeGroup` / `zg_write_group` | fsync, once for the whole group |
-| `flush` / `zg_flush` | fsync of every dirty region, run concurrently |
+| Chunk I/O | `zg_get_chunk`, `zg_write_group` |
+| Raw keys | `zg_aux_get`, `zg_aux_put`, `zg_aux_delete` |
+| Persistence | `zg_flush`, `zg_close` |
+| World tools | `zg_import`, `zg_export`, `zg_verify`, `zg_migrate` |
 
-Concurrent writers to a region share one fsync. A failed fsync or manifest update
-stops that region's writer instead of guessing what reached the disk. A failed write
-is cut back off the file, and if the disk was full the region carries on once there's
-space again. A region evicted from the open-region cache with unsynced writes is
-synced by a worker thread, so whoever needed its slot doesn't wait for the fsync;
-`flush` waits for it, and reports it if it failed.
-
-After a crash, a region whose last write was cut short opens without it: open truncates
-the unreadable tail once it has checked that no intact frame follows and that no
-checkpoint of a clean close covers those bytes. Anything else is lost committed data, so
-the region refuses to open (`ZG_NEEDS_RECOVERY`) and is left untouched;
-`zigrite recover` or `zg_recover_region` then copies every frame that still verifies
-into a new directory.
-
-Atomicity is per batch, and so per region. A crash during `flush` can leave some
-regions saved and others not. A world-wide log would close that gap but writes every
-byte twice, and measured fsync costs didn't justify it (see the benchmark notes).
+Writes are buffered by default; call `flush` or `close` to make them durable. `writeGroup` commits durably. Atomicity is per region, not world-wide. See [`zigritedb.h`](include/zigritedb.h) and the [disk format](docs/format.md).
 
 ## Benchmarks
 
-Real Bedrock worlds replayed through ZigriteDB's C API and the
-[LevelDB fork](https://github.com/pmmp/leveldb) PMMP uses, with PMMP's compression and
-block size, an 8 MiB cache and checksums verified on both. Medians of 5 runs on WSL2,
-Ryzen 5 5500, ReleaseSafe, 1.2.0. **Native code only:** no PHP, NBT or server is involved.
+**16k-chunk Bedrock world** · Ryzen 5 5500 · WSL2 · ReleaseSafe · median of 5 runs
 
-| World 1 (2.8k chunks) / World 2 (16k chunks) | LevelDB | ZigriteDB |
+| Metric | LevelDB | ZigriteDB |
 | --- | ---: | ---: |
-| Import | 505 / 4,086 chunks/s | 13,748 / 32,719 chunks/s |
-| Reopen and first chunk | 95 / 61 ms | 9.4 / 6.4 ms |
-| Chunk load p50, cold | 248 / 130 µs | 28 / 9.9 µs |
-| Chunk load p99, 4 players + autosave | 1,382 / 924 µs | 274 / 132 µs |
-| Chunk update p50 / p99 | 1,050 / 5.4, 1,165 / 31 µs | 2.9 / 5.9, 20 / 100 µs |
-| Autosave barrier p50 | 5.0 / 4.8 ms | 9.2 / 15.8 ms |
-| Full compaction | 3.6 / 3.5 s | 1.0 / 2.1 s |
-| Size after compaction | 11.9 / 14.6 MB | 23.5 / 33.0 MB |
-| First write into a new region | | 0.56 ms (was 23 ms) |
+| Import | 4,086 chunks/s | **32,719 chunks/s** |
+| Reopen + first chunk | 61 ms | **6.4 ms** |
+| Cold chunk load (p50) | 130 µs | **9.9 µs** |
+| Mixed load + autosave (p99) | 924 µs | **132 µs** |
+| Autosave barrier (p50) | **4.8 ms** | 15.8 ms |
+| Full compaction | 3.5 s | **2.1 s** |
+| Size after compaction | **14.6 MB** | 33.0 MB |
 
-LevelDB wins on size (zlib over 64 KiB blocks vs per-record LZ4) and on save barriers,
-where it syncs one log and ZigriteDB syncs every dirty region. The 4-player mixed phase
-swings by 2x between runs under WSL2 for every engine and build, so treat its tail
-figures as rough. Setup, every phase, writer sweeps, the format 1
-comparison and raw data are in [tests/bench/results](tests/bench/results/README.md).
+Native C API benchmarks, not end-to-end server measurements. [Full results and methodology](tests/bench/results/README.md).
 
-## Limitations
-
-- Linux only for storage. Other targets build but can't open worlds.
-- Benchmarks so far are from WSL2, not native Linux, and drive the C API directly rather
-  than a server through [ext-zigritedb](https://github.com/Bedrock-Phanatics/ext-zigritedb).
-- A region holds at most 255 segments of up to 4 GiB each.
-- Files are bigger than LevelDB's, since LZ4 trades ratio for speed.
-- Saves are atomic per region, not across regions (see Durability).
-- A region's first sync also publishes it: four extra fsyncs, run alongside the other
-  regions at a flush. Creating it costs none, so the first buffered write stays fast.
-
-## Testing
+## Tests
 
 ```sh
 zig build test
@@ -233,14 +121,8 @@ zig build test -Doptimize=ReleaseFast
 zig build fuzz --fuzz=10000
 ```
 
-Native crash, fault and workload checks live in [tests/native](tests/native),
-including multi-region flush faults and repeated C API lifecycle/FD checks.
-See the [release checks](tests/native/README.md) for the concurrent model soak,
-Valgrind heap/resource validation and native Linux release gate.
-ReleaseFast runs native smoke, workloads and concurrency without repeating the
-full fault matrix. Benchmark CI checks contents and tooling, without speed limits.
-See [CI](.github/workflows/ci.yml) for the full set.
+See [native release checks](tests/native/README.md) and [CI](.github/workflows/ci.yml).
 
 ## License
 
-See [LICENSE](LICENSE).
+[LICENSE](LICENSE)
