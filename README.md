@@ -100,7 +100,7 @@ Writes are buffered by default; call `flush` or `close` to make them durable. `w
 
 **16k-chunk Bedrock world** · Ryzen 5 5500 · WSL2 · ReleaseSafe · median of 5 runs
 
-| Metric | LevelDB | ZigriteDB |
+| Metric | LevelDB (PMMP Fork) | ZigriteDB |
 | --- | ---: | ---: |
 | Import | 4,086 chunks/s | **32,719 chunks/s** |
 | Reopen + first chunk | 61 ms | **6.4 ms** |
