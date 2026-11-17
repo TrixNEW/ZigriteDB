@@ -71,8 +71,12 @@ fn readBucket(world: *World, allocator: std.mem.Allocator, key: Key) !?[]u8 {
 }
 
 pub fn get(world: *World, allocator: std.mem.Allocator, key: []const u8) !?[]u8 {
-    if (key.len > record.max_value_len) return error.BatchTooLarge;
     if (parseKey(key)) |chunk| return readBucket(world, allocator, chunk);
+    return getBucketEntry(world, allocator, key);
+}
+
+pub fn getBucketEntry(world: *World, allocator: std.mem.Allocator, key: []const u8) !?[]u8 {
+    if (key.len > record.max_value_len) return error.BatchTooLarge;
     const bytes = (try readBucket(world, allocator, bucket(key))) orelse return null;
     defer allocator.free(bytes);
     var entries: Entries = .{ .bytes = bytes };
@@ -185,6 +189,65 @@ test "chunk-shaped keys go to their chunk record" {
     try put(&world, allocator, "player_10", null);
     try std.testing.expectEqual(null, try get(&world, allocator, "player_10"));
     try world.close();
+}
+
+test "export preserves legacy auxiliary Quark metadata and rejects conflicting copies" {
+    const bedrock = @import("../bedrock/convert.zig");
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "zigrite", .default_dir);
+    const source = try tmp.dir.openDir(io, "zigrite", .{ .iterate = true });
+    defer source.close(io);
+    const key: Key = .{ .dimension = 1, .chunk_x = -12, .chunk_z = 35, .component = .quark_metadata };
+    var key_bytes: [16]u8 = undefined;
+    const raw_key = bedrock.levelKey(key, &key_bytes);
+    var bucket_data: std.ArrayListUnmanaged(u8) = .empty;
+    defer bucket_data.deinit(allocator);
+    try append(&bucket_data, allocator, raw_key, "saved");
+
+    for ([_][]const u8{ "legacy", "equal", "conflict" }, 0..) |destination, i| {
+        {
+            var world = try World.open(allocator, io, source, .{});
+            defer world.deinit();
+            switch (i) {
+                0 => _ = try world.write(.{ .entries = &.{.{ .key = bucket(raw_key), .value = bucket_data.items }} }),
+                1 => try put(&world, allocator, raw_key, "saved"),
+                else => {
+                    bucket_data.clearRetainingCapacity();
+                    try append(&bucket_data, allocator, raw_key, "stale");
+                    _ = try world.write(.{ .entries = &.{.{ .key = bucket(raw_key), .value = bucket_data.items }} });
+                },
+            }
+            try world.close();
+        }
+
+        var problem: bedrock.Problem = .{};
+        const result = bedrock.exportWorld(allocator, io, tmp.dir, "zigrite", destination, .none, &problem);
+        if (i == 2) {
+            try std.testing.expectError(error.VerificationFailed, result);
+            try std.testing.expect(std.mem.indexOf(u8, problem.text(), "different chunk and auxiliary copies") != null);
+            try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, destination, .{}));
+            const equal = try tmp.dir.openDir(io, "equal", .{ .iterate = true });
+            defer equal.close(io);
+            try std.testing.expectError(error.VerificationFailed, bedrock.verify(allocator, io, equal, source, null));
+        } else {
+            const counts = try result;
+            try std.testing.expectEqual(@as(u64, i), counts.chunk_records);
+            try std.testing.expectEqual(@as(u64, 1 - i), counts.aux_records);
+            const destination_world = try tmp.dir.openDir(io, destination, .{ .iterate = true });
+            defer destination_world.close(io);
+            const dest_db = try destination_world.openDir(io, "db", .{ .iterate = true });
+            defer dest_db.close(io);
+            var reader = try @import("../bedrock/leveldb.zig").Reader.open(allocator, io, dest_db);
+            defer reader.deinit();
+            const item = (try reader.next()).?;
+            try std.testing.expectEqualSlices(u8, raw_key, item[0]);
+            try std.testing.expectEqualStrings("saved", item[1]);
+            try std.testing.expectEqual(null, try reader.next());
+        }
+    }
 }
 
 test "a shrinking auxiliary read returns an allocation of the right size" {

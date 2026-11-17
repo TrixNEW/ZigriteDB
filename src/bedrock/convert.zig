@@ -278,6 +278,8 @@ pub fn exportWorld(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir,
 
         // ponytail: every key is held in memory to sort it into LevelDB order, about 60 bytes per record
         var list: std.ArrayListUnmanaged(Exported) = .empty;
+        var native_metadata: []u8 = &.{};
+        defer allocator.free(native_metadata);
         const regions = try world.regions(allocator);
         defer allocator.free(regions);
         for (regions) |region| {
@@ -287,7 +289,10 @@ pub fn exportWorld(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir,
                 for (found) |bucket| {
                     const bytes = (try world.get(bucket, try buffer(&world, keys, bucket))) orelse return error.FileChanged;
                     var entries: aux.Entries = .{ .bytes = bytes };
-                    while (try entries.next()) |entry| try list.append(keys, .{ .key = entry[0], .source = .{ .aux = bucket } });
+                    while (try entries.next()) |entry| {
+                        if (try hasMatchingNativeMetadata(&world, allocator, entry, &native_metadata, problem)) continue;
+                        try list.append(keys, .{ .key = entry[0], .source = .{ .aux = bucket } });
+                    }
                 }
                 continue;
             }
@@ -342,6 +347,17 @@ fn auxValue(key: []const u8) []const u8 {
     return (after + 4)[0..len];
 }
 
+fn hasMatchingNativeMetadata(world: *World, allocator: std.mem.Allocator, entry: struct { []const u8, []const u8 }, scratch: *[]u8, problem: ?*Problem) !bool {
+    const key = parseKey(entry[0]) orelse return false;
+    if (key.component != .quark_metadata) return false;
+    const native = (try readSized(world, allocator, key, scratch)) orelse return false;
+    if (!std.mem.eql(u8, native, entry[1])) {
+        Problem.set(problem, "the ZigriteDB world holds different chunk and auxiliary copies of Quark metadata record {x}", .{entry[0]});
+        return error.VerificationFailed;
+    }
+    return true;
+}
+
 /// Checks that a ZigriteDB world holds exactly the records of a Bedrock LevelDB world, byte for byte, and the same
 /// world files. Fails with error.VerificationFailed and a Problem naming the first difference.
 pub fn verify(allocator: std.mem.Allocator, io: std.Io, level_world: std.Io.Dir, zigrite_world: std.Io.Dir, problem: ?*Problem) !Result {
@@ -368,19 +384,25 @@ fn verifyOpen(allocator: std.mem.Allocator, io: std.Io, level_world: std.Io.Dir,
             const key, const expected = item;
             result.bytes += expected.len;
             if (parseKey(key)) |chunk| {
-                result.chunk_records += 1;
                 const stored = try readSized(&world, allocator, chunk, &value);
-                if (stored == null or !std.mem.eql(u8, stored.?, expected)) return mismatch(problem, key, stored == null);
-            } else {
-                result.aux_records += 1;
-                const stored = try aux.get(&world, allocator, key);
-                defer if (stored) |bytes| allocator.free(bytes);
-                if (stored == null or !std.mem.eql(u8, stored.?, expected)) return mismatch(problem, key, stored == null);
+                if (stored) |bytes| {
+                    if (!std.mem.eql(u8, bytes, expected)) return mismatch(problem, key, false);
+                    result.chunk_records += 1;
+                    continue;
+                }
+                if (chunk.component != .quark_metadata) return mismatch(problem, key, true);
+                // Older converters put Quark metadata in the auxiliary bucket.
             }
+            const stored = try aux.getBucketEntry(&world, allocator, key);
+            defer if (stored) |bytes| allocator.free(bytes);
+            if (stored == null or !std.mem.eql(u8, stored.?, expected)) return mismatch(problem, key, stored == null);
+            result.aux_records += 1;
         }
 
         var chunk_records: u64 = 0;
         var aux_records: u64 = 0;
+        var native_metadata: []u8 = &.{};
+        defer allocator.free(native_metadata);
         const regions = try world.regions(allocator);
         defer allocator.free(regions);
         for (regions) |region| {
@@ -393,7 +415,10 @@ fn verifyOpen(allocator: std.mem.Allocator, io: std.Io, level_world: std.Io.Dir,
             for (found) |bucket| {
                 const bytes = (try readSized(&world, allocator, bucket, &value)) orelse return error.FileChanged;
                 var entries: aux.Entries = .{ .bytes = bytes };
-                while (try entries.next()) |_| aux_records += 1;
+                while (try entries.next()) |entry| {
+                    if (try hasMatchingNativeMetadata(&world, allocator, entry, &native_metadata, problem)) continue;
+                    aux_records += 1;
+                }
             }
         }
         if (chunk_records != result.chunk_records or aux_records != result.aux_records) {
