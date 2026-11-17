@@ -32,6 +32,7 @@ fn buildWorld(arena: std.mem.Allocator, parent: std.Io.Dir, expected: *Expected)
                 try keys.append(arena, try arena.dupe(u8, chunkKey(x, z, dim, 0x2b, null, &buffer)));
                 for ([_]i8{ -4, -1, 0, 7, 19 }) |y| try keys.append(arena, try arena.dupe(u8, chunkKey(x, z, dim, 0x2f, y, &buffer)));
                 try keys.append(arena, try arena.dupe(u8, chunkKey(x, z, dim, 0x80, null, &buffer)));
+                try keys.append(arena, try arena.dupe(u8, chunkKey(x, z, dim, 0x7f, null, &buffer)));
             }
         }
     }
@@ -137,7 +138,9 @@ test "import and export keep every key, value and world file" {
         var records: [16]db.ChunkRecord = undefined;
         var result: db.ChunkResult = undefined;
         try world.getChunk(1, 31, 5, output, &records, &result);
-        try testing.expectEqual(@as(usize, 8), result.count);
+        try testing.expectEqual(@as(usize, 9), result.count);
+        const metadata = expected.get(chunkKey(31, 5, 1, 0x7f, null, &buffer)).?;
+        try testing.expectEqualSlices(u8, metadata, (try world.get(.{ .dimension = 1, .chunk_x = 31, .chunk_z = 5, .component = .quark_metadata }, output)).?);
         try world.close();
     }
 

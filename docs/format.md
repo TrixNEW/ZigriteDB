@@ -25,7 +25,8 @@ coordinates.
 
 A key is a chunk position, a component and, for subchunks only, a signed Y byte.
 Components are Bedrock's chunk record tags (`0x2b` Data3D, `0x2c` Version,
-`0x2f` SubChunkPrefix, `0x31` BlockEntity, `0x32` Entity, ...). Any byte is accepted, so
+`0x2f` SubChunkPrefix, `0x31` BlockEntity, `0x32` Entity, ...) plus `0x7f`, Quark's chunk
+metadata. Any byte is accepted, so
 future tags need no format change. Tags from `0x80` up are reserved for Zigrite;
 `0x80` holds Bedrock's per-chunk `digp` record.
 

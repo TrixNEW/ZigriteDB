@@ -25,7 +25,7 @@ pub const Result = struct {
 pub const Problem = stage.Problem;
 
 fn chunkTag(tag: u8) bool {
-    return (tag >= 0x2b and tag <= 0x41) or tag == 0x76;
+    return (tag >= 0x2b and tag <= 0x41) or tag == 0x76 or tag == @backingInt(Component.quark_metadata);
 }
 
 pub fn parseKey(bytes: []const u8) ?Key {
@@ -513,6 +513,8 @@ test "chunk keys map both ways and everything else is left alone" {
         &.{ 1, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff, 0x2f, 0xfc },
         &.{ 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0x2b },
         &.{ 1, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 0x2f, 7 },
+        &.{ 1, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff, 0x7f },
+        &.{ 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0x7f },
         "digp" ++ &[_]u8{ 1, 0, 0, 0, 2, 0, 0, 0 },
         "digp" ++ &[_]u8{ 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0 },
     };
@@ -524,6 +526,7 @@ test "chunk keys map both ways and everything else is left alone" {
         &.{ 1, 0, 0, 0, 2, 0, 0, 0, 0x2f },
         &.{ 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0x2c },
         &.{ 1, 0, 0, 0, 2, 0, 0, 0, 0x99 },
+        &.{ 1, 0, 0, 0, 2, 0, 0, 0, 0x7f, 0 },
         "digp" ++ &[_]u8{ 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0 },
         "actorprefix" ++ &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 },
     };

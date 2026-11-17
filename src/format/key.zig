@@ -25,6 +25,8 @@ pub const Component = enum(u8) {
     blending_data = 0x40,
     actor_digest_version = 0x41,
     legacy_version = 0x76,
+    /// Quark's per-chunk world metadata.
+    quark_metadata = 0x7f,
     actor_digest = 0x80,
     _,
 };
